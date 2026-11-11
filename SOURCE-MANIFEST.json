@@ -35,8 +35,8 @@
     },
     {
       "path": "app.py",
-      "sha256": "105d4aeb955b0c90e6b78310c13c405fd3a28c3dcf2d78fce5b4953c95a53aec",
-      "bytes": 53731
+      "sha256": "91e3fe591675de5f5e397a0a5382c97897cb32e1e35ded68dcd62994e8dc5ee7",
+      "bytes": 53868
     },
     {
       "path": "compose.yaml",
@@ -50,8 +50,8 @@
     },
     {
       "path": "docs/COMPLETE-GUIDE.md",
-      "sha256": "1d307bd863388d379ef24d585e4bbf3f614bd563f568a3fb92d7b994a1a78792",
-      "bytes": 44282
+      "sha256": "acd80f84d4d27011ac7fecbc23728dcbab9ed5ed9cf8dc2f7c1fc64142c80dea",
+      "bytes": 44549
     },
     {
       "path": "docs/EMPLOYER-BOARDS.md",
@@ -225,8 +225,8 @@
     },
     {
       "path": "test_prototype.py",
-      "sha256": "ee562a1e0598bd12b6209667a58ffedabf4f190485273ff4b7a4a61073139f44",
-      "bytes": 11859
+      "sha256": "18876049e8452caa2674fe45c122273a8b9cc55da1d6066d800f59b2388b080a",
+      "bytes": 12905
     },
     {
       "path": "workspace-browser-test.cjs",

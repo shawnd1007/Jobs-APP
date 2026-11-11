@@ -196,15 +196,15 @@ A range is not a promised offer. Missing pay is a review question. A refreshed e
 
 ### Title and skill score
 
-A recognized title phrase starts the score at 45; other titles start at 20. Configured skill groups add points when any of their terms occurs in the title/description. Each group contributes once. Selected credential, clinical-domain, seniority and degree patterns flag possible gaps and subtract points. Uncertain or rejected location also reduces the score. The result is clamped between 0 and 100.
+The profile fit score uses the same scale across job families.
 
-For example, a group can read:
+| Component | Points | Evidence |
+| --- | ---: | --- |
+| Target role | 45 | A configured role phrase appears in the job title. |
+| Selected skills | Up to 30 | Each distinct selected skill mentioned in the title or description adds 8 points, up to the cap. |
+| Skill groups | Up to 25 | Each configured group contributes its weight once when the title or description mentions a group term. |
 
-```text
-Practical technology | 12 | docker, linux, api, network, sql
-```
-
-That is a transparent keyword rule. Changing the profile paragraph does not change that rule; changing its terms or weight does. Profile prose is separately used for AI reviews.
+Job details explain each component. A posting with thin or missing text offers less evidence. Keyword matches can indicate which duties to read first. The candidate can check which tasks they have performed, what outcomes they can describe, and which tools or requirements they still need to verify. The app checks location and pay separately when deciding whether to qualify a listing. AI advice can compare the posting with the candidate's written experience and identify questions to resolve.
 
 The automatic Confirmed queue requires an open listing, eligible location, qualifying salary policy, a recognized role phrase and a score of at least 55. `finalize()` then checks application-page evidence; failures return it to review. Dashboard recalculation does not promote a previously unconfirmed record into verified status simply because its score changed.
 

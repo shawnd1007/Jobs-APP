@@ -135,6 +135,21 @@ class PrototypeTests(unittest.TestCase):
         cfg['excluded_title_terms']=['specialist']
         self.assertEqual(app.assess(dict(j),cfg)['queue'],'Excluded')
 
+    def test_role_fit_is_portable_and_independent_of_eligibility(self):
+        cfg = app.config()
+        cfg.update(categories=['lab technician'], preferred_skills=['microscopy', 'c'],
+                   skill_groups=[dict(label='Sample preparation', terms=['sample preparation'], points=25)])
+        listing = dict(title='Lab-Technician', description='Microscopy, sample preparation, C++.',
+                       location='Remote United States', availability='Open')
+        eligible = app.assess(dict(listing), cfg)
+        other_location = app.assess(dict(listing, location='Berlin, Germany'), cfg)
+        self.assertEqual(eligible['score_breakdown'],
+                         dict(target_role=45, selected_skills=8, skill_groups=25))
+        self.assertEqual(eligible['matched_skills'], ['microscopy'])
+        self.assertEqual(eligible['score'], other_location['score'])
+        unrelated = app.assess(dict(listing, title='Lab Technicianship Coordinator'), cfg)
+        self.assertEqual(unrelated['score_breakdown']['target_role'], 0)
+
     def test_watched_board_is_retained_without_matching_jobs(self):
         cfg=app.config();cfg.update(additional_boards={},public_web_search_enabled=False,firecrawl_enabled=False,generic_urls_per_run=0,request_delay_seconds=0)
         with app.connect() as c:

@@ -256,29 +256,45 @@ def assess(j,cfg):
             lo,hi=[int(v.replace(',','')) for v in ranges[0]]
             if 30000<=lo<=hi<=500000:j.update(salary_min=lo,salary_max=hi,salary_currency='USD',salary_period='year',salary_type='base',salary_text=f'${lo:,} – ${hi:,} annual base (employer description)')
     salary=base_salary(j)
-    category=next((x for x in cfg['categories'] if x in title),'Other / Review')
-    relevant=category!='Other / Review'
-    score=45 if relevant else 20; reasons=[]
-    groups=[('billing|revenue assurance|revenue protection|reconciliation|revenue leakage','Enterprise billing, revenue protection and reconciliation',18),('financial|banking|credit|collections|compliance|risk','Finance, banking and investigations',12),('excel|power query|pivot|vba','Advanced Excel and reporting',10),('process improvement|operations|client|customer success','Operations and client experience',8)]
-    if cfg.get('skill_groups'):
-        for group in cfg['skill_groups']:
-            if any(term.lower() in text for term in group['terms']):score+=group['points'];reasons.append(group['label'])
-    else:
-        for pattern,label,points in groups:
-            if re.search(pattern,text): score+=points; reasons.append(label)
-    preferred_skills = dict.fromkeys(skill.strip().lower() for skill in cfg.get('preferred_skills', []) if skill.strip())
-    matched_skills = [skill for skill in preferred_skills if re.search(r'(?<!\w)'+re.escape(skill)+r'(?!\w)', text)]
+    # Match complete terms while allowing common punctuation between words.
+    def words(value):
+        return " " + " ".join(re.findall(r"\w+|[+#]+", value.casefold())) + " "
+
+    title_words = words(title)
+    posting_words = words(title + " " + desc)
+    category = next((term for term in cfg['categories']
+                     if term.strip() and words(term) in title_words), 'Other / Review')
+    relevant = category != 'Other / Review'
+    selected = dict.fromkeys(skill.strip().lower() for skill in cfg.get('preferred_skills', [])
+                             if skill.strip())
+    # Keep literal skill boundaries so C, C++, and C# remain distinct.
+    matched_skills = [skill for skill in selected
+                      if re.search(r'(?<![\w+#])' + re.escape(skill) + r'(?![\w+#])', text)]
+    matched_groups = [group for group in cfg.get('skill_groups', [])
+                      if any(term.strip() and words(term) in posting_words for term in group['terms'])]
+    breakdown = {
+        'target_role': 45 if relevant else 0,
+        'selected_skills': min(30, len(matched_skills) * 8),
+        'skill_groups': min(25, sum(group['points'] for group in matched_groups)),
+    }
+    score = sum(breakdown.values())
+    reasons = [f"Target role: {category}"] if relevant else []
     if matched_skills:
-        score += min(24, len(matched_skills) * 8)
-        reasons.append('Selected skills: ' + ', '.join(matched_skills))
-    j['matched_skills'] = matched_skills
-    j['matched_groups'] = reasons.copy()
-    gaps=[]
-    for pattern,label in [(r'\bcpa\b|\bcfa\b','professional certification'),(r'clinical|nursing','clinical domain'),(r'director|vice president|\bvp\b','seniority'),(r"bachelor|master|degree",'degree requirements: confirm equivalent experience')]:
-        if re.search(pattern,text): gaps.append(label); score-=7
-    j['match_gaps'] = gaps
-    if eligible!='Eligible': score-=10
-    j.update(category=category,score=max(0,min(100,score)),eligibility=eligible,explanation='Relevant: '+('; '.join(reasons) or 'limited clear overlap')+'. Confirm gaps: '+('; '.join(gaps) or 'review full requirements')+'. Rule-based assessment using supplied profile; no credentials inferred.')
+        reasons.append("Selected skills: " + ", ".join(matched_skills))
+    reasons.extend(group['label'] for group in matched_groups)
+    gaps = [] if desc.strip() else ['Employer description missing. Review the posting for duties and requirements.']
+    j.update(
+        category=category, score=score, eligibility=eligible, score_breakdown=breakdown,
+        matched_skills=matched_skills, matched_groups=[group['label'] for group in matched_groups],
+        match_gaps=gaps,
+        explanation=(
+            f"Profile fit {score}/100. Target role {breakdown['target_role']}/45, "
+            f"selected skills {breakdown['selected_skills']}/30, "
+            f"skill groups {breakdown['skill_groups']}/25. "
+            + (". ".join(reasons) + "." if reasons else "No configured role or skills found in the posting.")
+            + " Review duties and requirements in the employer posting."
+        ),
+    )
     j['queue']='Confirmed' if j.get('availability')=='Open' and eligible=='Eligible' and salary_qualifies(j,cfg) and relevant and j['score']>=55 else 'Review'
     if any(term.lower() in title for term in cfg.get('excluded_title_terms',[])):j['queue']='Excluded';j['eligibility']='Excluded title preference'
     if salary is not None and salary<cfg['salary_floor']: j['queue']='Excluded';j['eligibility']='Salary below minimum'
@@ -494,7 +510,7 @@ def run_pipeline():
                         if new_count>=cfg['max_new_candidates']:continue
                         j = assess(j, cfg)
                         matched = prototype.matching_searches(service(), j, searches)
-                        role_match = any(cat in j['title'].lower() for cat in cfg['categories'])
+                        role_match = j['category'] != 'Other / Review'
                         location_match = j['location_eligibility'] in discovery_locations(cfg)
                         if not matched:
                             if role_match and not location_match:
