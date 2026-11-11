@@ -25,7 +25,7 @@ final class Workspace {
 
     init(isSample: Bool = false) {
         self.isSample = isSample
-        if isSample { dashboard = SampleWorkspace.dashboard() }
+        if isSample { dashboard = SampleWorkspace.restore() }
     }
 
     func connect(to address: String) {
@@ -104,7 +104,13 @@ final class Workspace {
         guard var snapshot = dashboard, let index = snapshot.jobs.firstIndex(where: { $0.id == id })
         else { throw DashboardAPI.ServerError(status: 404, message: "Sample job unavailable.") }
         try change(&snapshot.jobs[index])
+        try SampleWorkspace.save(snapshot.jobs)
         dashboard = snapshot
+    }
+
+    func resetSample() {
+        guard isSample else { return }
+        dashboard = SampleWorkspace.reset()
     }
 
     func startSearch() async {
@@ -127,6 +133,7 @@ private struct WorkspaceView: View {
     @State private var editingServer = false
 
     @State private var sample: Workspace?
+    @State private var confirmingSampleReset = false
     @State private var selectedTab: Tab = .forYou
 
     private enum Tab: Hashable { case forYou, browse, myJobs, search, settings }
@@ -201,8 +208,11 @@ private struct WorkspaceView: View {
                 if current.isSample {
                     List {
                         Section("Sample Workspace") {
-                            Text("These listings are fictional. Changes here last until you leave the sample workspace.")
+                            Text("These listings are fictional. Your sample progress stays on this iPhone.")
                             Button("Connect to your Mac", systemImage: "desktopcomputer") { editingServer = true }
+                            Button("Reset Sample Progress", role: .destructive) {
+                                confirmingSampleReset = true
+                            }
                             Button("Leave Sample Workspace") {
                                 selectedTab = .forYou
                                 sample = nil
@@ -210,6 +220,17 @@ private struct WorkspaceView: View {
                         }
                     }
                     .navigationTitle("Settings")
+                    .confirmationDialog("Reset sample progress?", isPresented: $confirmingSampleReset,
+                                        titleVisibility: .visible) {
+                        Button("Reset Sample Progress", role: .destructive) {
+                            current.resetSample()
+                            // Recreate the sample tabs so stale Undo actions cannot affect a new session.
+                            sample = nil
+                            selectedTab = .forYou
+                        }
+                    } message: {
+                        Text("This clears sample saves, passes, notes and application dates.")
+                    }
                 } else {
                     PreferencesScreen(workspace: current) { editingServer = true }
                         .workspaceNotice(current)

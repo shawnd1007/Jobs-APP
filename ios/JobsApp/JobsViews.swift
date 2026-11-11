@@ -259,46 +259,60 @@ struct JobList: View {
 
     var body: some View {
         let jobs = workspace.dashboard?.jobs ?? []
-        let visible = jobs.filter {
-            let inBucket: Bool
-            if trackingOnly && filters.followUps {
-                inBucket = $0.interest?.state != "passed" && $0.bucket != .archive
-            } else if trackingOnly && bucket == .all {
-                inBucket = $0.interest?.state == "saved" || $0.bucket == .ready || $0.bucket == .hold
-            } else if trackingOnly && bucket == .archive {
-                inBucket = $0.bucket == .archive || $0.interest?.state == "passed"
-            } else {
-                inBucket = bucket == .all || $0.bucket == bucket
-            }
-            return inBucket && filters.includes($0, query: query)
-        }.sorted(by: filters.sort.precedes)
+        let today = dateString(.now)
+        let due = jobs.filter { $0.needsFollowUp(on: today) }
+        let stages: [JobBucket] = trackingOnly ? [.all, .applied, .interviews, .offers, .archive] : JobBucket.allCases
+        let tracked = trackingOnly ? Dictionary(grouping: jobs) { $0.trackingStage } : [:]
+        let source = filters.followUps ? due
+            : trackingOnly ? tracked[bucket] ?? []
+            : bucket == .all ? jobs : jobs.filter { $0.bucket == bucket }
+        let visible = source.filter { filters.includes($0, query: query) }.sorted {
+            if filters.followUps, $0.followUp != $1.followUp { return $0.followUp < $1.followUp }
+            return filters.sort.precedes($0, $1)
+        }
 
         List {
             Section {
+                if trackingOnly {
+                    Button {
+                        filters = JobFilters()
+                        filters.followUps = true
+                        query = ""
+                    } label: {
+                        LabeledContent {
+                            Text(due.count.formatted()).monospacedDigit()
+                        } label: {
+                            Label("Follow-ups Due", systemImage: "calendar.badge.clock")
+                        }
+                    }
+                    .accessibilityAddTraits(filters.followUps ? .isSelected : [])
+                }
                 Picker(trackingOnly ? "Application Stage" : "Listing View", selection: $bucket) {
-                    ForEach(trackingOnly ? [.all, .applied, .interviews, .offers, .archive] : JobBucket.allCases) { item in
-                        Text(label(for: item))
+                    ForEach(stages) { item in
+                        Text(trackingOnly ? "\(label(for: item)) (\(tracked[item]?.count ?? 0))" : label(for: item))
                             .tag(item)
                     }
                 }
-                Menu("Quick Views", systemImage: "line.3.horizontal.decrease") {
-                    Button("All Roles") { filters = JobFilters(); query = "" }
-                    Button("Support") { filters = JobFilters(); query = "support" }
-                    Button("Implementation") { filters = JobFilters(); query = "implementation" }
-                    Button("Follow-ups Due") {
-                        filters = JobFilters()
-                        filters.followUps = true
-                        bucket = .all
-                        query = ""
+                .onChange(of: bucket) { _, _ in filters.followUps = false }
+                if filters.followUps {
+                    Button("Back to \(label(for: bucket))", systemImage: "arrow.uturn.backward") {
+                        filters.followUps = false
+                    }
+                } else if !trackingOnly {
+                    Picker("Sort", selection: $filters.sort) {
+                        ForEach(JobFilters.Sort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
                 }
             }
             Section("\(filters.followUps ? "Follow-ups Due" : label(for: bucket)) · \(visible.count)") {
                 if visible.isEmpty {
                     ContentUnavailableView(
-                        trackingOnly && bucket == .all && !filters.followUps && query.isEmpty ? "No saved roles yet" : "No listings here",
+                        filters.followUps ? "No follow-ups in this view"
+                            : trackingOnly && bucket == .all && query.isEmpty ? "No saved roles here" : "No listings here",
                         systemImage: trackingOnly ? "bookmark" : "magnifyingglass",
-                        description: Text(trackingOnly && bucket == .all && !filters.followUps && query.isEmpty
+                        description: Text(filters.followUps && due.isEmpty
+                            ? "Add a follow-up date in Application Tracking. Due and overdue roles appear here."
+                            : trackingOnly && bucket == .all && !filters.followUps && query.isEmpty
                             ? "Save a role from For You or Browse to keep it here."
                             : jobs.isEmpty ? "Add an employer board in Settings and run a search from Alerts."
                             : "Try changing your search or filters.")
@@ -306,7 +320,12 @@ struct JobList: View {
                 }
                 ForEach(visible) { job in
                     NavigationLink(value: job.id) {
-                        JobCard(job: job, showScore: false)
+                        VStack(alignment: .leading, spacing: 2) {
+                            JobCard(job: job, showScore: !trackingOnly && filters.sort == .score)
+                            if trackingOnly, job.status != "Not Applied" {
+                                Text(job.status).font(.footnote.weight(.medium)).foregroundStyle(JobsTheme.accent)
+                            }
+                        }
                     }
                 }
             }
@@ -337,6 +356,7 @@ struct JobList: View {
 
     private func label(for item: JobBucket) -> String {
         if item == .all { return trackingOnly ? "Saved" : "All Listings" }
+        if trackingOnly && item == .archive { return "Archived" }
         return item.rawValue
     }
 
@@ -385,8 +405,7 @@ private struct JobFilters {
     }
 
     func includes(_ job: Job, query: String) -> Bool {
-        if followUps && (job.followUp.isEmpty || job.followUp > dateString(.now)
-            || ["Rejected", "Withdrawn", "Position Closed"].contains(job.status)) { return false }
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let words = [job.employer, job.title, job.location ?? "", job.description ?? "", job.notes, job.reviewNote]
         return (query.isEmpty || words.contains { $0.localizedCaseInsensitiveContains(query) })
             && (employer.isEmpty || job.employer == employer)
@@ -665,7 +684,7 @@ private struct ReviewEditor: View {
     }
 }
 
-struct TrackingDraft: Encodable {
+struct TrackingDraft: Codable {
     let version: Int
     var status: String
     var applicationDate: String

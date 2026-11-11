@@ -4,7 +4,7 @@ The iPhone app is the Jobs workspace. The Mac runs the Python service and keeps 
 
 ## Try it without a server
 
-Open Jobs and tap **Explore sample jobs**. For You includes fictional billing, reconciliation and revenue operations roles with example scores. Try Save, Pass and Undo, look up roles in Browse, or change a sample application’s stage in My Jobs. Sample changes are kept for the current session. **Settings → Leave Sample Workspace** resets them.
+Open Jobs and tap **Explore sample jobs**. For You includes fictional billing, reconciliation and revenue operations roles with example scores. Try Save, Pass and Undo, look up roles in Browse, or change a sample application’s stage in My Jobs. Sample saves, passes and application changes stay on this iPhone between launches. Use **Settings → Reset Sample Progress** to clear them.
 
 Choose **Connect to your Mac** to use the real workspace. Employer searches, résumé-based matching, saved searches and match alerts use that connection.
 
@@ -19,7 +19,7 @@ Choose **Connect to your Mac** to use the real workspace. Employer searches, ré
 
 - **For You** ranks open listings by role fit and then by match score. Top Matches requires eligible location and usable annual USD base pay. Needs Review contains other open candidates. Use **Save**, **Pass**, and **Undo** directly from a card.
 - **Browse** opens the full retained job list, including earlier runs. Use search and filters to narrow it. A listing’s details include **Save to My Jobs**.
-- **My Jobs** opens to Saved. Switch to Applied, Interviews, Offers, or Archived, or choose Follow-ups Due under Quick Views.
+- **My Jobs** opens to Saved. The stage picker shows how many roles are in Saved, Applied, Interviews, Offers and Archived. **Follow-ups Due** shows due and overdue dates, oldest first. Set a date in a job’s **Application Tracking** editor.
 - **Settings → Edit Search Profile** contains résumé import, target roles, skills, location and pay. Open a saved search and choose **Preview Profile Changes** to review the proposed values. **Use in Draft** fills the editor for that search, and **Save** applies the changes.
 - **Settings → Employer Boards** shows the employer sources and their health.
 

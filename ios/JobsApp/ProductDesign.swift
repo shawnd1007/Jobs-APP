@@ -107,7 +107,43 @@ struct WorkspaceWelcome: View {
 }
 
 enum SampleWorkspace {
-    static func dashboard() -> Dashboard {
+    private static let storageKey = "jobs.sample.progress.v1"
+
+    private struct Progress: Codable {
+        let interest: Job.Interest?
+        let tracking: TrackingDraft
+    }
+
+    static func restore() -> Dashboard {
+        var snapshot = dashboard()
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let progress = try? JSONDecoder().decode([Int: Progress].self, from: data)
+        else { return snapshot }
+        for index in snapshot.jobs.indices {
+            guard let saved = progress[snapshot.jobs[index].id] else { continue }
+            snapshot.jobs[index].interest = saved.interest
+            snapshot.jobs[index].status = saved.tracking.status
+            snapshot.jobs[index].applicationDate = saved.tracking.applicationDate
+            snapshot.jobs[index].followUp = saved.tracking.followUp
+            snapshot.jobs[index].notes = saved.tracking.notes
+            snapshot.jobs[index].version = saved.tracking.version
+        }
+        return snapshot
+    }
+
+    static func save(_ jobs: [Job]) throws {
+        let progress = Dictionary(uniqueKeysWithValues: jobs.map {
+            ($0.id, Progress(interest: $0.interest, tracking: TrackingDraft($0)))
+        })
+        UserDefaults.standard.set(try JSONEncoder().encode(progress), forKey: storageKey)
+    }
+
+    static func reset() -> Dashboard {
+        UserDefaults.standard.removeObject(forKey: storageKey)
+        return dashboard()
+    }
+
+    private static func dashboard() -> Dashboard {
         Dashboard(
             jobs: [
                 job(1, "Senior Billing Operations Analyst", "Alderline Health",

@@ -16,7 +16,7 @@ struct Dashboard: Decodable {
 }
 
 struct Job: Decodable, Identifiable {
-    struct Interest: Decodable {
+    struct Interest: Codable {
         let state: String
         let version: Int
         let updated: String
@@ -87,6 +87,23 @@ struct Job: Decodable, Identifiable {
     }
 
     var postingURL: URL? { url.flatMap(DashboardAPI.webURL) }
+
+    var trackingStage: JobBucket? {
+        switch bucket {
+        case .archive: return .archive
+        case .applied: return .applied
+        case .interviews: return .interviews
+        case .offers: return .offers
+        default:
+            if interest?.state == "passed" { return .archive }
+            if interest?.state == "saved" || bucket == .ready || bucket == .hold { return .all }
+            return nil
+        }
+    }
+
+    func needsFollowUp(on day: String) -> Bool {
+        trackingStage != .archive && !followUp.isEmpty && followUp <= day
+    }
 
     var bucket: JobBucket? {
         if availability == "Closed" || ["Rejected", "Withdrawn", "Position Closed"].contains(status) {

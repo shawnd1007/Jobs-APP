@@ -85,8 +85,8 @@
     },
     {
       "path": "docs/STAGE-TWO.md",
-      "sha256": "5e07ec2066f4c3873fd525deba69efce42c64e4d17c1612d8e6f7f3ba17a393e",
-      "bytes": 2999
+      "sha256": "9896047818d879824c576055f8ee5cd83c51201033ea0ea6067c66fc30441a9d",
+      "bytes": 3330
     },
     {
       "path": "docs/VERIFICATION.md",
@@ -115,8 +115,8 @@
     },
     {
       "path": "ios/JobsApp/DashboardAPI.swift",
-      "sha256": "7793fe7f7c4d4a860d894c34ddd6cfc55b4e1b2e6eec85b4c351d966d4840e7f",
-      "bytes": 9706
+      "sha256": "2dee0614db014ea9088b6c36c5c049bccd2ab6b44597d1f01310c90ffc2330c0",
+      "bytes": 10271
     },
     {
       "path": "ios/JobsApp/FormSupport.swift",
@@ -130,18 +130,18 @@
     },
     {
       "path": "ios/JobsApp/JobsApp.swift",
-      "sha256": "814f8de2f9f8f8592e7041fb9e26b283de4c10569aec519ee29560a18119d0a0",
-      "bytes": 10788
+      "sha256": "2dcb563a287cdfb84b46f0a34bf68ce2428eb9c5956d84f1b6889fe683bdc8c7",
+      "bytes": 11836
     },
     {
       "path": "ios/JobsApp/JobsViews.swift",
-      "sha256": "321d2ea51319b07f27d5f74ba5a6b3f2d40e0fd2316f828412b8fbb0c44638a6",
-      "bytes": 31760
+      "sha256": "7a2a7b114f705b55e9a663b9e721879bf26b224b5f24adba08393c17504c508f",
+      "bytes": 32849
     },
     {
       "path": "ios/JobsApp/ProductDesign.swift",
-      "sha256": "857a95e89168935f16140db98d8ef8513391d6d0865eea39c1e7fe2e07fdc55b",
-      "bytes": 8786
+      "sha256": "c2ef9e96ef6bac905c5214ce944f9a25c754e3ba7143ba1d74ee86b31d4799d3",
+      "bytes": 10253
     },
     {
       "path": "ios/JobsApp/WorkspaceScreens.swift",
@@ -150,12 +150,12 @@
     },
     {
       "path": "ios/README.md",
-      "sha256": "4c4d119aa00490d72314cb1d982767f510bfe5102228b760d4f13d5909706aff",
-      "bytes": 8292
+      "sha256": "dc996394b31d8f07bf6ccd5b6bf24f6e7b02fe800c973f1279eec34decb31a25",
+      "bytes": 8448
     },
     {
       "path": "ios/Shawn's iPhone Job App.xcodeproj/project.pbxproj",
-      "sha256": "518baf2698e1fc72df5a16f73920ae451eb7df7025cdf8e9009abd92bf51a6b8",
+      "sha256": "270a723d11a0fb30a5d5619ea7016fd7741ee3c84c01247477eb37b8ddfa0590",
       "bytes": 10946
     },
     {
