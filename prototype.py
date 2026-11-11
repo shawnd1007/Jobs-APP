@@ -16,13 +16,17 @@ AI_LOCK = threading.Lock()
 PREFERENCE_KEYS = ('profile', 'categories', 'salary_floor', 'salary_policy',
                    'excluded_title_terms', 'skill_groups', 'additional_boards',
                    'additional_employer_urls', 'disabled_sources', 'ai_enabled',
-                   'ai_model', 'ai_daily_limit', 'schedule_enabled', 'schedule_hour_utc')
+                   'ai_model', 'ai_daily_limit', 'schedule_enabled', 'schedule_hour_utc',
+                   'target_locations', 'workplace_types', 'preferred_skills')
 
 
 def settings(base, data):
     path = data / 'preferences.json'
     if path.exists():
         base.update(json.loads(path.read_text(encoding='utf-8')))
+    base.setdefault('preferred_skills', [])
+    base.setdefault('target_locations', [])
+    base.setdefault('workplace_types', [])
     base.setdefault('salary_policy', 'overlap')
     base.setdefault('excluded_title_terms', [])
     base.setdefault('disabled_sources', [])
@@ -41,7 +45,13 @@ def init(c):
       job_id INTEGER PRIMARY KEY REFERENCES jobs(id), fingerprint TEXT NOT NULL,
       created TEXT NOT NULL, model TEXT NOT NULL, advice TEXT NOT NULL, usage TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ai_usage (day TEXT PRIMARY KEY, attempts INTEGER NOT NULL);
-    PRAGMA user_version=4;
+    CREATE TABLE IF NOT EXISTS saved_searches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, criteria TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS match_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, search_id INTEGER NOT NULL REFERENCES saved_searches(id) ON DELETE CASCADE,
+      job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, created TEXT NOT NULL,
+      unread INTEGER NOT NULL DEFAULT 1, UNIQUE(search_id,job_id));
+    PRAGMA user_version=5;
     ''')
 
 
@@ -67,11 +77,18 @@ def save_preferences(a, payload):
             raise ValueError('Profile must contain 1–12,000 characters')
         if not isinstance(updated['ai_model'], str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,100}', updated['ai_model']):
             raise ValueError('Invalid AI model')
-        for key in ('categories', 'excluded_title_terms', 'disabled_sources', 'additional_employer_urls'):
+        for key in ('categories', 'excluded_title_terms', 'disabled_sources', 'additional_employer_urls', 'preferred_skills'):
             values = updated[key]
             if not isinstance(values, list) or len(values) > 150 or any(not isinstance(v, str) or not 1 <= len(v) <= 600 for v in values):
                 raise ValueError('Invalid ' + key)
         if not updated['categories']: raise ValueError('Choose at least one role keyword')
+        locations = updated['target_locations']
+        if (not isinstance(locations, list) or len(locations) > 30 or
+                any(not isinstance(value, str) or not 1 <= len(value.strip()) <= 100 for value in locations)):
+            raise ValueError('Enter up to 30 location phrases, each 1–100 characters')
+        modes = updated['workplace_types']
+        if not isinstance(modes, list) or any(mode not in ('remote', 'hybrid', 'onsite') for mode in modes):
+            raise ValueError('Invalid workplace type')
         boards = updated['additional_boards']
         if not isinstance(boards, dict) or set(boards) - {'ashby', 'greenhouse', 'lever'}: raise ValueError('Unsupported board platform')
         for names in boards.values():
@@ -184,6 +201,13 @@ def enrich_snapshot(a, result):
                   preferences_revision=hashlib.sha256(json.dumps(prefs, sort_keys=True).encode()).hexdigest(),
                   sources=source_snapshot(a, result['jobs'], cfg), ai_configured=bool(ai_key(a)))
     with a.connect() as c:
+        searches = saved_searches(c)
+        names = {search['id']: search['name'] for search in searches}
+        result['saved_searches'] = searches
+        result['unread_match_count'] = c.execute('SELECT COUNT(*) FROM match_alerts WHERE unread=1').fetchone()[0]
+        result['match_alerts'] = [dict(r, unread=bool(r['unread']), search_name=names[r['search_id']])
+                                  for r in c.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200')
+                                  if r['search_id'] in names]
         advice = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM ai_reviews')}
         usage = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
     result['ai_attempts_today'] = usage[0] if usage else 0
@@ -191,3 +215,109 @@ def enrich_snapshot(a, result):
         saved = advice.get(j['id'])
         j['ai_advice'] = dict(advice=json.loads(saved['advice']), model=saved['model'], created=saved['created'], stale=saved['fingerprint'] != fingerprint(j, cfg)) if saved else None
     return result
+
+
+def saved_searches(c):
+    return [dict(json.loads(row['criteria']), id=row['id'], version=row['version'])
+            for row in c.execute('SELECT * FROM saved_searches ORDER BY id')]
+
+
+def matching_searches(a, job, searches):
+    if job.get('availability') != 'Open':
+        return []
+    title = job.get('title', '').lower()
+    text = title + ' ' + a.clean(job.get('description')).lower()
+    matches = []
+    for search in searches:
+        if not search['enabled']:
+            continue
+        title_terms = search.get('title_terms', [])
+        if title_terms and not any(re.search(r'(?<!\w)' + re.escape(term.lower()) + r'(?!\w)', title)
+                                   for term in title_terms):
+            continue
+        if not any(re.search(r'(?<!\w)' + re.escape(skill.lower()) + r'(?!\w)', text)
+                   for skill in search['skills']):
+            continue
+        geography = {'target_locations': search['locations'], 'workplace_types': search['workplace_types']}
+        if a.location_eligibility(job, geography)[0] != 'Eligible':
+            continue
+        high = a.base_salary(job)
+        low = job.get('salary_min')
+        if type(high) not in (int, float) or type(low) not in (int, float) or not 0 < low <= high:
+            continue
+        if high >= search['salary_min'] and (search['salary_max'] is None or low <= search['salary_max']):
+            matches.append(search['id'])
+    return matches
+
+
+def record_match_alerts(c, job_id, search_ids, created):
+    c.executemany('INSERT OR IGNORE INTO match_alerts(search_id,job_id,created) VALUES(?,?,?)',
+                  [(search_id, job_id, created) for search_id in search_ids])
+
+
+def change_saved_search(a, payload):
+    if not isinstance(payload, dict):
+        raise ValueError('Invalid saved search')
+    action = payload.get('action')
+    search_id = payload.get('id')
+    with a.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if action == 'read':
+            through = payload.get('through')
+            if type(through) is not int or through < 0:
+                raise ValueError('Invalid alert ID')
+            c.execute('UPDATE match_alerts SET unread=0 WHERE id<=? AND unread=1', (through,))
+            return 200, {'saved': True}
+        if action not in ('save', 'delete'):
+            raise ValueError('Invalid saved search action')
+        if search_id is not None:
+            if type(search_id) is not int:
+                raise ValueError('Invalid search ID')
+            row = c.execute('SELECT version, criteria FROM saved_searches WHERE id=?', (search_id,)).fetchone()
+            if row is None or row['version'] != payload.get('version'):
+                return 409, {'error': 'Saved search changed. Reload before editing.'}
+        if action == 'delete':
+            if search_id is None:
+                raise ValueError('Select a saved search to delete')
+            c.execute('DELETE FROM saved_searches WHERE id=?', (search_id,))
+            return 200, {'saved': True}
+        raw = payload.get('criteria')
+        if not isinstance(raw, dict):
+            raise ValueError('Enter search criteria')
+        name = raw.get('name')
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 80:
+            raise ValueError('Enter a search name up to 80 characters')
+        criteria = {'name': name.strip()}
+        for field in ('skills', 'locations'):
+            values = raw.get(field)
+            if (not isinstance(values, list) or not 1 <= len(values) <= 30 or
+                    any(not isinstance(value, str) or not 1 <= len(value.strip()) <= 100 for value in values)):
+                raise ValueError(f'Enter 1–30 {field}, up to 100 characters each')
+            criteria[field] = list(dict.fromkeys(value.strip() for value in values))
+        previous_terms = json.loads(row['criteria']).get('title_terms', []) if search_id is not None else []
+        title_terms = raw.get('title_terms', previous_terms)
+        if (not isinstance(title_terms, list) or len(title_terms) > 30 or
+                any(not isinstance(term, str) or not 1 <= len(term.strip()) <= 100 for term in title_terms)):
+            raise ValueError('Enter up to 30 title phrases, up to 100 characters each')
+        criteria['title_terms'] = list(dict.fromkeys(term.strip() for term in title_terms))
+        modes = raw.get('workplace_types')
+        if not isinstance(modes, list) or any(mode not in ('remote', 'hybrid', 'onsite') for mode in modes):
+            raise ValueError('Invalid workplace type')
+        criteria['workplace_types'] = sorted(set(modes))
+        low, high = raw.get('salary_min'), raw.get('salary_max')
+        if type(low) is not int or not 0 <= low <= 1000000:
+            raise ValueError('Enter a minimum annual base salary from 0 to 1,000,000 USD')
+        if high is not None and (type(high) is not int or not low <= high <= 1000000):
+            raise ValueError('Maximum salary must be at least the minimum and at most 1,000,000 USD')
+        enabled = raw.get('enabled')
+        if type(enabled) is not bool:
+            raise ValueError('Invalid alerts setting')
+        criteria.update(salary_min=low, salary_max=high, enabled=enabled)
+        if search_id is None:
+            if c.execute('SELECT COUNT(*) FROM saved_searches').fetchone()[0] >= 30:
+                raise ValueError('This workspace supports up to 30 saved searches')
+            c.execute('INSERT INTO saved_searches(criteria) VALUES(?)', (json.dumps(criteria),))
+        else:
+            c.execute('UPDATE saved_searches SET criteria=?,version=version+1 WHERE id=?',
+                      (json.dumps(criteria), search_id))
+    return 200, {'saved': True}

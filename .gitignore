@@ -19,3 +19,11 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Local Xcode state, builds and private project records
+xcuserdata/
+DerivedData/
+*.ipa
+*.xcarchive/
+docs/images/workspace-desktop.png
+PROJECT_LOG.md

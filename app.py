@@ -88,6 +88,8 @@ def init():
         CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started TEXT NOT NULL,finished TEXT,state TEXT NOT NULL,report TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,job_id INTEGER,at TEXT NOT NULL,detail TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS usage(day TEXT PRIMARY KEY,requests INTEGER NOT NULL DEFAULT 0,credits REAL NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS job_interests(job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+            state TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS reviews(job_id INTEGER PRIMARY KEY REFERENCES jobs(id),decision TEXT NOT NULL DEFAULT 'Pending',note TEXT NOT NULL DEFAULT '',reviewer TEXT NOT NULL DEFAULT '',checks TEXT NOT NULL DEFAULT '{}',updated TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 0);
         PRAGMA user_version=1;''')
         if 'reserved' not in [r[1] for r in c.execute('PRAGMA table_info(usage)')]:c.execute('ALTER TABLE usage ADD COLUMN reserved INTEGER NOT NULL DEFAULT 0')
@@ -134,7 +136,7 @@ def records():
 UNAPPLIED={'Needs Verification','Not Applied','Planning to Apply'}
 def review_blockers(j):
     cfg=config();geo=location_eligibility(j,cfg)[0];problems=[]
-    if geo=='Rejected':problems.append('Location is outside remote eligibility for Florida/Georgia, Jacksonville, or the Buford area.')
+    if geo=='Rejected':problems.append('Location is outside your saved preferences.')
     salary=base_salary(j)
     if salary is not None and salary<cfg['salary_floor']:problems.append('Published maximum base salary is below your minimum.')
     if j.get('availability')=='Closed':problems.append('Employer listing is closed.')
@@ -158,7 +160,7 @@ def save_review(job_id,d):
             blockers=review_blockers(j)
             if blockers:return 400,{'error':' '.join(blockers)}
             if not all(checks.values()):return 400,{'error':'Check location, base salary, employer application availability, and prior application history before approving.'}
-            if j.get('queue')!='Confirmed' and not note.strip():return 400,{'error':'Add a review note explaining what you checked, including any previously missing pay, location or application information.'}
+            if (j.get('queue')!='Confirmed' or location_eligibility(j,config())[0]!='Eligible') and not note.strip():return 400,{'error':'Add a review note explaining what you checked, including any previously missing pay, location or application information.'}
         stamp=now()
         c.execute('INSERT INTO reviews(job_id,decision,note,reviewer,checks,updated,version) VALUES(?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET decision=excluded.decision,note=excluded.note,reviewer=excluded.reviewer,checks=excluded.checks,updated=excluded.updated,version=excluded.version',(job_id,decision,note,reviewer,json.dumps(checks),stamp,expected+1))
         if decision=='Approved' and row['status']=='Needs Verification':
@@ -173,12 +175,44 @@ def salary_qualifies(j,cfg):
     salary=base_salary(j)
     if cfg.get('salary_policy')=='minimum':salary=j.get('salary_min') if salary is not None else None
     return salary is not None and salary>=cfg['salary_floor']
+def preferred_location(loc, desc, remote, hybrid, cfg):
+    targets = cfg.get('target_locations', [])
+    modes = cfg.get('workplace_types', [])
+    mode = 'hybrid' if hybrid else 'remote' if remote else 'onsite'
+    area = {'hybrid': 'Hybrid', 'remote': 'Remote', 'onsite': 'On-site'}[mode]
+    if not loc:
+        return 'Review', 'Employer location is missing', area
+    if modes and mode not in modes:
+        if mode == 'onsite':
+            return 'Review', 'Confirm whether the employer offers your preferred work arrangement', area
+        return 'Rejected', 'Work arrangement is outside your preferences', area
+    if remote and not hybrid and ('(' in loc or re.search(
+            r'(?:must (?:reside|live|be based|be located)|only in|restricted to|'
+            r'exclud(?:es|ing)|except for|(?:hiring|eligible|approved) states)', loc + ' ' + desc)):
+        return 'Review', 'Check the employer’s remote residence restrictions', area
+    def location_words(value):
+        value = re.sub(r'\bu\.s\.(?:a\.)?', 'us', value.lower())
+        value = re.sub(r'\b(?:united states|usa)\b', 'us', value)
+        return ' '.join(re.findall(r'[^\W_]+', value))
+    published = ' ' + location_words(loc) + ' '
+    for target in targets:
+        phrase = location_words(target)
+        if phrase and phrase != 'remote' and f' {phrase} ' in published:
+            return 'Eligible', f'Published location matches {target}', area
+    if mode == 'remote':
+        return 'Review', 'Confirm where the employer can hire remote workers', area
+    if targets:
+        return 'Rejected', 'Published office location is outside your preferences', area
+    return 'Review', 'Add a location or verify the employer’s office location', area
+
 def location_eligibility(j,cfg):
     loc=clean(j.get('location','')).lower()
     loc=re.sub(r'\bu\.s\.(?:a\.)?', 'us',loc)
     desc=clean(j.get('description','')).lower()
     remote=bool(j.get('remote')) or bool(re.search(r'\bremote\b',loc))
     hybrid=bool(re.search(r'\bhybrid\b',loc)) or bool(re.search(r'(?:position|role|work arrangement|schedule) (?:is|will be) hybrid|(?:required|must|expected)(?: to)? (?:work|be|attend|report).{0,60}(?:office|on.site)|(?:office|on.site).{0,40}\b[1-5a-z]+ days? (?:per|a|each) week',desc))
+    if cfg.get('target_locations') or cfg.get('workplace_types'):
+        return preferred_location(loc, desc, remote, hybrid, cfg)
     fl=bool(re.search(r'\b(florida|fl)\b',loc));ga=bool(re.search(r'\b(georgia|ga)\b',loc))
     us=bool(re.search(r'\b(united states|usa|us)\b',loc))
     states='alabama alaska arizona arkansas california colorado connecticut delaware hawaii idaho illinois indiana iowa kansas kentucky louisiana maine maryland massachusetts michigan minnesota mississippi missouri montana nebraska nevada new hampshire new jersey new mexico new york north carolina north dakota ohio oklahoma oregon pennsylvania rhode island south carolina south dakota tennessee texas utah vermont virginia washington west virginia wisconsin wyoming'
@@ -206,6 +240,12 @@ def location_eligibility(j,cfg):
             return 'Review','Local city found; state needs confirmation','Other'
     if remote and hybrid:return 'Review','Hybrid or office attendance requirement: confirm the office is in an approved local area','Other'
     return 'Rejected' if loc else 'Review','Office location is outside Jacksonville or the Buford area' if loc else 'Office location missing','Other'
+def discovery_locations(cfg):
+    if cfg.get('target_locations') or cfg.get('workplace_types'):
+        return ('Eligible', 'Review')
+    return ('Eligible',)
+
+
 def assess(j,cfg):
     title=j.get('title','').lower(); desc=clean(j.get('description','')); text=(title+' '+desc).lower()
     eligible,location_reason,area=location_eligibility(j,cfg)
@@ -226,9 +266,17 @@ def assess(j,cfg):
     else:
         for pattern,label,points in groups:
             if re.search(pattern,text): score+=points; reasons.append(label)
+    preferred_skills = dict.fromkeys(skill.strip().lower() for skill in cfg.get('preferred_skills', []) if skill.strip())
+    matched_skills = [skill for skill in preferred_skills if re.search(r'(?<!\w)'+re.escape(skill)+r'(?!\w)', text)]
+    if matched_skills:
+        score += min(24, len(matched_skills) * 8)
+        reasons.append('Selected skills: ' + ', '.join(matched_skills))
+    j['matched_skills'] = matched_skills
+    j['matched_groups'] = reasons.copy()
     gaps=[]
     for pattern,label in [(r'\bcpa\b|\bcfa\b','professional certification'),(r'clinical|nursing','clinical domain'),(r'director|vice president|\bvp\b','seniority'),(r"bachelor|master|degree",'degree requirements: confirm equivalent experience')]:
         if re.search(pattern,text): gaps.append(label); score-=7
+    j['match_gaps'] = gaps
     if eligible!='Eligible': score-=10
     j.update(category=category,score=max(0,min(100,score)),eligibility=eligible,explanation='Relevant: '+('; '.join(reasons) or 'limited clear overlap')+'. Confirm gaps: '+('; '.join(gaps) or 'review full requirements')+'. Rule-based assessment using supplied profile; no credentials inferred.')
     j['queue']='Confirmed' if j.get('availability')=='Open' and eligible=='Eligible' and salary_qualifies(j,cfg) and relevant and j['score']>=55 else 'Review'
@@ -377,6 +425,7 @@ def run_pipeline():
     try:
         cfg=config();backup()
         with connect() as c:
+            searches = prototype.saved_searches(c)
             cur=c.execute('INSERT INTO runs(started,state,report) VALUES(?,?,?)',(now(),'running',json.dumps(report)));run_id=cur.lastrowid
         existing=records(); boards=set()
         for j in existing:
@@ -393,7 +442,7 @@ def run_pipeline():
             for offset in range(cfg.get('public_web_queries_per_run',3)):
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
                 domains=['jobs.ashbyhq.com','job-boards.greenhouse.io','jobs.lever.co','myworkdayjobs.com','jobs.smartrecruiters.com']
-                regions=['remote United States','Jacksonville Florida','Buford Suwanee Duluth Georgia']
+                regions=cfg.get('target_locations') or ['remote United States','Jacksonville Florida','Buford Suwanee Duluth Georgia']
                 query='"'+category+'" jobs '+regions[offset%len(regions)]+' site:'+domains[(start+offset)%len(domains)]
                 try:
                     url='https://www.bing.com/search?format=rss&q='+up.quote(query)
@@ -443,13 +492,21 @@ def run_pipeline():
                         seen.add(ident)
                         if any(x['identity']==ident for x in existing):continue
                         if new_count>=cfg['max_new_candidates']:continue
-                        if not any(cat in j['title'].lower() for cat in cfg['categories']):continue
-                        if location_eligibility(j,cfg)[0]!='Eligible':
-                            report['skipped_location']=report.get('skipped_location',0)+1
-                            continue
-                        j=finalize(j,cfg,report)
-                        if j['queue']=='Excluded':continue
-                        _,added=upsert(c,j);c.commit()
+                        j = assess(j, cfg)
+                        matched = prototype.matching_searches(service(), j, searches)
+                        role_match = any(cat in j['title'].lower() for cat in cfg['categories'])
+                        location_match = j['location_eligibility'] in discovery_locations(cfg)
+                        if not matched:
+                            if role_match and not location_match:
+                                report['skipped_location'] = report.get('skipped_location', 0) + 1
+                            if not role_match or not location_match or j['queue'] == 'Excluded':
+                                continue
+                        if j['queue'] == 'Confirmed':
+                            j = finalize(j, cfg, report)
+                        job_id, added = upsert(c, j)
+                        if added:
+                            prototype.record_match_alerts(c, job_id, matched, now())
+                        c.commit()
                         if added:
                             new_count+=1;report['new_qualified' if j['queue']=='Confirmed' else 'new_review']+=1
                             if j['queue']=='Confirmed':report['top_new'].append({k:j[k] for k in ('title','employer','url','score')})
@@ -472,9 +529,13 @@ def run_pipeline():
             try:
                 j=finalize(generic_posting(url,report,key if cfg['firecrawl_enabled'] else ''),cfg,report)
                 prototype.source_result(service(),url,'ok',1);successful+=1
-                if j.get('location_eligibility')!='Eligible' or j['queue']=='Excluded':continue
+                matched = prototype.matching_searches(service(), j, searches)
+                if not matched and (j.get('location_eligibility')!='Eligible' or j['queue']=='Excluded'):continue
                 if new_count>=cfg['max_new_candidates'] and not any(identity(url)==x['identity'] for x in existing):continue
-                with connect() as c:_,added=upsert(c,j)
+                with connect() as c:
+                    job_id, added = upsert(c, j)
+                    if added:
+                        prototype.record_match_alerts(c, job_id, matched, now())
                 if added:
                     new_count+=1
                     report['new_qualified' if j['queue']=='Confirmed' else 'new_review']+=1
@@ -521,9 +582,30 @@ def snapshot():
             if not verified or (stamp-dt.datetime.fromisoformat(verified)).total_seconds()>cfg['verification_valid_hours']*3600:j['queue']='Review';j['stale']=True
         j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
     with connect() as c:
+        interests = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM job_interests')}
+        for job in jobs:
+            job['interest'] = interests.get(job['id'])
         runs=[dict(r) for r in c.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 30')]
         for r in runs:r['report']=json.loads(r['report'])
     return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':LOCK.locked(),'firecrawl_configured':False,'schedule_hour_utc':cfg['schedule_hour_utc']})
+def save_interest(job_id, payload):
+    state = payload.get('state')
+    version = payload.get('version')
+    if state not in ('saved', 'passed', 'none') or type(version) is not int:
+        return 400, {'error': 'Invalid job action'}
+    with connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone():
+            return 404, {'error': 'Job not found'}
+        row = c.execute('SELECT version FROM job_interests WHERE job_id=?', (job_id,)).fetchone()
+        if version != (row['version'] if row else 0):
+            return 409, {'error': 'This job changed. Refresh and try again.'}
+        c.execute("""INSERT INTO job_interests(job_id,state,version,updated) VALUES(?,?,?,?)
+            ON CONFLICT(job_id) DO UPDATE SET state=excluded.state,version=excluded.version,updated=excluded.updated""",
+                  (job_id, state, version + 1, now()))
+    return 200, {'saved': True}
+
+
 class Handler(BaseHTTPRequestHandler):
     def send(self,status,data,kind='application/json'):
         raw=json.dumps(data).encode() if kind=='application/json' else data.encode()
@@ -543,6 +625,24 @@ class Handler(BaseHTTPRequestHandler):
         host=self.headers.get('Host','');origin=self.headers.get('Origin','')
         if self.headers.get('X-Jobs-Client')!='dashboard' or (origin and up.urlsplit(origin).netloc!=host):return self.send(403,{'error':'Same-origin dashboard required'})
         if self.path=='/api/run':return self.send(202 if start_run() else 409,{'running':True})
+        if self.path=='/api/saved-searches':
+            try:
+                size = int(self.headers.get('Content-Length',0))
+                if not 0 < size <= 20000:
+                    raise ValueError('Invalid request size')
+                payload = json.loads(self.rfile.read(size))
+                if isinstance(payload, dict) and payload.get('action') == 'read':
+                    code, result = prototype.change_saved_search(service(), payload)
+                    return self.send(code, result)
+                if not LOCK.acquire(False):
+                    return self.send(409, {'error': 'Wait for the current search to finish.'})
+                try:
+                    code, result = prototype.change_saved_search(service(), payload)
+                    return self.send(code, result)
+                finally:
+                    LOCK.release()
+            except (ValueError, TypeError) as e:
+                return self.send(400, {'error': str(e)})
         if self.path=='/api/preferences':
             if not LOCK.acquire(False):return self.send(409,{'error':'Wait for the search to finish before changing preferences.'})
             try:
@@ -552,6 +652,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(code,result)
             except (ValueError,TypeError,KeyError) as e:return self.send(400,{'error':str(e)})
             finally:LOCK.release()
+        interest_match = re.fullmatch(r'/api/jobs/(\d+)/interest', self.path)
+        if interest_match:
+            try:
+                size = int(self.headers.get('Content-Length', 0))
+                if not 0 < size <= 2000:
+                    raise ValueError('Invalid request size')
+                payload = json.loads(self.rfile.read(size))
+                if not isinstance(payload, dict):
+                    raise ValueError('Invalid request')
+                code, result = save_interest(int(interest_match[1]), payload)
+                return self.send(code, result)
+            except (ValueError, TypeError) as error:
+                return self.send(400, {'error': str(error)})
         ai_match=re.fullmatch(r'/api/jobs/(\d+)/ai-review',self.path)
         if ai_match:
             code,result=prototype.ai_review(service(),int(ai_match[1]));return self.send(code,result)
@@ -585,4 +698,4 @@ if __name__=='__main__':
         LOCK.acquire();print(json.dumps(run_pipeline(),indent=2))
     else:
         threading.Thread(target=schedule,daemon=True).start()
-        ThreadingHTTPServer(('0.0.0.0',8084),Handler).serve_forever()
+        ThreadingHTTPServer((os.environ.get('JOBS_BIND_HOST', '0.0.0.0'), 8084), Handler).serve_forever()
