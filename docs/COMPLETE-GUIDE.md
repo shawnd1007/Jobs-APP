@@ -1,6 +1,6 @@
 # Jobs: complete project guide
 
-Prepared November 10, 2026. This guide explains the implemented personal prototype, its files, its behavior, how to run it, how to move it, and how to develop it responsibly. It distinguishes working features from future plans. Start here even if you have not used Git, Docker or Xcode before.
+Updated November 11, 2026. This guide explains the implemented personal prototype, its files, its behavior, how to run it, how to move it, and how to develop it responsibly. It distinguishes working features from future plans. Start here even if you have not used Git, Docker or Xcode before.
 
 ## Contents
 
@@ -21,7 +21,7 @@ Prepared November 10, 2026. This guide explains the implemented personal prototy
 15. [Backups and recovery](#15-backups-and-recovery)
 16. [Moving to the Mac](#16-moving-to-the-mac)
 17. [Git and GitHub](#17-git-and-github)
-18. [Xcode and a future native app](#18-xcode-and-a-future-native-app)
+18. [The iPhone app](#18-the-iphone-app)
 19. [Troubleshooting](#19-troubleshooting)
 20. [Limits and next milestones](#20-limits-and-next-milestones)
 21. [Learning and presenting the project](#21-learning-and-presenting-the-project)
@@ -42,7 +42,7 @@ The implemented capabilities are:
 - Separate human review, application tracking and optional AI career advice.
 - Employer-source health and pause/resume controls.
 - Manual and daily searches, backups, audit records and cross-device save-conflict detection.
-- Responsive browser screens and a JSON API that a future native client can use.
+- Responsive browser screens and a shared JSON API used by the iPhone app.
 
 It does not submit applications. Applying happens on the employer's website. It is a private-network prototype with a single shared workspace, not a hosted service with customer accounts.
 
@@ -384,7 +384,7 @@ Use a small development loop: reproduce one problem, add a meaningful regression
 
 ## 14. The API
 
-An API is the backend's request/response contract. The current browser and a future native client can use the same data instead of implementing separate crawlers.
+An API is the backend's request/response contract. The browser and the iPhone app can use the same data instead of implementing separate crawlers.
 
 | Method and path | Input | Result |
 | --- | --- | --- |
@@ -460,7 +460,7 @@ Keep the current PC and Docker running. Open its private-network Jobs URL from t
 
 Use the private migration archive to preserve your live records. Use the clean GitHub source archive for source control. They serve different purposes. Do not extract the private archive into a repository and publish its contents.
 
-The source and package have been checked on Windows, and the backend runs in Linux Docker. Actual macOS execution and Xcode compilation have not yet been validated. Account for that explicitly in your handoff.
+The source and package have been checked on Windows, and the backend runs in Linux Docker. The native Python backend and Xcode builds have been exercised on macOS. Docker on macOS remains unverified.
 
 ## 17. Git and GitHub
 
@@ -505,15 +505,13 @@ Git does not replace database backup. It also does not erase a secret just becau
 
 No open-source license has been chosen for you. Decide reuse permissions before presenting the repository as an open-source release. A public repository and an explicit license are separate decisions.
 
-## 18. Xcode and a future native app
+## 18. The iPhone app
 
-Xcode is Apple's development environment. Swift is a programming language; SwiftUI is a native UI framework. None is required to continue improving this browser-based prototype.
+The SwiftUI app under `ios/` connects to the shared Python backend. **For You** ranks open listings by role fit and match score. **Browse** shows retained listings across runs. **My Jobs** organizes saved listings and application stages.
 
-If you decide to build a native client, keep discovery, keys, AI and persistence on the backend. The first milestone should be a read-only list that loads `/api/v1/dashboard` from a configurable private backend URL. Add detail views next, then version-aware tracking saves. Handle network errors and 409 conflicts explicitly.
+The Search Profile supports résumé import with a device-local preview, suggested and custom skills, work locations and annual base pay. Saved searches use their own criteria. The backend records new matches, and the iPhone can show a local notification after it reconnects and sees unread matches.
 
-An iOS client will need its own project, native networking configuration, device testing and eventually signing/distribution decisions. Private HTTP development may require platform-specific configuration. Authentication should precede public hosting or broader access. There is no existing SwiftUI project, signed application or App Store release to import.
-
-You can keep the web frontend as a working reference while building a native frontend against the same API. This avoids reimplementing employer adapters inside a phone app and keeps the AI key off devices.
+See the [iPhone setup guide](../ios/README.md) for the simulator, device signing and private-network setup.
 
 ## 19. Troubleshooting
 

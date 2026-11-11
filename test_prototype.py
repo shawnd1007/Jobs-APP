@@ -57,6 +57,70 @@ class PrototypeTests(unittest.TestCase):
         payload['preferences'] = {'salary_floor': -1}
         with self.assertRaises(ValueError): prototype.save_preferences(app, payload)
 
+    def test_personalized_preferences_persist_and_affect_matching(self):
+        state = app.snapshot()
+        payload = dict(revision=state['preferences_revision'], preferences={
+            'target_locations': ['Austin, TX', 'United States'],
+            'workplace_types': ['onsite', 'remote'],
+            'preferred_skills': ['SQL', 'Python'],
+            'salary_floor': 85000,
+            'salary_policy': 'minimum',
+        })
+        self.assertEqual(prototype.save_preferences(app, payload)[0], 200)
+        cfg = app.config()
+        self.assertEqual(cfg['target_locations'], ['Austin, TX', 'United States'])
+        self.assertEqual(cfg['preferred_skills'], ['SQL', 'Python'])
+        job = dict(title='Financial Analyst', location='Austin, TX', availability='Open',
+                   description='Experience with SQL and Python.')
+        match = app.assess(job.copy(), cfg)
+        self.assertEqual(match['location_eligibility'], 'Eligible')
+        self.assertEqual(match['queue'], 'Review')
+        self.assertIn('Selected skills: sql, python', match['explanation'])
+        near_match = app.assess(dict(job, description='Experience with MySQL.'), cfg)
+        self.assertNotIn('Selected skills', near_match['explanation'])
+
+    def test_custom_geography_keeps_ambiguous_remote_work_for_review(self):
+        cfg = dict(app.config(), target_locations=['United States', 'Austin, TX'],
+                   workplace_types=['remote'])
+        self.assertEqual(app.location_eligibility(dict(location='Remote - U.S.'), cfg)[0], 'Eligible')
+        self.assertEqual(app.location_eligibility(dict(location='Remote - US (California only)'), cfg)[0], 'Review')
+        self.assertEqual(app.location_eligibility(dict(location='Remote'), cfg)[0], 'Review')
+        self.assertEqual(app.location_eligibility(dict(location='Hybrid Austin, TX'), cfg)[0], 'Rejected')
+        self.assertIn('Review', app.discovery_locations(cfg))
+
+    def test_saved_search_alerts_are_independent_and_deduplicated(self):
+        criteria = dict(name='Austin SQL', skills=['SQL'], locations=['Austin, TX'],
+                        workplace_types=['onsite'], salary_min=80000, salary_max=105000, enabled=True)
+        for patch_values in ({}, {'name': 'Second search', 'salary_min': 100000},
+                             {'name': 'Paused', 'enabled': False}, {'name': 'Higher salary', 'salary_min': 130000,
+                                                                    'salary_max': None}):
+            self.assertEqual(prototype.change_saved_search(app, {
+                'action': 'save', 'criteria': dict(criteria, **patch_values),
+            })[0], 200)
+        cfg = app.config()
+        cfg.update(additional_boards={'greenhouse': ['fictional']}, public_web_search_enabled=False,
+                   firecrawl_enabled=False, request_delay_seconds=0, generic_urls_per_run=0)
+        job = dict(title='Fictional Engineer', employer='Fictional', url='https://job-boards.greenhouse.io/fictional/jobs/98765',
+                   location='Austin, TX', availability='Open', description='SQL reporting',
+                   salary_min=90000, salary_max=110000, salary_currency='USD', salary_period='year',
+                   salary_type='base')
+        with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', return_value=[job]):
+            for _ in range(2):
+                self.assertTrue(app.LOCK.acquire(False))
+                self.assertEqual(app.run_pipeline()['state'], 'success')
+            dashboard = app.snapshot()
+        alerts = dashboard['match_alerts']
+        self.assertEqual({item['search_name'] for item in alerts}, {'Austin SQL', 'Second search'})
+        self.assertEqual(len(alerts), 2)
+        self.assertEqual(dashboard['unread_match_count'], 2)
+        self.assertEqual(prototype.change_saved_search(app, {'action': 'read', 'through': alerts[0]['id']})[0], 200)
+        self.assertEqual(app.snapshot()['unread_match_count'], 0)
+        search = dashboard['saved_searches'][0]
+        stale = {'action': 'delete', 'id': search['id'], 'version': search['version'] + 1}
+        self.assertEqual(prototype.change_saved_search(app, stale)[0], 409)
+        self.assertEqual(prototype.change_saved_search(app, dict(stale, version=search['version']))[0], 200)
+        self.assertEqual(len(app.snapshot()['match_alerts']), 1)
+
     def test_board_root_and_case_share_one_source(self):
         self.assertEqual(app.board_identity('https://jobs.ashbyhq.com/Deepgram'), ('ashby', 'deepgram'))
         self.assertEqual(app.identity('https://jobs.ashbyhq.com/Deepgram/123/application'), app.identity('https://jobs.ashbyhq.com/deepgram/123'))

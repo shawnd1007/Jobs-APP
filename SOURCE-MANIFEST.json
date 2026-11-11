@@ -1,6 +1,6 @@
 {
-  "snapshot": "2026-11-10",
-  "contents": "Sanitized source and fictional fixtures; excludes personal runtime data and API keys",
+  "snapshot": "2026-11-11",
+  "contents": "Sanitized source and fictional fixtures; excludes private workspace data and build artifacts",
   "manifest_excludes_itself": true,
   "files": [
     {
@@ -15,8 +15,8 @@
     },
     {
       "path": ".gitignore",
-      "sha256": "6daaa39765cf6e158f7703b06d3df5e1b7548414b82950247124e462a188dcb8",
-      "bytes": 186
+      "sha256": "f584b7e2ea86990f6804f52343af16b8447b05eb60d7d52322912336570d624a",
+      "bytes": 336
     },
     {
       "path": "AGENTS.md",
@@ -30,13 +30,13 @@
     },
     {
       "path": "README.md",
-      "sha256": "308d27aa87ecc6ac7244578a8f72a37db3fa39ad461b8c9cbf7d3b218491ba15",
-      "bytes": 2825
+      "sha256": "79023f7a8c7f35e75446f627b46782f1d68bb880559c5a7a3d2a1f2b9cf205a6",
+      "bytes": 3156
     },
     {
       "path": "app.py",
-      "sha256": "49a4721af4268f87e4f3d55b4e6885ded35646a4e2d5e516c964a5c06dfca703",
-      "bytes": 47337
+      "sha256": "105d4aeb955b0c90e6b78310c13c405fd3a28c3dcf2d78fce5b4953c95a53aec",
+      "bytes": 53731
     },
     {
       "path": "compose.yaml",
@@ -50,8 +50,13 @@
     },
     {
       "path": "docs/COMPLETE-GUIDE.md",
-      "sha256": "70609fdf8b0b6abb36ab4bc34876cc8bdcd6b20c781b7eee35df7be4c1694ad6",
-      "bytes": 44613
+      "sha256": "09d85097b8c8f95632a5b5ae40a1499634211b406c111babbfc7e6b66c0785ae",
+      "bytes": 44111
+    },
+    {
+      "path": "docs/EMPLOYER-BOARDS.md",
+      "sha256": "51f006144f29873c9a43cc81db67d2bfc197f2482bbcc74e4b97158aa3cb6728",
+      "bytes": 1359
     },
     {
       "path": "docs/GITHUB-SETUP.md",
@@ -64,9 +69,19 @@
       "bytes": 761
     },
     {
+      "path": "docs/PERSONALIZED-JOB-BOARD.md",
+      "sha256": "98a6ce2936aced4ccb609a2af26947937c3bc810e6e360bf0414155eb86155e7",
+      "bytes": 5833
+    },
+    {
       "path": "docs/PORTFOLIO.md",
       "sha256": "dba553d6a0e5f8d7d8d475804f6bdd90784374f083c59e1c554019142cc415d2",
       "bytes": 1840
+    },
+    {
+      "path": "docs/PRODUCT-AUDIT.md",
+      "sha256": "6c2f14a5a0418048598836324efc7623877b9eca42a95ad79392a92ab6fe026c",
+      "bytes": 3741
     },
     {
       "path": "docs/VERIFICATION.md",
@@ -74,14 +89,64 @@
       "bytes": 1773
     },
     {
-      "path": "docs/images/workspace-desktop.png",
-      "sha256": "45b7d1e1871bdee19ee66fe10bccb98910e9abb3fe7a28c86010c3ec5d13abae",
-      "bytes": 149277
-    },
-    {
       "path": "fixtures/seed.html",
       "sha256": "02b5ac563fe91baf4e9722f2b471a646e772120d86131308c7f004d1cbd9fadd",
       "bytes": 26536
+    },
+    {
+      "path": "ios/JobsApp/Assets.xcassets/AppIcon.appiconset/AppIcon.png",
+      "sha256": "c3fcc1d61f34671f477fa64e7f7762ee1e1778acdaf4922e4b74948ec7ca9d4a",
+      "bytes": 567283
+    },
+    {
+      "path": "ios/JobsApp/Assets.xcassets/AppIcon.appiconset/Contents.json",
+      "sha256": "6ad2c5c3bbcf972c7f02d217d6afcac3f24a10e30510c7e2d06c582371ed9d22",
+      "bytes": 134
+    },
+    {
+      "path": "ios/JobsApp/Assets.xcassets/Contents.json",
+      "sha256": "10e3b5dc202f1cd9fad1f688c8fc9fe9e9669bf3f8295e67d216b10fd99b6f49",
+      "bytes": 40
+    },
+    {
+      "path": "ios/JobsApp/DashboardAPI.swift",
+      "sha256": "55061e319817ff4098947b8226cb396b9ad2b5e16c16f121034374a28d0fcf24",
+      "bytes": 9706
+    },
+    {
+      "path": "ios/JobsApp/FormSupport.swift",
+      "sha256": "0a8ab6971ce2ebbf9ce43b9cd89b6ef3bbd998dfe17b64ce9d6ec4763ffdce2b",
+      "bytes": 3568
+    },
+    {
+      "path": "ios/JobsApp/Info.plist",
+      "sha256": "018ad8889a042fff33c09ceafec0671bc22ac831f70a77890e28272e96dceb39",
+      "bytes": 426
+    },
+    {
+      "path": "ios/JobsApp/JobsApp.swift",
+      "sha256": "723b33cfe39937a5a28280ea214d172cb46fb2abd31b322d5af503201ca190ca",
+      "bytes": 7556
+    },
+    {
+      "path": "ios/JobsApp/JobsViews.swift",
+      "sha256": "7d8cb7514287c2ff0c8a62ea62e432e2066333bd764f1c8093b1c4d51a87928f",
+      "bytes": 26657
+    },
+    {
+      "path": "ios/JobsApp/WorkspaceScreens.swift",
+      "sha256": "ab415c08406a1ca1a7fe68f5d19cf2c48ef1de2408281b2fb7b8945cbc648e28",
+      "bytes": 40428
+    },
+    {
+      "path": "ios/README.md",
+      "sha256": "8bd073e5da3bfabe0348c8047f533513e77ca5b6839bfd3913a8ce01d589176e",
+      "bytes": 7642
+    },
+    {
+      "path": "ios/Shawn's iPhone Job App.xcodeproj/project.pbxproj",
+      "sha256": "7ad08d9140c6dc99a30f42f14a7700050c1c20790cadc22701cc6d75f7411695",
+      "bytes": 10564
     },
     {
       "path": "live-workflow-check.cjs",
@@ -100,8 +165,8 @@
     },
     {
       "path": "prototype.py",
-      "sha256": "ff1872e7884bfcfd5d20f6860834c7c4b3c834097d751882e0f3d2c94d83fe94",
-      "bytes": 11481
+      "sha256": "9770f1d9d855d3ce0f09b12418130abc65f27af5b717e9624b798457c996f4f4",
+      "bytes": 18953
     },
     {
       "path": "review-browser-test.cjs",
@@ -150,8 +215,8 @@
     },
     {
       "path": "test_prototype.py",
-      "sha256": "cce20cad5e9b27c2ab2e140411c906caa20d8329ef282e62072677e66506eea9",
-      "bytes": 7496
+      "sha256": "ee562a1e0598bd12b6209667a58ffedabf4f190485273ff4b7a4a61073139f44",
+      "bytes": 11859
     },
     {
       "path": "workspace-browser-test.cjs",

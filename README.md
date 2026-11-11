@@ -6,13 +6,6 @@ A personal job-discovery, review and application-tracking prototype built with P
 
 Read the [complete plain-English guide](docs/COMPLETE-GUIDE.md), [GitHub setup](docs/GITHUB-SETUP.md), and [development instructions](CONTRIBUTING.md).
 
-<details>
-<summary>Workspace preview — fictional QA records only</summary>
-
-![Jobs workspace with fictional test records](docs/images/workspace-desktop.png)
-
-</details>
-
 ## Run locally
 
 Install Python 3.13 and Docker Desktop, then run:
@@ -30,6 +23,8 @@ This source copy starts empty: no personal profile, real jobs, application histo
 
 - Direct employer feed adapters and bounded best-effort discovery.
 - Explicit location/pay checks, configurable title/skill rules and explanations.
+- iPhone For You recommendations with match scores, Browse across retained listings, and My Jobs for application tracking.
+- Résumé import with on-device preview, editable skills, and saved searches with a match inbox. iPhone alerts appear when the app connects and sees unread matches.
 - Human review buckets, application notes/dates and conflict detection.
 - Employer health and pause/resume controls.
 - Requested, cached OpenAI career advice with daily attempt limits; disabled by default.
@@ -50,7 +45,7 @@ Node is only a development/test dependency. The runtime backend uses the Python 
 
 ## Scope
 
-This is a private-network, single-workspace prototype. The API has no user authentication; do not expose it publicly. Some geography logic remains specific to Florida/Georgia and the original local-office rules. AI provider responses are mocked in tests; account-specific paid execution remains to be validated. No native/Xcode client is included, and macOS execution has not yet been verified.
+This is a private-network, single-workspace prototype. The API has no user authentication; do not expose it publicly. Some geography logic remains specific to Florida/Georgia and the original local-office rules. AI provider responses are mocked in tests; account-specific paid execution remains to be validated. The standard Docker setup on macOS remains unverified. The [native iPhone workspace](ios/README.md) connects to this backend for searches, review, tracking, employer boards, preferences and optional AI advice. The iPhone guide includes a Mac-only Python startup command and private-network setup.
 
 Developed with AI assistance. See [portfolio notes](docs/PORTFOLIO.md) for what can be demonstrated and what remains future work. No open-source license has been selected for this preparation copy.
 
