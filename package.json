@@ -1,0 +1,16 @@
+{
+  "name": "jobs-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Development browser checks for the personal Jobs prototype",
+  "scripts": {
+    "test:browser": "node review-browser-test.cjs && node workspace-browser-test.cjs",
+    "test:live": "node live-workflow-check.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

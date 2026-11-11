@@ -1,0 +1,29 @@
+services:
+  jobs:
+    image: python:3.13-alpine
+    container_name: jobs-workspace
+    restart: unless-stopped
+    working_dir: /app
+    command: ["python", "-u", "app.py"]
+    ports:
+      - "127.0.0.1:8084:8084"
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ./app.py:/app/app.py:ro
+      - ./prototype.py:/app/prototype.py:ro
+      - ./config.json:/app/config.json:ro
+      - ./original.html:/app/original.html:ro
+      - ./site:/app/site:ro
+      - ./secrets:/app/secrets:ro
+      - ./data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8084/api/v1/health',timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

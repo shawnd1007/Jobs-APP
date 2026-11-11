@@ -1,0 +1,160 @@
+{
+  "schedule_hour_utc": 12,
+  "schedule_enabled": false,
+  "salary_floor": 70000,
+  "preferred_salary_max": 100000,
+  "target_openings": 50,
+  "max_new_candidates": 35,
+  "max_rechecks": 100,
+  "firecrawl_enabled": false,
+  "public_web_search_enabled": false,
+  "public_web_queries_per_run": 3,
+  "generic_urls_per_run": 5,
+  "max_firecrawl_requests_per_day": 12,
+  "max_firecrawl_credit_units_per_day": 100,
+  "firecrawl_searches_per_run": 4,
+  "search_results": 5,
+  "request_delay_seconds": 1,
+  "verification_valid_hours": 30,
+  "backup_retention": 30,
+  "approved_cities": [
+    "Jacksonville",
+    "Orange Park",
+    "Ponte Vedra",
+    "St. Augustine",
+    "Suwanee",
+    "Buford",
+    "Duluth",
+    "Lawrenceville",
+    "Norcross",
+    "Gwinnett"
+  ],
+  "categories": [
+    "technical support",
+    "support engineer",
+    "support specialist",
+    "application support",
+    "product support",
+    "customer support",
+    "integration",
+    "implementation",
+    "solutions consultant",
+    "technical account",
+    "service desk",
+    "it support",
+    "revenue assurance",
+    "revenue protection",
+    "financial analyst",
+    "billing analyst",
+    "revenue operations",
+    "business analyst",
+    "business systems analyst",
+    "financial operations",
+    "banking operations",
+    "risk analyst",
+    "compliance analyst",
+    "credit operations",
+    "collections manager",
+    "customer success",
+    "enterprise account manager",
+    "client operations",
+    "service delivery",
+    "operations analyst",
+    "operations manager",
+    "implementation manager",
+    "project operations",
+    "process improvement",
+    "reporting analyst",
+    "data analyst"
+  ],
+  "profile": "Example profile. Replace this with your verified experience before requesting AI advice.",
+  "historical_employer_leads": [],
+  "additional_boards": {
+    "greenhouse": [],
+    "ashby": [],
+    "lever": []
+  },
+  "additional_employer_urls": [],
+  "local_areas": {
+    "Jacksonville": {
+      "states": [
+        "fl",
+        "florida"
+      ],
+      "cities": [
+        "Jacksonville",
+        "Orange Park",
+        "Ponte Vedra",
+        "Jacksonville Beach",
+        "Atlantic Beach",
+        "Neptune Beach",
+        "Fleming Island"
+      ]
+    },
+    "Buford area": {
+      "states": [
+        "ga",
+        "georgia"
+      ],
+      "cities": [
+        "Buford",
+        "Suwanee",
+        "Sugar Hill",
+        "Flowery Branch",
+        "Duluth",
+        "Lawrenceville",
+        "Gwinnett"
+      ]
+    }
+  },
+  "skill_groups": [
+    {
+      "label": "Support and implementation",
+      "terms": [
+        "support",
+        "implementation",
+        "integration",
+        "troubleshooting"
+      ],
+      "points": 18
+    },
+    {
+      "label": "Practical technology",
+      "terms": [
+        "docker",
+        "linux",
+        "api",
+        "network",
+        "sql"
+      ],
+      "points": 12
+    },
+    {
+      "label": "Customer problem ownership",
+      "terms": [
+        "customer",
+        "client",
+        "stakeholder",
+        "service delivery"
+      ],
+      "points": 10
+    },
+    {
+      "label": "Finance and operational experience",
+      "terms": [
+        "billing",
+        "reconciliation",
+        "financial",
+        "excel",
+        "operations"
+      ],
+      "points": 8
+    }
+  ],
+  "salary_policy": "overlap",
+  "excluded_title_terms": [],
+  "disabled_sources": [],
+  "ai_enabled": false,
+  "ai_model": "gpt-5.4-mini",
+  "ai_daily_limit": 10
+}

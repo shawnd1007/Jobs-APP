@@ -1,0 +1,162 @@
+{
+  "snapshot": "2026-11-10",
+  "contents": "Sanitized source and fictional fixtures; excludes personal runtime data and API keys",
+  "manifest_excludes_itself": true,
+  "files": [
+    {
+      "path": ".gitattributes",
+      "sha256": "8d75fbed0329d55480242ea79c61cbdd3da312c700298bfba9572b81ec325cc6",
+      "bytes": 45
+    },
+    {
+      "path": ".github/workflows/checks.yml",
+      "sha256": "c57662d8dff6b186ff1108995acbed27be3d09a85eb052e0c4ccbd9ac7116e38",
+      "bytes": 602
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "6daaa39765cf6e158f7703b06d3df5e1b7548414b82950247124e462a188dcb8",
+      "bytes": 186
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "9f7df5fcad98b830597c6e1440e818675644813f49e3af5fa75f3a395fdeaa44",
+      "bytes": 720
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "sha256": "2d1ab92f19793d362715da4a5ef056bce93e9251bcbe3bc36186256240dd3cc3",
+      "bytes": 1160
+    },
+    {
+      "path": "README.md",
+      "sha256": "308d27aa87ecc6ac7244578a8f72a37db3fa39ad461b8c9cbf7d3b218491ba15",
+      "bytes": 2825
+    },
+    {
+      "path": "app.py",
+      "sha256": "49a4721af4268f87e4f3d55b4e6885ded35646a4e2d5e516c964a5c06dfca703",
+      "bytes": 47337
+    },
+    {
+      "path": "compose.yaml",
+      "sha256": "612b2433a08f35f0bc26cc285a3638ebd070e13c31c7b9c3381eb00429974851",
+      "bytes": 836
+    },
+    {
+      "path": "config.example.json",
+      "sha256": "096e6b82eed76cd10e2b2e20bc8bd40240586616becc08df23f74fa20550527d",
+      "bytes": 3485
+    },
+    {
+      "path": "docs/COMPLETE-GUIDE.md",
+      "sha256": "70609fdf8b0b6abb36ab4bc34876cc8bdcd6b20c781b7eee35df7be4c1694ad6",
+      "bytes": 44613
+    },
+    {
+      "path": "docs/GITHUB-SETUP.md",
+      "sha256": "67fd81eee92f9ceaa46428df4cc8e128b4fae4ceaa6006ce4085eb58291b3b78",
+      "bytes": 1705
+    },
+    {
+      "path": "docs/NEXT-STEPS.md",
+      "sha256": "379cc577c8af6033697fbae47b7d7e0ecd0a9261bd5621e929ef31cec0bae753",
+      "bytes": 761
+    },
+    {
+      "path": "docs/PORTFOLIO.md",
+      "sha256": "dba553d6a0e5f8d7d8d475804f6bdd90784374f083c59e1c554019142cc415d2",
+      "bytes": 1840
+    },
+    {
+      "path": "docs/VERIFICATION.md",
+      "sha256": "d5ee99aa67c108c541244b0b101f9efeb598b9219441ab37bd233d92357c0f3d",
+      "bytes": 1773
+    },
+    {
+      "path": "docs/images/workspace-desktop.png",
+      "sha256": "45b7d1e1871bdee19ee66fe10bccb98910e9abb3fe7a28c86010c3ec5d13abae",
+      "bytes": 149277
+    },
+    {
+      "path": "fixtures/seed.html",
+      "sha256": "02b5ac563fe91baf4e9722f2b471a646e772120d86131308c7f004d1cbd9fadd",
+      "bytes": 26536
+    },
+    {
+      "path": "live-workflow-check.cjs",
+      "sha256": "751603316f0b3b8a25ae4f3202d4235ed9c74384ebfe6bb96cfb562818390819",
+      "bytes": 1816
+    },
+    {
+      "path": "package-lock.json",
+      "sha256": "f0876dae0fb107d21f6e9eed43ddfded2199a79b691e140f42adb166879d632f",
+      "bytes": 1788
+    },
+    {
+      "path": "package.json",
+      "sha256": "40f6427aefc8e903578109c7e2b5cd556f3938def301b31b2f3346c8a1bcd991",
+      "bytes": 400
+    },
+    {
+      "path": "prototype.py",
+      "sha256": "ff1872e7884bfcfd5d20f6860834c7c4b3c834097d751882e0f3d2c94d83fe94",
+      "bytes": 11481
+    },
+    {
+      "path": "review-browser-test.cjs",
+      "sha256": "d0944f99c6037a7ef0f022613d5559183b8bb575aa2d3a9907084c2ad6d0e6cc",
+      "bytes": 4002
+    },
+    {
+      "path": "review-test-server.py",
+      "sha256": "183884da99bd05287d9a3d35e0e36466cc3fd36d48895ea680db1c52dae0fb1a",
+      "bytes": 1665
+    },
+    {
+      "path": "seed.empty.html",
+      "sha256": "a80556e2c61fb54247a3589203d90dd99879841a49390b4c32477d46aafed46c",
+      "bytes": 134
+    },
+    {
+      "path": "setup_project.py",
+      "sha256": "c51918e411b3999658e766390553bf709f34e3f5239342a0f473d26de7d2b4bb",
+      "bytes": 629
+    },
+    {
+      "path": "site/dashboard.js",
+      "sha256": "4af2a8f148c69a44519efb34df1be6390436a0475a47ecdf8fd16c5831d9744c",
+      "bytes": 14660
+    },
+    {
+      "path": "site/index.html",
+      "sha256": "f70a78208e92b2787caaaee1b443efb89d6996d0d3f77864bcc22ac8ca3d454e",
+      "bytes": 13103
+    },
+    {
+      "path": "site/prototype.css",
+      "sha256": "d8f9ebacb7c924af6e770783a7ca117f19862c1d4cbc8ffac21ea1129ca15437",
+      "bytes": 2733
+    },
+    {
+      "path": "site/prototype.js",
+      "sha256": "6feaaedad44f08ccc751c6518c9a6da8dd7b03c3460c4d5d3570f46dd5556033",
+      "bytes": 6723
+    },
+    {
+      "path": "test_app.py",
+      "sha256": "97081ac62453503d0a423890e6d85abbda50d14773943aa4924cb526ce79893c",
+      "bytes": 8624
+    },
+    {
+      "path": "test_prototype.py",
+      "sha256": "cce20cad5e9b27c2ab2e140411c906caa20d8329ef282e62072677e66506eea9",
+      "bytes": 7496
+    },
+    {
+      "path": "workspace-browser-test.cjs",
+      "sha256": "2d70e474fc0fe61f4b9fe4a04a73b297e48eaed094686ecc80430b8d3de47993",
+      "bytes": 3002
+    }
+  ]
+}
