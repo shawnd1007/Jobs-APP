@@ -13,6 +13,7 @@
 		1A0000000000000000000016 /* WorkspaceScreens.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000015 /* WorkspaceScreens.swift */; };
 		1A0000000000000000000018 /* FormSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000017 /* FormSupport.swift */; };
 		1A000000000000000000001A = {isa = PBXBuildFile; fileRef = 1A0000000000000000000019; };
+		1A000000000000000000001D /* ProductDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000001C; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -24,6 +25,7 @@
 		1A0000000000000000000015 /* WorkspaceScreens.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreens.swift; sourceTree = "<group>"; };
 		1A0000000000000000000017 /* FormSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormSupport.swift; sourceTree = "<group>"; };
 		1A0000000000000000000019 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1A000000000000000000001C /* ProductDesign.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductDesign.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -51,6 +53,7 @@
 				1A0000000000000000000013 /* JobsViews.swift */,
 				1A0000000000000000000015 /* WorkspaceScreens.swift */,
 				1A0000000000000000000017 /* FormSupport.swift */,
+				1A000000000000000000001C /* ProductDesign.swift */,
 				1A0000000000000000000011 /* Info.plist */,
 				1A0000000000000000000019 /* Assets.xcassets */,
 			);
@@ -121,6 +124,7 @@
 				1A0000000000000000000014 /* JobsViews.swift in Sources */,
 				1A0000000000000000000016 /* WorkspaceScreens.swift in Sources */,
 				1A0000000000000000000018 /* FormSupport.swift in Sources */,
+				1A000000000000000000001D /* ProductDesign.swift in Sources */,
 				1A0000000000000000000010 /* DashboardAPI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -207,10 +211,10 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_OBJC_WEAK = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = JobsApp/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Shawn's iPhone Job App";
+				INFOPLIST_KEY_CFBundleDisplayName = Jobs;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
@@ -227,10 +231,10 @@
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ENABLE_OBJC_WEAK = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = JobsApp/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Shawn's iPhone Job App";
+				INFOPLIST_KEY_CFBundleDisplayName = Jobs;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;

@@ -1,6 +1,6 @@
 {
   "snapshot": "2026-11-11",
-  "contents": "Sanitized source and fictional fixtures; excludes private workspace data and build artifacts",
+  "contents": "Stage Two source and fictional fixtures; excludes private workspace data and build artifacts",
   "manifest_excludes_itself": true,
   "files": [
     {
@@ -30,8 +30,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "79023f7a8c7f35e75446f627b46782f1d68bb880559c5a7a3d2a1f2b9cf205a6",
-      "bytes": 3156
+      "sha256": "6099ab0ad8f201912f00b2f7c7a9fd692fbcf1efdc7ebcae5f4bdf837da534a8",
+      "bytes": 3400
     },
     {
       "path": "app.py",
@@ -50,8 +50,8 @@
     },
     {
       "path": "docs/COMPLETE-GUIDE.md",
-      "sha256": "09d85097b8c8f95632a5b5ae40a1499634211b406c111babbfc7e6b66c0785ae",
-      "bytes": 44111
+      "sha256": "1d307bd863388d379ef24d585e4bbf3f614bd563f568a3fb92d7b994a1a78792",
+      "bytes": 44282
     },
     {
       "path": "docs/EMPLOYER-BOARDS.md",
@@ -84,6 +84,11 @@
       "bytes": 3741
     },
     {
+      "path": "docs/STAGE-TWO.md",
+      "sha256": "5e07ec2066f4c3873fd525deba69efce42c64e4d17c1612d8e6f7f3ba17a393e",
+      "bytes": 2999
+    },
+    {
       "path": "docs/VERIFICATION.md",
       "sha256": "d5ee99aa67c108c541244b0b101f9efeb598b9219441ab37bd233d92357c0f3d",
       "bytes": 1773
@@ -110,7 +115,7 @@
     },
     {
       "path": "ios/JobsApp/DashboardAPI.swift",
-      "sha256": "55061e319817ff4098947b8226cb396b9ad2b5e16c16f121034374a28d0fcf24",
+      "sha256": "7793fe7f7c4d4a860d894c34ddd6cfc55b4e1b2e6eec85b4c351d966d4840e7f",
       "bytes": 9706
     },
     {
@@ -125,28 +130,33 @@
     },
     {
       "path": "ios/JobsApp/JobsApp.swift",
-      "sha256": "723b33cfe39937a5a28280ea214d172cb46fb2abd31b322d5af503201ca190ca",
-      "bytes": 7556
+      "sha256": "814f8de2f9f8f8592e7041fb9e26b283de4c10569aec519ee29560a18119d0a0",
+      "bytes": 10788
     },
     {
       "path": "ios/JobsApp/JobsViews.swift",
-      "sha256": "7d8cb7514287c2ff0c8a62ea62e432e2066333bd764f1c8093b1c4d51a87928f",
-      "bytes": 26657
+      "sha256": "321d2ea51319b07f27d5f74ba5a6b3f2d40e0fd2316f828412b8fbb0c44638a6",
+      "bytes": 31760
+    },
+    {
+      "path": "ios/JobsApp/ProductDesign.swift",
+      "sha256": "857a95e89168935f16140db98d8ef8513391d6d0865eea39c1e7fe2e07fdc55b",
+      "bytes": 8786
     },
     {
       "path": "ios/JobsApp/WorkspaceScreens.swift",
-      "sha256": "ab415c08406a1ca1a7fe68f5d19cf2c48ef1de2408281b2fb7b8945cbc648e28",
-      "bytes": 40428
+      "sha256": "03c5218cb1449b9230c07a855afedb91fec8516ea4f07c43f29e7d76f49dfaf0",
+      "bytes": 40611
     },
     {
       "path": "ios/README.md",
-      "sha256": "8bd073e5da3bfabe0348c8047f533513e77ca5b6839bfd3913a8ce01d589176e",
-      "bytes": 7642
+      "sha256": "4c4d119aa00490d72314cb1d982767f510bfe5102228b760d4f13d5909706aff",
+      "bytes": 8292
     },
     {
       "path": "ios/Shawn's iPhone Job App.xcodeproj/project.pbxproj",
-      "sha256": "7ad08d9140c6dc99a30f42f14a7700050c1c20790cadc22701cc6d75f7411695",
-      "bytes": 10564
+      "sha256": "518baf2698e1fc72df5a16f73920ae451eb7df7025cdf8e9009abd92bf51a6b8",
+      "bytes": 10946
     },
     {
       "path": "live-workflow-check.cjs",

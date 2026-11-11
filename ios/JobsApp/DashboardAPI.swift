@@ -1,7 +1,7 @@
 import Foundation
 
 struct Dashboard: Decodable {
-    let jobs: [Job]
+    var jobs: [Job]
     let savedSearches: [SavedSearch]?
     let matchAlerts: [MatchAlert]?
     let unreadMatchCount: Int?
@@ -21,7 +21,7 @@ struct Job: Decodable, Identifiable {
         let version: Int
         let updated: String
     }
-    let interest: Interest?
+    var interest: Interest?
     let matchedSkills: [String]?
     let matchedGroups: [String]?
     let matchGaps: [String]?
@@ -59,11 +59,11 @@ struct Job: Decodable, Identifiable {
     let reviewNote: String
     let reviewReviewer: String
     let reviewVersion: Int
-    let status: String
-    let applicationDate: String
-    let followUp: String
-    let notes: String
-    let version: Int
+    var status: String
+    var applicationDate: String
+    var followUp: String
+    var notes: String
+    var version: Int
     let aiAdvice: SavedAdvice?
 
     var publishedPay: String {

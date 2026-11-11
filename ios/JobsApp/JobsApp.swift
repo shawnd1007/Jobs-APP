@@ -21,6 +21,12 @@ final class Workspace {
     var connectionError: String?
     var searchError: String?
     private var latestLoad = UUID()
+    let isSample: Bool
+
+    init(isSample: Bool = false) {
+        self.isSample = isSample
+        if isSample { dashboard = SampleWorkspace.dashboard() }
+    }
 
     func connect(to address: String) {
         self.address = address
@@ -32,7 +38,7 @@ final class Workspace {
     }
 
     func refresh() async {
-        guard !address.isEmpty else { return }
+        guard !isSample, !address.isEmpty else { return }
         let load = UUID()
         latestLoad = load
         loading = true
@@ -51,6 +57,9 @@ final class Workspace {
     }
 
     func save<T: Encodable>(_ path: String, _ body: T) async throws {
+        guard !isSample else {
+            throw DashboardAPI.ServerError(status: 0, message: "Connect your Mac to use this feature.")
+        }
         guard !saving else {
             throw DashboardAPI.ServerError(status: 409, message: "Another change is being saved.")
         }
@@ -58,6 +67,44 @@ final class Workspace {
         defer { saving = false }
         try await DashboardAPI.post(path, at: address, body: body)
         await refresh()
+    }
+
+    func updateInterest(for jobID: Int, to state: String, version: Int) async throws {
+        guard isSample else {
+            try await save("/api/jobs/\(jobID)/interest", InterestUpdate(state: state, version: version))
+            return
+        }
+        try editSampleJob(jobID) { job in
+            guard (job.interest?.version ?? 0) == version else { throw Self.sampleConflict }
+            job.interest = Job.Interest(state: state, version: version + 1,
+                                        updated: Date.now.ISO8601Format())
+        }
+    }
+
+    func updateTracking(for jobID: Int, draft: TrackingDraft) async throws {
+        guard isSample else {
+            try await save("/api/jobs/\(jobID)/tracking", draft)
+            return
+        }
+        try editSampleJob(jobID) { job in
+            guard job.version == draft.version else { throw Self.sampleConflict }
+            job.status = draft.status
+            job.applicationDate = draft.applicationDate
+            job.followUp = draft.followUp
+            job.notes = draft.notes
+            job.version += 1
+        }
+    }
+
+    private static var sampleConflict: DashboardAPI.ServerError {
+        DashboardAPI.ServerError(status: 409, message: "This sample job has changed. Reload to edit it.")
+    }
+
+    private func editSampleJob(_ id: Int, change: (inout Job) throws -> Void) throws {
+        guard var snapshot = dashboard, let index = snapshot.jobs.firstIndex(where: { $0.id == id })
+        else { throw DashboardAPI.ServerError(status: 404, message: "Sample job unavailable.") }
+        try change(&snapshot.jobs[index])
+        dashboard = snapshot
     }
 
     func startSearch() async {
@@ -79,64 +126,36 @@ private struct WorkspaceView: View {
     @State private var workspace = Workspace()
     @State private var editingServer = false
 
+    @State private var sample: Workspace?
+    @State private var selectedTab: Tab = .forYou
+
+    private enum Tab: Hashable { case forYou, browse, myJobs, search, settings }
+
     var body: some View {
         Group {
-            if workspace.dashboard != nil {
-                TabView {
-                    NavigationStack { ForYou(workspace: workspace) }
-                        .tabItem { Label("For You", systemImage: "sparkles") }
-                    NavigationStack { JobList(workspace: workspace) }
-                        .tabItem { Label("Browse", systemImage: "list.bullet") }
-                    NavigationStack { SearchScreen(workspace: workspace) }
-                        .tabItem { Label("Search", systemImage: "magnifyingglass") }
-                        .badge(workspace.dashboard?.unreadMatchCount ?? 0)
-                    NavigationStack { JobList(workspace: workspace, trackingOnly: true) }
-                        .tabItem { Label("My Jobs", systemImage: "bookmark") }
-                    NavigationStack {
-                        PreferencesScreen(workspace: workspace) { editingServer = true }
-                    }
-                    .tabItem { Label("Settings", systemImage: "gearshape") }
-                }
-                .id(workspace.address)
-                .safeAreaInset(edge: .top) {
-                    if let message = workspace.connectionError {
-                        Button {
-                            Task { await workspace.refresh() }
-                        } label: {
-                            Label("Refresh failed. Tap to retry.", systemImage: "wifi.exclamationmark")
-                        }
-                        .accessibilityHint(message)
-                        .padding(8)
-                        .frame(maxWidth: .infinity)
-                        .background(.regularMaterial)
-                    }
-                }
+            if let sample {
+                tabs(sample)
+            } else if workspace.dashboard != nil {
+                tabs(workspace)
             } else {
                 NavigationStack {
-                    Group {
-                        if workspace.loading {
-                            ProgressView("Loading workspace…")
-                        } else {
-                            ContentUnavailableView {
-                                Label(address.isEmpty ? "Connect to Jobs" : "Couldn’t Load Jobs",
-                                      systemImage: address.isEmpty ? "desktopcomputer" : "wifi.exclamationmark")
-                            } description: {
-                                Text(workspace.connectionError ?? "Enter the address of the Jobs server running on your Mac.")
-                            } actions: {
-                                Button("Set Server Address") { editingServer = true }
-                                if !address.isEmpty {
-                                    Button("Try Again") { Task { await workspace.refresh() } }
-                                }
-                            }
-                        }
+                    WorkspaceWelcome(hasAddress: !address.isEmpty, loading: workspace.loading,
+                                     error: workspace.connectionError) {
+                        selectedTab = .forYou
+                        sample = Workspace(isSample: true)
+                    } connect: {
+                        editingServer = true
+                    } retry: {
+                        Task { await workspace.refresh() }
                     }
-                    .navigationTitle("Jobs")
                 }
             }
         }
-        .tint(Color(red: 0.03, green: 0.49, blue: 0.52))
+        .tint(JobsTheme.accent)
         .sheet(isPresented: $editingServer) {
             ServerSettings(address: address) { newAddress in
+                selectedTab = .forYou
+                sample = nil
                 if address == newAddress {
                     Task { await workspace.refresh() }
                 } else {
@@ -156,6 +175,76 @@ private struct WorkspaceView: View {
             }
         }
     }
+
+    private func tabs(_ current: Workspace) -> some View {
+        TabView(selection: $selectedTab) {
+            NavigationStack {
+                ForYou(workspace: current, openBrowse: { selectedTab = .browse },
+                       openSettings: { selectedTab = .settings })
+                    .workspaceNotice(current)
+            }
+            .tabItem { Label("For You", systemImage: "sparkles") }
+            .tag(Tab.forYou)
+            NavigationStack { JobList(workspace: current).workspaceNotice(current) }
+                .tabItem { Label("Browse", systemImage: "magnifyingglass") }
+                .tag(Tab.browse)
+            NavigationStack { JobList(workspace: current, trackingOnly: true).workspaceNotice(current) }
+                .tabItem { Label("My Jobs", systemImage: "bookmark") }
+                .tag(Tab.myJobs)
+            if !current.isSample {
+                NavigationStack { SearchScreen(workspace: current).workspaceNotice(current) }
+                    .tabItem { Label("Alerts", systemImage: "bell") }
+                    .tag(Tab.search)
+                    .badge(current.dashboard?.unreadMatchCount ?? 0)
+            }
+            NavigationStack {
+                if current.isSample {
+                    List {
+                        Section("Sample Workspace") {
+                            Text("These listings are fictional. Changes here last until you leave the sample workspace.")
+                            Button("Connect to your Mac", systemImage: "desktopcomputer") { editingServer = true }
+                            Button("Leave Sample Workspace") {
+                                selectedTab = .forYou
+                                sample = nil
+                            }
+                        }
+                    }
+                    .navigationTitle("Settings")
+                } else {
+                    PreferencesScreen(workspace: current) { editingServer = true }
+                        .workspaceNotice(current)
+                }
+            }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tag(Tab.settings)
+        }
+        .id(current.isSample ? "sample" : current.address)
+    }
+}
+
+extension View {
+    @MainActor
+    func workspaceNotice(_ current: Workspace) -> some View {
+        safeAreaInset(edge: .top, spacing: 0) {
+            if current.isSample {
+                Label("Sample workspace · Fictional listings", systemImage: "eye")
+                    .font(.footnote.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial)
+            } else if let message = current.connectionError {
+                Button {
+                    Task { await current.refresh() }
+                } label: {
+                    Label("Connection lost. Tap to retry.", systemImage: "wifi.exclamationmark")
+                        .frame(maxWidth: .infinity)
+                        .padding(8)
+                }
+                .accessibilityHint(message)
+                .background(.regularMaterial)
+            }
+        }
+    }
 }
 
 private struct ServerSettings: View {
@@ -166,7 +255,7 @@ private struct ServerSettings: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Backend URL") {
+                Section("Mac workspace address") {
                     TextField("http://your-mac.local:8084", text: $address)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)

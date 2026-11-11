@@ -77,7 +77,7 @@ flowchart TD
     Search[Manual or scheduled search] --> API
     API --> Feeds[Employer public feeds and posting pages]
     API -->|Explicit job review only| AI[Optional OpenAI API]
-    Native[Future native client] -.->|Same API| API
+    Native[iPhone app] -->|Same API| API
 ```
 
 The browser never talks directly to SQLite or receives an AI key. The backend owns those operations. Browsers using the same server see the same records. Separate backend installations do not automatically synchronize.
@@ -511,7 +511,7 @@ The SwiftUI app under `ios/` connects to the shared Python backend. **For You** 
 
 The Search Profile supports résumé import with a device-local preview, suggested and custom skills, work locations and annual base pay. Saved searches use their own criteria. The backend records new matches, and the iPhone can show a local notification after it reconnects and sees unread matches.
 
-See the [iPhone setup guide](../ios/README.md) for the simulator, device signing and private-network setup.
+A first-time visitor can explore fictional listings and practice application tracking in an on-device sample session. See the [iPhone setup guide](../ios/README.md) for the simulator, device signing and private-network setup, and the [Stage Two notes](STAGE-TWO.md) for the design and verification record.
 
 ## 19. Troubleshooting
 
@@ -537,7 +537,7 @@ See the [iPhone setup guide](../ios/README.md) for the simulator, device signing
 
 ## 20. Limits and next milestones
 
-The app is a useful personal prototype. It does not yet offer login/accounts, multi-user authorization, durable distributed workers, universal employer coverage, reliable parsing of every salary tier/state policy, full resume ingestion, automatic submissions, notifications, a native client or production web hosting.
+The app is a useful personal prototype. It does not yet offer login/accounts, multi-user authorization, durable distributed workers, universal employer coverage, reliable parsing of every salary tier/state policy, full resume ingestion, automatic submissions, remote push notifications or production web hosting.
 
 Its matching is partly heuristic and geography-specific. Some labels and filters still reflect the original personal design. The dashboard returns the whole collection rather than using server pagination. The scheduler uses a latest-run-date rule instead of a separate successful scheduled-run ledger. The HTTP server is the Python standard-library implementation. These are reasonable things to explain and improve as the project matures.
 
@@ -549,7 +549,7 @@ Suggested next milestones, in order:
 4. Refactor compact backend sections into focused modules without changing behavior.
 5. Validate the paid AI integration with a configured account and a deliberately small usage budget.
 6. Improve employer coverage one source family at a time, with source-specific evidence and regression checks.
-7. Choose between continued web improvements and a read-only native client.
+7. Verify the native workflow on a signed physical iPhone build.
 8. Add authentication and deployment hardening before expanding access.
 
 These are plans, not features already shipped.

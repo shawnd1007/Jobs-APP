@@ -6,6 +6,10 @@ A personal job-discovery, review and application-tracking prototype built with P
 
 Read the [complete plain-English guide](docs/COMPLETE-GUIDE.md), [GitHub setup](docs/GITHUB-SETUP.md), and [development instructions](CONTRIBUTING.md).
 
+## Try the iPhone app
+
+Open the Xcode project in `ios/`, run the JobsApp scheme, and choose **Explore sample jobs** to try the feed and tracking without a server. See the [iPhone guide](ios/README.md) and [Stage Two notes](docs/STAGE-TWO.md).
+
 ## Run locally
 
 Install Python 3.13 and Docker Desktop, then run:

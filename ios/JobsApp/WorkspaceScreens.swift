@@ -9,6 +9,20 @@ struct SearchScreen: View {
     var body: some View {
         List {
             if let dashboard = workspace.dashboard {
+                if let searches = dashboard.savedSearches {
+                    Section("Your matches") {
+                        NavigationLink {
+                            MatchInbox(workspace: workspace)
+                        } label: {
+                            LabeledContent("Match Alerts", value: "\(dashboard.unreadMatchCount ?? 0) unread")
+                        }
+                        NavigationLink {
+                            SavedSearchesScreen(workspace: workspace)
+                        } label: {
+                            LabeledContent("Saved Searches", value: String(searches.count))
+                        }
+                    }
+                }
                 Section {
                     Button("Run Employer Search", systemImage: "magnifyingglass") {
                         Task { await workspace.startSearch() }
@@ -20,20 +34,6 @@ struct SearchScreen: View {
                     if let error = workspace.searchError { Text(error).foregroundStyle(.red) }
                 } footer: {
                     Text("The Mac checks configured employer sources and updates this workspace.")
-                }
-                if let searches = dashboard.savedSearches {
-                    Section("Saved Searches and Alerts") {
-                        NavigationLink {
-                            SavedSearchesScreen(workspace: workspace)
-                        } label: {
-                            LabeledContent("Saved Searches", value: String(searches.count))
-                        }
-                        NavigationLink {
-                            MatchInbox(workspace: workspace)
-                        } label: {
-                            LabeledContent("Match Alerts", value: "\(dashboard.unreadMatchCount ?? 0) unread")
-                        }
-                    }
                 }
                 Section("Daily Search") {
                     LabeledContent("Schedule", value: dashboard.preferences.scheduleEnabled
@@ -55,7 +55,9 @@ struct SearchScreen: View {
                 }
             }
         }
-        .navigationTitle("Search")
+        .scrollContentBackground(.hidden)
+        .background(JobsTheme.canvas.ignoresSafeArea())
+        .navigationTitle("Alerts")
         .refreshable { await workspace.refresh() }
     }
 }
@@ -185,6 +187,8 @@ struct PreferencesScreen: View {
                 Text(workspace.address).font(.footnote).foregroundStyle(.secondary)
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(JobsTheme.canvas.ignoresSafeArea())
         .navigationTitle("Settings")
         .refreshable { await workspace.refresh() }
         .sheet(isPresented: $editingPreferences) {
