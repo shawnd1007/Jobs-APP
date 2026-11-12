@@ -128,7 +128,7 @@ def source_result(a, source, state, count=0, error=''):
 def source_snapshot(a, jobs, cfg):
     sources = set()
     for j in jobs:
-        if j.get('external_application'):
+        if j.get('external_application') or j.get('identity_review'):
             continue
         board = a.board_identity(j['url'])
         sources.add('/'.join(board) if board else j['url'])

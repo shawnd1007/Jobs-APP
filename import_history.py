@@ -31,8 +31,17 @@ def import_history(path, *, apply=False):
         by_requisition = defaultdict(set)
         for job in jobs:
             listing = json.loads(job['listing'])
-            by_url[job['identity']].add(job['id'])
-            by_url[app.identity(listing['url'])].add(job['id'])
+            if listing.get('identity_review'):
+                continue
+            if listing.get('url'):
+                try:
+                    key = app.identity(listing['url'])
+                    if (not listing.get('external_application') and key != job['identity']
+                            and app.legacy_page_identity(listing['url']) != job['identity']):
+                        continue
+                except ValueError:
+                    continue
+                by_url[key].add(job['id'])
             requisition = str(listing.get('requisition') or '').strip().casefold()
             if requisition:
                 by_requisition[app.norm(listing.get('employer', '')), requisition].add(job['id'])

@@ -62,3 +62,8 @@ Jobs checks the requisition and page title before sending a saved-search alert. 
 ## Application Prep
 
 The web and connected iPhone job details include a worksheet that pairs employer duties with examples from the saved Search Profile. Users can add their own excerpts to a draft, edit them and save it per job. Skills without a usable work example appear with questions to check. Draft writes use a version so retries and edits on two devices preserve the owner’s text. The worksheet works without a paid AI provider.
+
+
+## Keep distinct employer openings separate
+
+Jobs retains requisition parameters in employer page URLs and no longer merges openings by employer, title and location. Search deduplicates tracking links to the same posting. Older keys upgrade in place when the retained URL is consistent. Ambiguous records stay in review with their original tracking and preparation drafts.

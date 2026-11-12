@@ -124,7 +124,7 @@ This is an in-app explanation of discovery, matching and human decisions. The br
 Imagine a fictional employer publishes an Implementation Specialist role.
 
 1. A search retrieves the employer feed. A source adapter converts its response into common fields such as title, employer, URL, location and description.
-2. The application builds a source identity, usually platform + board + requisition. It also keeps an employer/title/location fallback for deduplication.
+2. The application identifies the posting by its recruiting platform, employer board and requisition ID, or by its full employer URL. Similar titles and locations can belong to different openings.
 3. Matching examines the current description, location, pay and title. A keyword score explains the experience overlap; it is not a hiring prediction.
 4. If the hard checks and score qualify, the service attempts to confirm evidence on the exact application page. A dynamic or inaccessible form remains uncertain.
 5. Listing facts are inserted or refreshed in `jobs`. A new record receives a separate tracking record beginning as Needs Verification.
@@ -176,6 +176,10 @@ When enabled, bounded Bing RSS searches rotate across role phrases, regions and 
 There is no universal Workday adapter. A careers homepage is not automatically a supported complete employer-board feed. For an unsupported employer, a job-specific URL and manual verification are often necessary.
 
 Generic URLs are attempted least-recently-checked first. Repeated failures cannot permanently consume the same first slots. The list of deferred URLs is retained in the report. Board rechecks prioritize saved-search matches waiting for a direct posting check, then older verification timestamps.
+
+Employer URLs preserve query parameters that may identify a posting. Jobs ignores ordinary anchors and recognized tracking parameters, such as UTM tags and Greenhouse attribution. Two openings on the same page path can have separate tracking records and alerts. Multiple links to the same posting count as one source check per run.
+
+When an older saved URL supplies enough information to update its key, Jobs updates the key on the same record and flags its history for review. If retained records disagree, the affected entries stay in review. Automatic refresh and CSV history import skip those entries until the ambiguity can be resolved. Their existing notes, decisions and drafts stay attached to their original records. A key migration cannot recover a posting that an older release already overwrote.
 
 ### One complete search run
 

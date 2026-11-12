@@ -166,6 +166,80 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(jobs[first_id]['status'], 'Applied')
   self.assertEqual(jobs[second_id]['status'], 'Needs Verification')
 
+ def test_same_title_and_location_do_not_merge_distinct_posting_urls(self):
+  job = dict(title='Fictional Billing Analyst', employer='Fictional Employer', location='Remote')
+  first = 'https://example.com/careers?posting=101'
+  second = 'https://example.com/careers?posting=102'
+  with app.connect() as c:
+   first_id, added = app.upsert(c, dict(job, url=first))
+   self.assertTrue(added)
+   c.execute("UPDATE tracking SET status='Applied',notes='First opening only' WHERE job_id=?",(first_id,))
+   second_id, added = app.upsert(c, dict(job, url=second))
+   self.assertTrue(added)
+   third_id, added = app.upsert(c, dict(job, url='https://example.com/careers/new-role'))
+   self.assertTrue(added)
+   repeat_id, added = app.upsert(c, dict(job, url=first+'&utm_source=test#apply'))
+   self.assertFalse(added)
+  self.assertEqual(first_id, repeat_id)
+  self.assertEqual(len({first_id, second_id, third_id}), 3)
+  first_row, = (row for row in app.records() if row['id']==first_id)
+  self.assertEqual((first_row['status'],first_row['notes']),('Applied','First opening only'))
+  self.assertEqual(app.identity('https://example.com/careers?b=2&posting=101&a=1'),
+                   app.identity('https://example.com/careers?a=1&posting=101&b=2'))
+  self.assertNotEqual(app.identity('https://example.com/careers?posting=101&posting=102'),
+                      app.identity('https://example.com/careers?posting=102&posting=101'))
+
+ def test_legacy_generic_keys_rekey_in_place_and_hold_conflicts(self):
+  job = dict(title='Fictional Billing Analyst', employer='Fictional Employer', location='Remote')
+  url = 'https://example.com/careers?posting=101'
+  conflicted = 'https://example.com/careers?posting=201'
+  with app.connect() as c:
+   first_id,_ = app.upsert(c,dict(job,url=url))
+   conflict_id,_ = app.upsert(c,dict(job,url=conflicted))
+   c.execute('UPDATE jobs SET identity=? WHERE id=?',(app.legacy_page_identity(url),first_id))
+   c.execute('UPDATE jobs SET identity=? WHERE id=?',('https://example.com/other-opening',conflict_id))
+   c.execute("UPDATE tracking SET status='Applied',notes='Original application' WHERE job_id=?",(first_id,))
+  self.assertEqual(app.save_application_draft(first_id,{'draft':'Keep my fictional draft','version':0})[0],200)
+  app.init()
+  app.init()
+  records = {record['id']:record for record in app.records()}
+  self.assertEqual(records[first_id]['identity'],url)
+  self.assertTrue(records[first_id]['history_confirmation'])
+  self.assertEqual(records[first_id]['notes'],'Original application')
+  self.assertEqual(app.application_prep(first_id)[1]['draft'],'Keep my fictional draft')
+  self.assertTrue(records[conflict_id]['identity_review'])
+  self.assertEqual(records[conflict_id]['url'],conflicted)
+  self.assertEqual(records[conflict_id]['identity'],'https://example.com/other-opening')
+  self.assertIn(app.IDENTITY_REVIEW,app.review_blockers(records[conflict_id]))
+  from import_history import import_history
+  history = app.DATA/'fictional-history.csv'
+  history.write_text(f'url,status\n{conflicted},Applied\n',encoding='utf-8')
+  self.assertEqual(import_history(history)[0]['result'],'no unique requisition match')
+
+ def test_migration_keeps_both_rows_when_legacy_links_normalize_to_one_posting(self):
+  first = 'https://example.com/careers?jobId=7&requisitionId=R7'
+  second = 'https://example.com/careers?requisitionId=R7&jobId=7'
+  self.assertEqual(app.identity(first),app.identity(second))
+  ids = []
+  with app.connect() as c:
+   for url in (first,second):
+    job = dict(title='Fictional Analyst',employer='Fictional Employer',url=url,availability='Open')
+    job_id = c.execute(
+        'INSERT INTO jobs(identity,listing,created,updated) VALUES(?,?,?,?)',
+        (app.legacy_page_identity(url),json.dumps(job),app.now(),app.now()),
+    ).lastrowid
+    c.execute('INSERT INTO tracking(job_id,notes,updated) VALUES(?,?,?)',
+              (job_id,f'Original record {job_id}',app.now()))
+    ids.append(job_id)
+  app.init()
+  retained = {job['id']:job for job in app.records()}
+  for job_id in ids:
+   self.assertTrue(retained[job_id]['identity_review'])
+   self.assertEqual(retained[job_id]['availability'],'Needs Verification')
+   self.assertEqual(retained[job_id]['notes'],f'Original record {job_id}')
+  with app.connect() as c, self.assertRaisesRegex(ValueError,'Retained records disagree'):
+   app.upsert(c,dict(title='Fictional Analyst',employer='Fictional Employer',url=first))
+
  def test_legacy_requisition_mismatch_restores_link_without_moving_tracking(self):
   first = dict(title='Billing Analyst', employer='Fictional Employer', location='Remote - United States',
                url='https://jobs.lever.co/fictional/job-one/apply', requisition='job-one')
@@ -343,6 +417,57 @@ class PersistenceTests(unittest.TestCase):
   with patch.object(app,'config',return_value=cfg),patch.object(app,'board_jobs',side_effect=TimeoutError('Test timeout')):
    app.LOCK.acquire();report=app.run_pipeline()
   self.assertTrue(report['failures']);self.assertEqual(app.records()[0]['availability'],'Needs Verification');self.assertEqual(app.records()[0]['status'],'Applied')
+ def test_generic_search_keeps_distinct_requisitions_through_failure_and_retry(self):
+  _, cfg = self.pipeline_fixture()
+  base = 'https://example.com/careers?posting='
+  cfg.update(categories=['Billing Analyst'], preferred_skills=['Excel'], skill_groups=[],
+             target_locations=['Austin, TX'], workplace_types=['onsite'], salary_floor=80000,
+             additional_boards={}, additional_employer_urls=[base+'101',base+'102',base+'101&utm_source=example'],
+             generic_urls_per_run=5)
+  criteria = dict(name='Fictional billing', title_terms=['Billing'], skills=['Excel'],
+                  locations=['Austin, TX'], workplace_types=['onsite'], salary_min=85000,
+                  salary_max=None, enabled=True)
+  self.assertEqual(app.prototype.change_saved_search(app,{'action':'save','criteria':criteria})[0],200)
+  attempts = []
+  fail = False
+
+  def public_fixture(request, **kwargs):
+   url = request.full_url
+   self.assertIn(url,(base+'101',base+'102'))
+   attempts.append(url)
+   if fail and url == base+'102':
+    raise TimeoutError('Fictional employer timeout')
+   posting = {'@type':'JobPosting','title':'Fictional Billing Analyst','description':'Reconcile payments in Excel.',
+              'hiringOrganization':{'name':'Fictional Employer','sameAs':'https://example.com/'},
+              'jobLocation':{'address':{'addressLocality':'Austin','addressRegion':'TX'}},
+              'baseSalary':{'currency':'USD','value':{'minValue':90000,'maxValue':110000,'unitText':'YEAR'}}}
+   html = ('<h1>Fictional Billing Analyst</h1><a href="/apply">Apply</a>'
+           '<script type="application/ld+json">'+json.dumps(posting)+'</script>')
+   return html.encode(),url
+
+  with patch.object(app,'config',return_value=cfg), patch.object(app,'board_jobs',return_value=[]), \
+       patch.object(app,'read_response',side_effect=public_fixture):
+   app.LOCK.acquire()
+   first = app.run_pipeline()
+   self.assertEqual(first['new_review'],2)
+   self.assertEqual(len(attempts),4)
+   records={j['url']:j for j in app.records() if j['url'].startswith(base)}
+   self.assertEqual(set(records),{base+'101',base+'102'})
+   ids={j['id'] for j in records.values()}
+   with app.connect() as c:
+    c.execute("UPDATE tracking SET notes='Keep this application' WHERE job_id=?",(records[base+'102']['id'],))
+   fail = True
+   app.LOCK.acquire()
+   self.assertEqual(app.run_pipeline()['state'],'partial')
+   fail = False
+   app.LOCK.acquire()
+   app.run_pipeline()
+   dashboard = app.snapshot()
+  self.assertEqual({j['id'] for j in dashboard['jobs'] if j['url'].startswith(base)},ids)
+  self.assertEqual({a['job_id'] for a in dashboard['match_alerts']},ids)
+  self.assertEqual(len(dashboard['match_alerts']),2)
+  self.assertEqual(next(j for j in dashboard['jobs'] if j['url']==base+'102')['notes'],'Keep this application')
+
  def test_new_listing_limit_applies_after_ranking_all_boards(self):
   _, cfg = self.pipeline_fixture()
   cfg.update(categories=['financial analyst'], preferred_skills=['Excel', 'Reconciliation'],

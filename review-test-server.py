@@ -26,6 +26,12 @@ with tempfile.TemporaryDirectory(prefix='review-qa-',dir=app.DATA) as folder:
                     j['posting_verified'] = app.now()
             else:j['availability']='Closed'
             c.execute('UPDATE jobs SET listing=? WHERE id=?',(json.dumps(j),j['id']))
+        for requisition in ('101', '102'):
+            app.upsert(c, dict(
+                title='Fictional Reconciliation Analyst', employer='Fictional Employer',
+                url='https://example.com/careers?posting=' + requisition, location='Remote - United States',
+                description='Fictional employer posting for browser tests.', availability='Open',
+            ))
     class QAHandler(app.Handler):
         def do_POST(self):
             if self.path=='/qa-stop':

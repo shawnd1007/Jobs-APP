@@ -87,8 +87,23 @@ def identity(url):
         posting = re.match(r'^(\d+)(?:-|$)', parts[2])
         if posting:
             return f'smartrecruiters:{parts[1].lower()}:{posting[1]}'
-    query=up.urlencode([(k,v) for k,v in up.parse_qsl(u.query) if k in ('gh_jid','jobId','requisitionId')])
-    return up.urlunsplit(('https',host,path,query,''))
+    params = [
+        (key, value) for key, value in up.parse_qsl(u.query, keep_blank_values=True)
+        if not key.lower().startswith('utm_') and key.lower() != 'gh_src'
+    ]
+    query = up.urlencode(sorted(params, key=lambda pair: pair[0]))
+    return up.urlunsplit(('https', f'[{host}]' if ':' in host else host, path, query, ''))
+
+
+def legacy_page_identity(url):
+    """Recognize the previous generic key during startup only."""
+    parts = up.urlsplit(url)
+    query = up.urlencode([
+        (key, value) for key, value in up.parse_qsl(parts.query)
+        if key in ('gh_jid', 'jobId', 'requisitionId')
+    ])
+    return up.urlunsplit(('https', parts.hostname or '', parts.path.rstrip('/'), query, ''))
+
 
 def stored_board_posting(ident):
     platform, _, rest = ident.partition(':')
@@ -179,6 +194,42 @@ def fetch(url, payload=None, key=None):
     raw, _ = read_response(request, max_bytes=16_000_000)
     return json.loads(raw)
 
+IDENTITY_REVIEW = 'Retained records disagree about this posting. Check the employer link and application history.'
+
+
+def migrate_posting_identities(connection):
+    """Upgrade unambiguous keys in place and retain all rows when evidence disagrees."""
+    rows = connection.execute('SELECT id,identity,listing FROM jobs').fetchall()
+    owners = {row['identity']: row['id'] for row in rows}
+    listings = []
+    counts = {}
+    for row in rows:
+        listing = json.loads(row['listing'])
+        if listing.get('external_application') or not listing.get('url'):
+            continue
+        try:
+            key = identity(listing['url'])
+        except ValueError:
+            key = None
+        counts[key] = counts.get(key, 0) + 1
+        listings.append((row, listing, key))
+
+    for row, listing, key in listings:
+        old = row['identity']
+        can_rekey = key is not None and old == legacy_page_identity(listing['url'])
+        conflict = key is None or counts[key] > 1 or owners.get(key, row['id']) != row['id']
+        if listing.get('identity_review') or conflict or (old != key and not can_rekey):
+            listing.update(identity_review=True, availability='Needs Verification', queue='Review',
+                           application_evidence=IDENTITY_REVIEW)
+            for field in ('application_verified', 'posting_verified', 'pending_match_alert'):
+                listing.pop(field, None)
+            connection.execute('UPDATE jobs SET listing=? WHERE id=?', (json.dumps(listing), row['id']))
+        elif old != key:
+            listing['history_confirmation'] = True
+            connection.execute('UPDATE jobs SET identity=?, listing=? WHERE id=?',
+                               (key, json.dumps(listing), row['id']))
+
+
 def init():
     with connect() as c:
         c.executescript('''CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, identity TEXT UNIQUE NOT NULL, fallback TEXT, listing TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
@@ -224,6 +275,9 @@ def init():
             j.update(location_eligibility=eligible,location_reason=reason,area=area)
             if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
             c.execute('UPDATE jobs SET listing=? WHERE id=?',(json.dumps(j),row['id']))
+        migrate_posting_identities(c)
+
+
 def external_role_key(employer, title, location):
     return tuple(' '.join(re.findall(r'\w+', unicodedata.normalize('NFKC', value).casefold()))
                  for value in (employer, title, location))
@@ -239,15 +293,7 @@ def external_link_key(url):
     if (parts.scheme != 'https' or not parts.hostname or parts.username or parts.password
             or parts.port not in (None, 443)):
         raise ValueError('Enter a valid HTTPS posting link.')
-    canonical = identity(url)
-    if not canonical.startswith('https:'):
-        return canonical
-    params = [(key, value) for key, value in up.parse_qsl(parts.query, keep_blank_values=True)
-              if not key.lower().startswith('utm_')]
-    host = parts.hostname.lower()
-    if ':' in host:
-        host = '[' + host + ']'
-    return up.urlunsplit(('https', host, parts.path.rstrip('/'), up.urlencode(sorted(params, key=lambda pair: pair[0])), ''))
+    return identity(url)
 
 
 def add_external_application(payload):
@@ -333,29 +379,19 @@ def upsert(c,j):
                 if external_link_key(json.loads(external['listing'])['url']) == link_key:
                     row = external
                     break
-    if not row:
-        alternatives = c.execute('SELECT * FROM jobs WHERE fallback=?', (fallback,)).fetchall()
-        if len(alternatives) == 1:
-            previous = alternatives[0]
-            old = json.loads(previous['listing'])
-            old_board = board_identity(old['url'])
-            new_board = board_identity(j['url'])
-            # Distinct recruiting-platform IDs represent distinct openings.
-            if not old.get('external_application') and not (old_board and new_board) and not (old.get('requisition') and j.get('requisition')):
-                row = previous
     stamp=now()
     if row:
         old=json.loads(row['listing'])
-        promoted = old.get('external_application', False)
-        if promoted:
+        if old.get('identity_review'):
+            raise ValueError(IDENTITY_REVIEW)
+        if old.get('external_application'):
             old = {}
         # A fresh employer response owns these facts, including their absence.
         for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified','posting_verified'):
             old.pop(field,None)
         old.update(j)
-        canonical = ident if promoted or board_identity(j['url']) else row['identity']
         c.execute('UPDATE jobs SET identity=?,fallback=?,listing=?,updated=? WHERE id=?',
-                  (canonical, fallback, json.dumps(old), stamp, row['id']))
+                  (ident, fallback, json.dumps(old), stamp, row['id']))
         return row['id'],False
     cur=c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?)',(ident,fallback,json.dumps(j),stamp,stamp))
     c.execute('INSERT INTO tracking(job_id,updated) VALUES(?,?)',(cur.lastrowid,stamp))
@@ -370,6 +406,7 @@ def records():
 UNAPPLIED={'Needs Verification','Not Applied','Planning to Apply'}
 def review_blockers(j, cfg=None):
     cfg=config() if cfg is None else cfg;geo=location_eligibility(j,cfg)[0];problems=[]
+    if j.get('identity_review'):problems.append(IDENTITY_REVIEW)
     if geo=='Rejected':problems.append('Location is outside your saved preferences.')
     salary=base_salary(j)
     if salary is not None and salary<cfg['salary_floor']:problems.append('Published maximum base salary is below your minimum.')
@@ -1159,6 +1196,8 @@ def run_pipeline(trigger='manual'):
         existing = [job for job in records() if not job.get('external_application')]
         boards = set()
         for j in existing:
+            if j.get('identity_review'):
+                continue
             b=board_identity(j['url'])
             if b:boards.add(b)
         for platform,names in cfg['additional_boards'].items():boards.update((platform,n.lower()) for n in names)
@@ -1209,8 +1248,17 @@ def run_pipeline(trigger='manual'):
                         elif hit.get('url'): discoveries.append(hit['url'])
                 except Exception as e:report['failures'].append('Firecrawl discovery: '+type(e).__name__+': '+str(e)[:160])
         else:report['log'].append('Public board mode: Firecrawl is disabled or no key is configured.')
+        held_keys = set()
+        for job in existing:
+            if job.get('identity_review'):
+                held_keys.add(job['identity'])
+                try:
+                    held_keys.add(identity(job['url']))
+                except ValueError:
+                    pass
+        existing = [job for job in existing if not job.get('identity_review')]
         retained_by_identity = {identity(job['url']): job for job in existing}
-        known_identities = {job['identity'] for job in existing} | retained_by_identity.keys()
+        known_identities = retained_by_identity.keys() | held_keys
         candidates = {}
         seen = set()
         successful = 0
@@ -1239,7 +1287,8 @@ def run_pipeline(trigger='manual'):
                 successful += 1
                 by_id = {identity(j['url']):j for j in live}
                 prototype.source_result(service(),platform+'/'+board,'ok',len(live))
-                current=[j for j in existing if board_identity(j['url'])==(platform,board)]
+                current=[j for j in existing if board_identity(j['url'])==(platform,board)
+                         and identity(j['url']) not in held_keys]
                 current.sort(key=lambda job: (not job.get('pending_match_alert'),
                                               job.get('posting_check_attempted', ''), job.get('last_verified', '')))
                 recheck_limit = min(cfg['max_rechecks'], 8) if platform == 'smartrecruiters' else cfg['max_rechecks']
@@ -1308,11 +1357,34 @@ def run_pipeline(trigger='manual'):
             progress('Checking employer boards', index + 1, len(board_list))
             pause()
         with connect() as c:known_urls=[r['source'] for r in c.execute("SELECT source FROM source_health WHERE source LIKE 'https://%'")]
-        extra=list(dict.fromkeys([j['url'] for j in existing if not board_identity(j['url'])]+discoveries+cfg['additional_employer_urls']+known_urls))
-        extra=[u for u in extra if u not in cfg.get('disabled_sources',[])]
-        # Least recently attempted first: failed pages cannot starve the rest.
-        with connect() as c:checked={r['source']:r['checked'] for r in c.execute('SELECT source,checked FROM source_health')}
-        extra.sort(key=lambda u:checked.get(u,''))
+        page_urls = ([job['url'] for job in existing if not board_identity(job['url'])]
+                     + discoveries + cfg['additional_employer_urls'] + known_urls)
+        disabled_pages = set()
+        for url in disabled:
+            if url.startswith('https://'):
+                try:
+                    disabled_pages.add(identity(url))
+                except ValueError:
+                    pass
+        unique_pages = {}
+        for url in page_urls:
+            try:
+                key_for_url = identity(url)
+            except ValueError:
+                report['log'].append('Skipped an employer URL that could not be read.')
+                continue
+            if key_for_url not in disabled_pages and key_for_url not in held_keys:
+                unique_pages.setdefault(key_for_url, url)
+        # Sort by the latest attempt for any alias of the posting.
+        checked_pages = {}
+        with connect() as c:
+            for row in c.execute("SELECT source,checked FROM source_health WHERE source LIKE 'https://%'"):
+                try:
+                    page_key = identity(row['source'])
+                except ValueError:
+                    continue
+                checked_pages[page_key] = max(checked_pages.get(page_key, ''), row['checked'])
+        extra = sorted(unique_pages.values(), key=lambda url: checked_pages.get(identity(url), ''))
         page_limit = min(len(extra), cfg.get('generic_urls_per_run', 5))
         attempted_pages = 0
         for index, url in enumerate(extra[:page_limit]):
@@ -1325,8 +1397,10 @@ def run_pipeline(trigger='manual'):
                 prototype.source_result(service(), url, 'ok', 1)
                 successful += 1
                 ident = identity(j['url'])
+                if ident in held_keys:
+                    continue
                 if ident in known_identities:
-                    old = retained_by_identity.get(ident, {})
+                    old = retained_by_identity[ident]
                     j = finalize(j, cfg, report, previous=old)
                     with connect() as c:
                         job_id, _ = upsert(c, j)
