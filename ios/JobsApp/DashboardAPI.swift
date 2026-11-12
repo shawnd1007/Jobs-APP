@@ -60,6 +60,8 @@ struct Job: Decodable, Identifiable {
     let area: String?
     let category: String?
     let salaryText: String?
+    var salaryEligibility: String? = nil
+    var salaryReason: String? = nil
     let salaryMax: Double?
     let availability: String?
     let description: String?
@@ -95,6 +97,10 @@ struct Job: Decodable, Identifiable {
     var publishedAnnualBaseMax: Double? {
         guard salaryCurrency == "USD", salaryPeriod == "year", salaryType == "base" else { return nil }
         return salaryMax
+    }
+
+    var meetsSalaryPolicy: Bool {
+        salaryEligibility.map { $0 == "Eligible" } ?? (publishedAnnualBaseMax != nil)
     }
 
     var workSetting: String? {

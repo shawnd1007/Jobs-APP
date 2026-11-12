@@ -220,7 +220,9 @@ Only structured annual USD base pay or a narrowly parsed employer description qu
 - **Overlap:** a published range's maximum reaches your target. A $60,000–$80,000 range can overlap a $70,000 target.
 - **Minimum:** the range's published minimum also reaches the target. That same range would not meet the policy.
 
-A range is not a promised offer. Missing pay is a review question. A refreshed employer response clears old structured salary fields when the new response does not supply them, rather than silently retaining obsolete amounts.
+Jobs uses the same policy in matching, Top Matches and manual approval. A published lower bound below your target blocks approval under the Minimum policy, even when the top of the range is higher. If the bound required by the selected policy is unavailable, the pay check stays in review. Contradictory amounts and pay in other currencies or periods do not qualify. A refreshed employer response clears salary fields that are no longer published. Saved searches apply their own published-range overlap criteria.
+
+A single annual USD base amount from a structured employer posting supplies both bounds. Jobs leaves hourly pay and other currencies in the employer’s original units. [Employer JobPosting salary fields](https://developers.google.com/search/docs/appearance/structured-data/job-posting#basesalary)
 
 ### Title and skill score
 
@@ -248,7 +250,7 @@ Direct posting evidence and application form evidence have separate timestamps. 
 
 Each run attempts up to 20 direct checks, with at most eight for retained listings. A rate limit defers further direct requests to the affected host in that run. The report records attempted and deferred checks. When a fresh feed still contains the same URL and title, retained direct evidence can be reused until it expires.
 
-Approval and automatic verification remain separate. A reviewer can explain missing evidence and attest to checks without rewriting employer compensation or pretending the crawler verified it. Known closed, out-of-area or below-maximum-floor records cannot be approved. The human review workflow has not yet been generalized to every possible configurable pay-policy edge case.
+Approval and automatic verification remain separate. A reviewer can explain missing evidence and attest to checks without rewriting employer compensation or pretending the crawler verified it. Known closed, out-of-area or below-target records cannot be approved under the current profile. Previously recorded approvals and tracking remain in history if preferences change.
 
 ### Application Prep
 

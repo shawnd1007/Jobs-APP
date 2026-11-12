@@ -33,7 +33,7 @@ struct ForYou: View {
             return first.id > second.id
         }
         let ready = ranked.filter { priority($0) > 0 && $0.locationEligibility == "Eligible"
-            && $0.publishedAnnualBaseMax != nil && $0.reviewBlockers.isEmpty }
+            && $0.meetsSalaryPolicy && $0.reviewBlockers.isEmpty }
         let readyIDs = Set(ready.map(\.id))
         let review = ranked.filter { !readyIDs.contains($0.id) }
         let visible = showingReview ? review : ready
@@ -655,6 +655,10 @@ struct JobDetail: View {
                             .accessibilityAddTraits(.isHeader)
                         if !workspace.isSample && !job.isExternalApplication {
                             LabeledContent("Employer Pay Details", value: job.publishedPay)
+                        }
+                        if let reason = job.salaryReason, !job.meetsSalaryPolicy {
+                            Text(reason).font(.subheadline).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("salaryPolicyReason")
                         }
                         if job.workArrangement != nil {
                             LabeledContent("Work Arrangement", value: job.workSetting ?? "Needs confirmation")

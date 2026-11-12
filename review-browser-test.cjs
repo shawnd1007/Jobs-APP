@@ -106,7 +106,17 @@ const assert=require('node:assert/strict');
  await form.getByText('This role is already in Jobs.',{exact:false}).waitFor();
  assert.equal(await form.getByLabel('Job title').inputValue(),'Payroll Coordinator');
  await form.getByRole('button',{name:'Cancel'}).click();
+ await page.locator('[data-workspace="preferences"]').click();
+ await page.locator('[data-pref="salary_floor"]').fill('90000');
+ await page.locator('[data-pref="salary_policy"]').selectOption('minimum');
+ await page.locator('#save-preferences').click();
+ await page.locator('#preferences-message').filter({hasText:'Preferences saved'}).waitFor();
+ await page.locator('[data-workspace="jobs"]').click();
+ await tab('all').click();
+ await secondOpening.locator('.review-panel summary').click();
+ await secondOpening.locator('.blocked').filter({hasText:'Published minimum base pay is below your target'}).waitFor();
+ assert.equal(await secondOpening.locator('[data-decision="Approved"]').isDisabled(),true);
  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);assert.equal(overflow,false);assert.deepEqual(errors,[]);
- console.log(JSON.stringify({dutyEvidence:true,postingLabels:true,separateRequisitions:true,workArrangementLabels:true,applicationPrep:true,approvalChecklist:true,readyBucket:true,approvalPersistsAfterReload:true,appliedBucket:true,interviewBucket:true,holdNotesPersist:true,dismissRetainsHistory:true,outOfAreaBlocked:true,externalApplicationTracking:true,mobileOverflow:overflow,errors}));
+ console.log(JSON.stringify({dutyEvidence:true,postingLabels:true,separateRequisitions:true,workArrangementLabels:true,salaryPolicyApproval:true,applicationPrep:true,approvalChecklist:true,readyBucket:true,approvalPersistsAfterReload:true,appliedBucket:true,interviewBucket:true,holdNotesPersist:true,dismissRetainsHistory:true,outOfAreaBlocked:true,externalApplicationTracking:true,mobileOverflow:overflow,errors}));
  }finally{if(browser)await browser.close();try{await fetch('http://127.0.0.1:18084/qa-stop',{method:'POST'});}catch{}setTimeout(()=>server.kill(),1500).unref();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -408,8 +408,9 @@ def review_blockers(j, cfg=None):
     cfg=config() if cfg is None else cfg;geo=location_eligibility(j,cfg)[0];problems=[]
     if j.get('identity_review'):problems.append(IDENTITY_REVIEW)
     if geo=='Rejected':problems.append('Location is outside your saved preferences.')
-    salary=base_salary(j)
-    if salary is not None and salary<cfg['salary_floor']:problems.append('Published maximum base salary is below your minimum.')
+    pay_status, pay_reason = salary_assessment(j, cfg)
+    if pay_status == 'Rejected':
+        problems.append(pay_reason)
     if j.get('availability')=='Closed':problems.append('Employer listing is closed.')
     if j.get('status') not in UNAPPLIED:problems.append('This job is already in application history; update application tracking instead.')
     return problems
@@ -430,24 +431,93 @@ def save_review(job_id,d):
             return 400, {'error': 'Use application tracking for jobs you add yourself.'}
         if decision=='Approved':
             if d.get('tracking_version')!=row['version']:return 409,{'error':'Application tracking changed. Refresh before approving.'}
-            blockers=review_blockers(j)
+            cfg = config()
+            normalize_salary_evidence(j, clean(j.get('description')))
+            blockers = review_blockers(j, cfg)
             if blockers:return 400,{'error':' '.join(blockers)}
             if not all(checks.values()):return 400,{'error':'Check location, base salary, employer application availability, and prior application history before approving.'}
-            if (j.get('queue')!='Confirmed' or location_eligibility(j,config())[0]!='Eligible') and not note.strip():return 400,{'error':'Add a review note explaining what you checked, including any previously missing pay, location or application information.'}
+            if (j.get('queue') != 'Confirmed' or location_eligibility(j, cfg)[0] != 'Eligible'
+                    or not salary_qualifies(j, cfg)) and not note.strip():
+                return 400, {'error': 'Add a review note explaining what you checked, including any previously missing pay, location or application information.'}
         stamp=now()
         c.execute('INSERT INTO reviews(job_id,decision,note,reviewer,checks,updated,version) VALUES(?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET decision=excluded.decision,note=excluded.note,reviewer=excluded.reviewer,checks=excluded.checks,updated=excluded.updated,version=excluded.version',(job_id,decision,note,reviewer,json.dumps(checks),stamp,expected+1))
         if decision=='Approved' and row['status']=='Needs Verification':
             c.execute("UPDATE tracking SET status='Not Applied',updated=?,version=version+1 WHERE job_id=?",(stamp,job_id))
         c.execute('INSERT INTO events(job_id,at,detail) VALUES(?,?,?)',(job_id,stamp,json.dumps({'type':'human_review','decision':decision,'reviewer':reviewer,'checks':checks,'note':note})))
     return 200,{'saved':True,'decision':decision}
-def base_salary(j):
-    # Only explicit structured annual USD base amounts count as salary qualified.
-    return j.get('salary_max') if j.get('salary_currency')=='USD' and j.get('salary_period')=='year' and j.get('salary_type')=='base' else None
+def valid_pay_amount(value):
+    return type(value) in (int, float) and 0 < value <= sys.float_info.max
 
-def salary_qualifies(j,cfg):
-    salary=base_salary(j)
-    if cfg.get('salary_policy')=='minimum':salary=j.get('salary_min') if salary is not None else None
-    return salary is not None and salary>=cfg['salary_floor']
+
+def ordered_salary_bounds(low, high):
+    if any(value is not None and not valid_pay_amount(value) for value in (low, high)):
+        return None, None
+    if low is not None and high is not None and low > high:
+        return None, None
+    return low, high
+
+
+def annual_base_bounds(job):
+    if (job.get('salary_currency'), job.get('salary_period'), job.get('salary_type')) != ('USD', 'year', 'base'):
+        return None, None
+    return ordered_salary_bounds(job.get('salary_min'), job.get('salary_max'))
+
+
+def base_salary(job):
+    return annual_base_bounds(job)[1]
+
+
+def salary_assessment(job, cfg):
+    low, high = annual_base_bounds(job)
+    floor = cfg['salary_floor']
+    if high is not None and high < floor:
+        return 'Rejected', 'Published maximum base pay is below your minimum.'
+    if cfg.get('salary_policy') == 'minimum':
+        if low is not None and low < floor:
+            return 'Rejected', 'Published minimum base pay is below your target for the entire range.'
+        if low is not None:
+            return 'Eligible', 'Published minimum base pay meets your target.'
+        if high is not None:
+            return 'Review', 'The employer has not published the minimum base pay for this range.'
+    elif high is not None:
+        return 'Eligible', 'Published base pay reaches your target.'
+    return 'Review', 'The employer has not supplied enough annual USD base pay information to check your target.'
+
+
+def salary_qualifies(job, cfg):
+    return salary_assessment(job, cfg)[0] == 'Eligible'
+
+
+def normalize_salary_evidence(job, description):
+    has_structured_pay = any(job.get(key) is not None for key in (
+        'salary_min', 'salary_max', 'salary_currency', 'salary_period', 'salary_type',
+    ))
+    if has_structured_pay:
+        low, high = ordered_salary_bounds(job.get('salary_min'), job.get('salary_max'))
+        job.update(salary_min=low, salary_max=high)
+        return
+
+    ranges = list(re.finditer(
+        r'\b(?P<label>annual\s+salary|(?:annual\s+)?base\s+(?:salary|pay))'
+        r'(?P<qualifier>[^$\n]{0,65})\$(?P<low>[0-9]+(?:,[0-9]{3})*)\s*(?:-|–|to)\s*'
+        r'\$(?P<high>[0-9]+(?:,[0-9]{3})*)\b(?!,|\.[0-9])',
+        description, re.I,
+    ))
+    if len(ranges) != 1:
+        return
+    match = ranges[0]
+    annual_period = r'(?:annual(?:ly)?|per year|yearly)\b'
+    if not (re.search(r'\b' + annual_period, match['label'] + match['qualifier'], re.I)
+            or re.match(r'[ \t]*(?:USD[ \t]+)?' + annual_period, description[match.end():], re.I)):
+        return
+    if re.search(r'tier [123]|geographic.*(?:range|band)|per hour|hourly|\bCAD\b|Canadian dollars', description, re.I):
+        return
+    low, high = (int(match[bound].replace(',', '')) for bound in ('low', 'high'))
+    if 30000 <= low <= high <= 500000:
+        job.update(salary_min=low, salary_max=high, salary_currency='USD', salary_period='year',
+                   salary_type='base', salary_text=f'${low:,} – ${high:,} annual base (employer description)')
+
+
 WORK_ARRANGEMENT_LABELS = {'remote': 'Remote', 'hybrid': 'Hybrid', 'onsite': 'On-site'}
 PUBLISHED_WORK_IN_DESCRIPTION = re.compile(
     r'\b(?:(?:position|role|schedule) (?:is|will be) |work (?:arrangement|setting):\s*)'
@@ -684,12 +754,9 @@ def assess(j,cfg):
     eligible,location_reason,area=location_eligibility(j,cfg)
     j.update(location_eligibility=eligible,location_reason=location_reason,area=area,
              work_arrangement=work_arrangement(j))
-    if base_salary(j) is None:
-        ranges=re.findall(r'(?:annual\s+(?:base\s+)?salary|base\s+(?:salary|pay))[^$\n]{0,65}\$([\d,]+)\s*(?:-|–|to)\s*\$([\d,]+)',desc,re.I)
-        if len(ranges)==1 and re.search(r'annual|per year|yearly',desc,re.I) and not re.search(r'(tier [123]|geographic.*(?:range|band)|per hour|hourly|\bCAD\b|Canadian dollars)',desc,re.I):
-            lo,hi=[int(v.replace(',','')) for v in ranges[0]]
-            if 30000<=lo<=hi<=500000:j.update(salary_min=lo,salary_max=hi,salary_currency='USD',salary_period='year',salary_type='base',salary_text=f'${lo:,} – ${hi:,} annual base (employer description)')
-    salary=base_salary(j)
+    normalize_salary_evidence(j, desc)
+    pay_status, pay_reason = salary_assessment(j, cfg)
+    j.update(salary_eligibility=pay_status, salary_reason=pay_reason)
     # Match complete terms while allowing common punctuation between words.
     def words(value):
         return " " + " ".join(re.findall(r"\w+|[+#]+", value.casefold())) + " "
@@ -733,9 +800,11 @@ def assess(j,cfg):
             + " Review duties and requirements in the employer posting."
         ),
     )
-    j['queue']='Confirmed' if j.get('availability')=='Open' and eligible=='Eligible' and salary_qualifies(j,cfg) and relevant and j['score']>=55 else 'Review'
+    j['queue']='Confirmed' if j.get('availability')=='Open' and eligible=='Eligible' and pay_status=='Eligible' and relevant and j['score']>=55 else 'Review'
     if any(term.lower() in title for term in cfg.get('excluded_title_terms',[])):j['queue']='Excluded';j['eligibility']='Excluded title preference'
-    if salary is not None and salary<cfg['salary_floor']: j['queue']='Excluded';j['eligibility']='Salary below minimum'
+    if pay_status == 'Rejected':
+        j['queue'] = 'Excluded'
+        j['eligibility'] = pay_reason
     if eligible!='Eligible' and j['queue']!='Excluded':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
     return j
 def board_jobs(platform,board):
@@ -1162,8 +1231,33 @@ def generic_posting(url,report,key):
     apply_links=[up.urljoin(final,s) for s in parser.links if re.search(r'apply|application',s,re.I)]
     if availability!='Closed' and apply_links and not re.search(r'(no longer accepting|position has been filled|job (?:is )?(?:closed|expired))',clean(raw),re.I):availability='Open'
     j={'title':x.get('title',''),'employer':employer,'url':final,'location':'; '.join(locations),'remote':x.get('jobLocationType')=='TELECOMMUTE','description':posting_text(x.get('description')),'posted':x.get('datePosted',''),'availability':availability,'last_verified':now(),'source':'Live employer JobPosting structured data','application_evidence':'Unique JobPosting, employer domain relationship and application link' if availability=='Open' else 'Application availability requires review','salary_text':'Salary Not Published'}
-    salary=x.get('baseSalary') or {};value=salary.get('value') or {}
-    if salary.get('currency')=='USD' and value.get('unitText')=='YEAR':j.update(salary_min=value.get('minValue'),salary_max=value.get('maxValue') or value.get('value'),salary_currency='USD',salary_period='year',salary_type='base',salary_text=json.dumps(salary))
+    salary = x.get('baseSalary')
+    if isinstance(salary, dict) and isinstance(salary.get('value'), dict):
+        value = salary['value']
+        low, high = value.get('minValue'), value.get('maxValue')
+        if 'minValue' not in value and 'maxValue' not in value:
+            low = high = value.get('value')
+        low, high = ordered_salary_bounds(low, high)
+        currency = salary.get('currency')
+        if not isinstance(currency, str) or not re.fullmatch('[A-Z]{3}', currency):
+            currency = None
+        period = value.get('unitText')
+        period = period.lower() if isinstance(period, str) and period.upper() in {
+            'HOUR', 'DAY', 'WEEK', 'MONTH', 'YEAR',
+        } else None
+        pay = 'Employer pay needs verification'
+        if currency and period and (low is not None or high is not None):
+            if low == high:
+                amount = f'{low:,}'
+            elif low is None:
+                amount = f'up to {high:,}'
+            elif high is None:
+                amount = f'from {low:,}'
+            else:
+                amount = f'{low:,} – {high:,}'
+            pay = f'{currency} {amount} per {period} base pay'
+        j.update(salary_min=low, salary_max=high, salary_currency=currency, salary_period=period,
+                 salary_type='base', salary_text=pay)
     return j
 def backup():
     folder=DATA/'backups';folder.mkdir(exist_ok=True)

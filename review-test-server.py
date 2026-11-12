@@ -31,6 +31,8 @@ with tempfile.TemporaryDirectory(prefix='review-qa-',dir=app.DATA) as folder:
                 title='Fictional Reconciliation Analyst', employer='Fictional Employer',
                 url='https://example.com/careers?posting=' + requisition, location='Remote - United States',
                 workplace_type='hybrid' if requisition == '101' else 'remote',
+                salary_min=75000, salary_max=110000, salary_currency='USD', salary_period='year',
+                salary_type='base', salary_text='$75,000 – $110,000 annual base',
                 description='Fictional employer posting for browser tests.', availability='Open',
             ))
     class QAHandler(app.Handler):

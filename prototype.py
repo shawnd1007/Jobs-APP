@@ -254,9 +254,8 @@ def matching_searches(a, job, searches):
         geography = {'target_locations': search['locations'], 'workplace_types': search['workplace_types']}
         if a.location_eligibility(job, geography)[0] != 'Eligible':
             continue
-        high = a.base_salary(job)
-        low = job.get('salary_min')
-        if type(high) not in (int, float) or type(low) not in (int, float) or not 0 < low <= high:
+        low, high = a.annual_base_bounds(job)
+        if low is None or high is None:
             continue
         if high >= search['salary_min'] and (search['salary_max'] is None or low <= search['salary_max']):
             matches.append(search['id'])

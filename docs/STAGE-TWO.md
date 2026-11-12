@@ -72,3 +72,10 @@ Jobs retains requisition parameters in employer page URLs and no longer merges o
 ## Apply work arrangement preferences to employer evidence
 
 Jobs carries employer-published remote, hybrid and on-site values through search, saved alerts and listing details. A missing or conflicting value stays in review when a work arrangement is required. On refresh, a removed employer value does not leave an obsolete label. Existing application notes and alert history stay with the job.
+
+
+## Apply the same salary policy in matching and approval
+
+The selected salary policy now governs discovery, Top Matches and manual approval. A published lower bound below the target blocks approval when the entire range must meet it. If the selected policy needs a bound the employer has not published, pay stays in review. A single published annual USD amount can match a saved search. Preference changes preserve existing approvals, notes and drafts.
+
+The salary checkpoint passed 75 Python tests and both sequential browser suites on macOS. The iPhone client passed four UI tests on a separate iPhone 18 Pro simulator with fictional data, and Xcode built an unsigned device release. Hosted checks are tracked on draft PR #2. A signed physical-device test and provider execution remain open.

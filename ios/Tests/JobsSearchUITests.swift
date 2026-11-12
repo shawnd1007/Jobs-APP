@@ -63,6 +63,8 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertTrue(posting.waitForExistence(timeout: 25))
         XCTAssertTrue(app.staticTexts["All Listings · 3"].exists)
         posting.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "salaryPolicyReason")
+            .firstMatch.waitForExistence(timeout: 8))
         let workArrangement = app.descendants(matching: .any)
             .matching(identifier: "employerWorkArrangement").firstMatch
         XCTAssertTrue(workArrangement.waitForExistence(timeout: 8))

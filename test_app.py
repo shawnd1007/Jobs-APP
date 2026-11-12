@@ -490,8 +490,9 @@ class PersistenceTests(unittest.TestCase):
   _, cfg = self.pipeline_fixture()
   base = 'https://example.com/careers?posting='
   cfg.update(categories=['Billing Analyst'], preferred_skills=['Excel'], skill_groups=[],
-             target_locations=['Austin, TX'], workplace_types=['onsite'], salary_floor=80000,
-             additional_boards={}, additional_employer_urls=[base+'101',base+'102',base+'101&utm_source=example'],
+             target_locations=['Austin, TX'], workplace_types=['onsite'], salary_floor=95000,
+             salary_policy='minimum', additional_boards={},
+             additional_employer_urls=[base+'101',base+'102',base+'101&utm_source=example'],
              generic_urls_per_run=5)
   criteria = dict(name='Fictional billing', title_terms=['Billing'], skills=['Excel'],
                   locations=['Austin, TX'], workplace_types=['onsite'], salary_min=85000,
@@ -510,6 +511,8 @@ class PersistenceTests(unittest.TestCase):
               'hiringOrganization':{'name':'Fictional Employer','sameAs':'https://example.com/'},
               'jobLocation':{'address':{'addressLocality':'Austin','addressRegion':'TX'}},
               'baseSalary':{'currency':'USD','value':{'minValue':90000,'maxValue':110000,'unitText':'YEAR'}}}
+   if url == base+'102':
+    posting['baseSalary']['value'] = {'value':100000,'unitText':'YEAR'}
    html = ('<h1>Fictional Billing Analyst</h1><a href="/apply">Apply</a>'
            '<script type="application/ld+json">'+json.dumps(posting)+'</script>')
    return html.encode(),url
@@ -522,6 +525,9 @@ class PersistenceTests(unittest.TestCase):
    self.assertEqual(len(attempts),4)
    records={j['url']:j for j in app.records() if j['url'].startswith(base)}
    self.assertEqual(set(records),{base+'101',base+'102'})
+   self.assertEqual(app.annual_base_bounds(records[base+'102']),(100000,100000))
+   self.assertEqual(app.salary_assessment(records[base+'101'],cfg)[0],'Rejected')
+   self.assertEqual(app.salary_assessment(records[base+'102'],cfg)[0],'Eligible')
    ids={j['id'] for j in records.values()}
    with app.connect() as c:
     c.execute("UPDATE tracking SET notes='Keep this application' WHERE job_id=?",(records[base+'102']['id'],))
@@ -822,6 +828,58 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(len(app.records()),1);self.assertEqual(report['skipped_location'],1)
  def review_payload(self,j,decision='Approved'):
   return {'decision':decision,'version':j['review_version'],'tracking_version':j['version'],'checks':{k:True for k in ('location','salary','application','history')},'note':'Checked employer posting, pay eligibility, location and specific application history.','reviewer':'Test reviewer'}
+ def test_entire_range_policy_blocks_approval_and_keeps_prior_review_history(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(salary_floor=90000,salary_policy='minimum',target_locations=['United States'],
+             workplace_types=['remote'],categories=['Billing Analyst'])
+  job = dict(title='Fictional Billing Analyst',employer='Fictional Employer',url='https://example.com/billing',
+             location='Remote - United States',availability='Open',
+             description='Annual base salary: $75,000 – $110,000.')
+  with app.connect() as c:
+   job_id,_ = app.upsert(c,job)
+   c.execute("UPDATE tracking SET notes='Fictional application note' WHERE job_id=?",(job_id,))
+  def stored():
+   return next(row for row in app.records() if row['id']==job_id)
+  def shown():
+   return next(row for row in app.snapshot()['jobs'] if row['id']==job_id)
+  with patch.object(app,'config',return_value=cfg):
+   self.assertEqual(shown()['queue'],'Excluded')
+   self.assertIn('Published minimum',shown()['review_blockers'][0])
+   code, result = app.save_review(job_id,self.review_payload(stored()))
+   self.assertEqual(code,400)
+   self.assertIn('Published minimum',result['error'])
+   cfg['salary_policy']='overlap'
+   self.assertEqual(shown()['salary_eligibility'],'Eligible')
+   self.assertEqual(app.save_review(job_id,self.review_payload(stored()))[0],200)
+   cfg['salary_policy']='minimum'
+   self.assertEqual(shown()['queue'],'Excluded')
+   self.assertEqual(shown()['review_decision'],'Approved')
+   self.assertEqual(shown()['notes'],'Fictional application note')
+
+ def test_unusable_or_partial_pay_stays_in_review(self):
+  cfg = dict(app.config(),salary_floor=90000,salary_policy='minimum')
+  base = dict(salary_currency='USD',salary_period='year',salary_type='base',location='Remote - United States')
+  for low,high in (('95000',110000),(True,110000),(120000,110000),(90000,float('inf')),(None,110000)):
+   with self.subTest(low=low,high=high):
+    job = app.assess(dict(base,salary_min=low,salary_max=high),cfg)
+    self.assertEqual(job['salary_eligibility'],'Review')
+    self.assertFalse(app.salary_qualifies(job,cfg))
+  unrelated = dict(base,salary_currency='CAD',salary_min=95000,salary_max=110000,
+                   description='Annual base salary: $95,000 – $110,000.')
+  self.assertEqual(app.assess(unrelated,cfg)['salary_eligibility'],'Review')
+  self.assertEqual(unrelated['salary_currency'],'CAD')
+
+ def test_description_pay_needs_annual_period_attached_to_range(self):
+  cfg = dict(app.config(),salary_floor=90000)
+  for description, expected in (
+   ('Base pay: $95,000 to $110,000. Includes annual leave.', 'Review'),
+   ('Base pay: $95,000 to $110,000 per year.', 'Eligible'),
+   ('Base salary (annual): $95,000 – $110,000.', 'Eligible'),
+   ('Annual base salary: $,,, to $110,000.', 'Review'),
+  ):
+   with self.subTest(description=description):
+    self.assertEqual(app.assess({'description':description},cfg)['salary_eligibility'],expected)
+
  def test_approval_requires_all_checks(self):
   j=app.records()[0];d=self.review_payload(j);d['checks']['salary']=False
   code,_=app.save_review(j['id'],d);self.assertEqual(code,400);self.assertEqual(app.records()[0]['review_decision'],'Pending')
