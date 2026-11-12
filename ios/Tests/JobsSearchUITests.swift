@@ -59,8 +59,20 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [retryFinished], timeout: 15), .completed)
         XCTAssertTrue(run.isEnabled)
         app.tabBars.buttons["Browse"].tap()
-        XCTAssertTrue(app.staticTexts["Payment Operations Specialist"].waitForExistence(timeout: 25))
+        let posting = app.staticTexts["Payment Operations Specialist"]
+        XCTAssertTrue(posting.waitForExistence(timeout: 25))
         XCTAssertTrue(app.staticTexts["All Listings · 3"].exists)
+        posting.tap()
+        let checkedLink = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Open checked employer posting")).firstMatch
+        XCTAssertTrue(checkedLink.waitForExistence(timeout: 8))
+        let directEvidence = app.descendants(matching: .any).matching(identifier: "directPostingChecked").firstMatch
+        for _ in 0..<4 {
+            if directEvidence.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(directEvidence.exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "applicationFormChecked").firstMatch.exists)
     }
     @MainActor
     func testTrackingExternalApplicationWithoutLink() {

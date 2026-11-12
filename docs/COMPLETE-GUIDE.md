@@ -175,7 +175,7 @@ When enabled, bounded Bing RSS searches rotate across role phrases, regions and 
 
 There is no universal Workday adapter. A careers homepage is not automatically a supported complete employer-board feed. For an unsupported employer, a job-specific URL and manual verification are often necessary.
 
-Generic URLs are attempted least-recently-checked first. Repeated failures cannot permanently consume the same first slots. The list of deferred URLs is retained in the report. Board rechecks also prioritize older verification timestamps when capped.
+Generic URLs are attempted least-recently-checked first. Repeated failures cannot permanently consume the same first slots. The list of deferred URLs is retained in the report. Board rechecks prioritize saved-search matches waiting for a direct posting check, then older verification timestamps.
 
 ### One complete search run
 
@@ -236,7 +236,11 @@ The automatic Confirmed queue requires an open listing, eligible location, quali
 
 ### Verification and freshness
 
-The exact application page is checked for expected title text, closure signals and candidate form evidence such as a résumé field or an application submit control. A feed record alone is insufficient for a Confirmed result. When enabled and within budget, Firecrawl can render a requisition whose static response omits the application form. Explicit closure signals and redirects away from the requisition still block confirmation. Confirmed results expire to review after the configured freshness interval, currently 30 hours after the form check by default.
+A saved-search match needs a direct posting check before it can create an alert. Jobs compares the feed requisition, where supplied, with the employer link and checks the destination and job title. The same posting on a recognized ATS host alias is accepted. A redirect to a board, different requisition or unrelated page blocks verification. Jobs leaves ambiguous and unreachable postings in review and retries pending matches on later searches. After a successful retry, Jobs uses the current saved searches and sends each matching alert once.
+
+Direct posting evidence and application form evidence have separate timestamps. The browser and iPhone label the link according to the freshness of the direct check. Automatic confirmation still needs evidence of a candidate form, such as a résumé field or an application submit button. If explicitly enabled, Firecrawl can check for a dynamic form after the public page has established the requisition. Form checks are bounded and can remain incomplete. By default, verification expires after 30 hours.
+
+Each run attempts up to 20 direct checks, with at most eight for retained listings. A rate limit defers further direct requests to the affected host in that run. The report records attempted and deferred checks. When a fresh feed still contains the same URL and title, retained direct evidence can be reused until it expires.
 
 Approval and automatic verification remain separate. A reviewer can explain missing evidence and attest to checks without rewriting employer compensation or pretending the crawler verified it. Known closed, out-of-area or below-maximum-floor records cannot be approved. The human review workflow has not yet been generalized to every possible configurable pay-policy edge case.
 
@@ -519,7 +523,7 @@ Keep database backups separately from Git. If a real secret is committed, revoke
 
 The SwiftUI app under `ios/` connects to the shared Python backend. **For You** ranks open listings by role fit and match score. **Browse** shows retained listings across runs. **My Jobs** organizes saved listings and application stages.
 
-The Search Profile supports résumé import with a device-local preview, suggested and custom skills, work locations and annual base pay. Saved searches use their own criteria. The backend records new matches, and the iPhone can show a local notification after it reconnects and sees unread matches.
+The Search Profile supports résumé import with a device-local preview, suggested and custom skills, work locations and annual base pay. Saved searches use their own criteria. The backend records verified new matches, and the iPhone can show a local notification after it reconnects and sees unread matches.
 
 After a successful connection, the iPhone keeps a protected offline copy of the most recently synced workspace unless you turn it off in Settings. Offline mode supports reading saved jobs, tracking details and reports. Saves and new searches require the Mac. A form stays open with its draft if a network interruption prevents a confirmed save. When changing the server address, the app validates the new workspace before switching.
 

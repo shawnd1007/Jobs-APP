@@ -52,3 +52,8 @@ Find New Jobs now shows its stage, source and progress. Source checks have deadl
 ## Track an application found elsewhere
 
 The connected iPhone app and browser can add an application with a title, employer and status. A link, location, notes and dates are optional. The record uses the existing stages and follow-up views. Duplicate checks protect existing records. Jobs preserves owner-entered provenance until it finds and saves the exact employer posting. An exact match keeps the application history on the same record.
+
+
+## Direct posting checks for alerts
+
+Jobs checks the requisition and page title before sending a saved-search alert. A timeout or mismatch leaves the listing in review. A later successful check uses the current search criteria, preserves the same tracking record and sends each matching alert once. The browser and iPhone distinguish checked and unverified posting links. Application form evidence stays separate.

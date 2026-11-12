@@ -104,11 +104,40 @@ class PrototypeTests(unittest.TestCase):
                    location='Austin, TX', availability='Open', description='SQL reporting',
                    salary_min=90000, salary_max=110000, salary_currency='USD', salary_period='year',
                    salary_type='base')
-        with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', return_value=[job]):
-            for _ in range(2):
-                self.assertTrue(app.LOCK.acquire(False))
-                self.assertEqual(app.run_pipeline()['state'], 'success')
+        def board(*_):
+            return [dict(job)]
+
+        def run():
+            self.assertTrue(app.LOCK.acquire(False))
+            return app.run_pipeline()
+
+        with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=board), \
+             patch.object(app, 'read_response') as page:
+            page.side_effect = TimeoutError('Fictional posting timeout')
+            self.assertEqual(run()['state'], 'partial')
+            initial = app.snapshot()
+            self.assertEqual(initial['match_alerts'], [])
+            retained = next(item for item in initial['jobs'] if item['url'] == job['url'])
+            self.assertEqual(retained['availability'], 'Needs Verification')
+            with app.connect() as c:
+                c.execute("UPDATE tracking SET notes='Fictional reminder' WHERE job_id=?", (retained['id'],))
+
+            page.side_effect = None
+            page.return_value = (b'<title>Fictional Engineer</title>', job['url'])
+            self.assertEqual(run()['state'], 'success')
             dashboard = app.snapshot()
+            checked = next(item for item in dashboard['jobs'] if item['id'] == retained['id'])
+            self.assertTrue(checked['posting_link_verified'])
+            self.assertIsNone(checked.get('application_verified'))
+            self.assertEqual(checked['notes'], 'Fictional reminder')
+            self.assertEqual(run()['state'], 'success')
+            self.assertEqual(app.snapshot()['match_alerts'], dashboard['match_alerts'])
+            self.assertEqual(page.call_count, 2)
+            with app.connect() as c:
+                c.execute("UPDATE jobs SET listing=json_set(listing,'$.posting_verified',?) WHERE id=?",
+                          ('2000-01-01T00:00:00+00:00', retained['id']))
+            stale = next(item for item in app.snapshot()['jobs'] if item['id'] == retained['id'])
+            self.assertFalse(stale['posting_link_verified'])
         alerts = dashboard['match_alerts']
         self.assertEqual({item['search_name'] for item in alerts}, {'Austin SQL', 'Second search'})
         self.assertEqual(len(alerts), 2)

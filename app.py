@@ -218,7 +218,7 @@ def init():
                          queue='Review', last_verified='', salary_text='Salary not yet verified',
                          description='', posted='', application_evidence='Stored requisition requires a fresh employer check.')
                 for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type',
-                              'compensation_details','application_verified'):
+                              'compensation_details','application_verified','posting_verified'):
                     j.pop(field, None)
             eligible,reason,area=location_eligibility(j,cfg)
             j.update(location_eligibility=eligible,location_reason=reason,area=area)
@@ -350,7 +350,7 @@ def upsert(c,j):
         if promoted:
             old = {}
         # A fresh employer response owns these facts, including their absence.
-        for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified'):
+        for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified','posting_verified'):
             old.pop(field,None)
         old.update(j)
         canonical = ident if promoted or board_identity(j['url']) else row['identity']
@@ -805,48 +805,82 @@ def board_identity(url):
         return 'personio', board[1]
     platform = BOARD_HOSTS.get((u.hostname or '').lower())
     return (platform,parts[0].lower()) if platform and parts[0] else None
-def verify_application(j, report=None):
-    """Verify the specific requisition and look for evidence of an application form."""
-    url = j['url']
-    visible = False
-    try:
-        request = ur.Request(url, headers={'User-Agent': 'Mozilla/5.0 PersonalJobDashboard'})
-        raw, final = read_response(request)
-        raw = raw.decode('utf-8', errors='replace')
-    except OSError:
-        if report is None or not config()['firecrawl_enabled'] or not firecrawl_key():
-            raise
-    else:
-        visible = application_form_visible(j, raw, final)
+POSTING_PATHS = {
+    'greenhouse': r'/[^/]+/jobs/[0-9]+',
+    'ashby': r'/[^/]+/[^/]+(?:/application)?',
+    'lever': r'/[^/]+/[^/]+(?:/apply)?',
+    'smartrecruiters': r'/[^/]+/[0-9]+(?:-[^/]+)?',
+    'personio': r'/job/[0-9]+',
+}
 
-    if not visible:
-        if report is None or not config()['firecrawl_enabled'] or not firecrawl_key():
-            raise ValueError('Application form not confirmed in accessible page content')
-        data = firecrawl('scrape', {'url': url, 'formats': ['html', 'markdown'], 'maxAge': 0,
-                                   'waitFor': 3000}, report)
-        rendered = (data.get('html') or '') + '\n' + (data.get('markdown') or '')
-        final = (data.get('metadata') or {}).get('url') or url
-        if not application_form_visible(j, rendered, final):
-            raise ValueError('Application form not confirmed in rendered employer page')
-    j['application_evidence'] += '; direct requisition page and application-form evidence checked'
-    j['application_verified'] = now()
-    return j
 
-def application_form_visible(j, raw, final):
-    if identity(final) != identity(j['url']):
-        raise ValueError('Application redirected away from the requisition')
+def posting_reference(url):
+    """An ATS requisition or an exact employer page with its meaningful query intact."""
+    reference = external_link_key(url)
+    board = board_identity(url)
+    if board and (reference.startswith('https:') or
+                  not re.fullmatch(POSTING_PATHS[board[0]], up.urlsplit(url).path.rstrip('/'))):
+        raise ValueError('The employer URL does not identify a single requisition')
+    if not reference:
+        raise ValueError('The employer posting URL is missing')
+    return reference
+
+
+class PostingRedirect(SafeRedirect):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if posting_reference(req.full_url) != posting_reference(newurl):
+            raise ValueError('Posting redirected away from the requisition')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+POSTING_OPENER = ur.build_opener(PostingRedirect())
+
+
+class PostingUnavailable(ValueError):
+    pass
+
+
+def heading_matches_title(heading, title):
+    heading = clean(heading)
+    candidates = [heading]
+    # Providers wrap browser titles with the employer name or an application prefix.
+    application = re.fullmatch(r'(?:Job application|Apply) for (.+) at .+', heading, flags=re.I)
+    if application:
+        candidates.append(application[1])
+    for separator in (' - ', ' — ', ' | ', ' @ '):
+        if separator in heading:
+            candidates.extend((heading.split(separator, 1)[1], heading.rsplit(separator, 1)[0]))
+    return any(external_role_key(value, '', '')[0] == title for value in candidates)
+
+
+def checked_posting_html(job, raw, final):
+    if posting_reference(final) != posting_reference(job['url']):
+        raise ValueError('Posting redirected away from the requisition')
     page = re.sub(r'<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', '', raw, flags=re.I | re.S)
-    visible_text = re.sub(r'\s+', ' ', clean(page)).lower()
-    if re.search(r'(no longer accepting applications|position has been filled|job is (?:closed|expired)|job not found)', visible_text):
-        raise ValueError('Application page says unavailable')
-    title_words = set(norm(j['title']).split())
-    page_words = set(norm(visible_text).split())
-    if title_words and len(title_words & page_words) < (len(title_words) + 1) // 2:
-        return False
+    visible_text = ' '.join(clean(page).split()).lower()
+    closed = (
+        r'\bno longer accepting (?:new )?applications\b'
+        r'|\b(?:job|position|posting|vacancy) (?:has been filled|has closed|is closed|is expired|is no longer available)\b'
+        r'|\b(?:job|position|posting) not found\b'
+    )
+    if re.search(closed, visible_text):
+        raise PostingUnavailable('Application page says unavailable')
+    title = external_role_key(job['title'], '', '')[0]
+    headings = re.findall(r'<(title|h1)\b[^>]*>(.*?)</\1\s*>', page, flags=re.I | re.S)
+    if not title or not any(heading_matches_title(heading, title) for _, heading in headings):
+        raise ValueError('Employer page title does not match the posting')
+    return page
+
+
+def application_form_visible(job, raw, final):
+    page = checked_posting_html(job, raw, final)
     for form in re.findall(r'<form\b[^>]*>.*?</form\s*>', page, flags=re.I | re.S):
         controls = html.unescape(form).lower()
-        form_text = re.sub(r'\s+', ' ', clean(form)).lower()
-        if re.search(r'\b(?:submit (?:your )?application|apply for this job|send (?:your )?application)\b', form_text):
+        form_text = ' '.join(clean(form).split()).lower()
+        if re.search(r'<(?:button|input)\b', controls) and re.search(
+            r'\b(?:submit (?:your )?application|apply for this job|send (?:your )?application)\b',
+            form_text + ' ' + controls,
+        ):
             return True
         if re.search(r'<(?:input|select|textarea)\b', controls) and re.search(
             r'\b(?:resume|résumé|cover[_ -]?letter|candidate[_ -]?first[_ -]?name)\b', controls
@@ -854,61 +888,119 @@ def application_form_visible(j, raw, final):
             return True
     return False
 
-def finalize(j,cfg,report):
-    j=assess(j,cfg)
-    if j.get('source') == 'Personio public employer feed':
-        verify_personio_page(j, cfg, report)
-    elif j['queue']=='Confirmed':
-        try:verify_application(j,report)
-        except Exception as e:
-            j['queue']='Review';j['application_evidence']='Needs Verification: '+str(e)[:160]
-            if isinstance(e, TimeoutError):
-                report.setdefault('failures', []).append('Application page check timed out: ' + (up.urlsplit(j['url']).hostname or 'employer'))
-            report['log'].append(j['url']+': application requires review')
-    return j
 
-def verify_personio_page(job, cfg, report):
-    job.pop('application_verified', None)
+def verify_application(job, report=None, *, render_form=True):
+    """Check the exact posting and record application-form evidence separately."""
     url = job['url']
-    try:
-        if report.get('personio_page_checks', 0) >= 20 or report.get('personio_throttled'):
-            raise ValueError('direct posting check deferred')
-        report['personio_page_checks'] = report.get('personio_page_checks', 0) + 1
-        request = ur.Request(url, headers={'User-Agent': 'PersonalJobDashboard/1.0'})
+    job.pop('posting_verified', None)
+    job.pop('application_verified', None)
+    reference = posting_reference(url)
+    requisition = job.get('requisition')
+    if requisition:
+        if not reference.startswith('https:'):
+            linked_ids = [reference.rsplit(':', 1)[1]]
+        else:
+            linked_ids = up.parse_qs(up.urlsplit(url).query).get('gh_jid', [])
+        if any(linked_id != str(requisition) for linked_id in linked_ids):
+            raise ValueError('The posting link does not match the feed requisition')
+    request = ur.Request(url, headers={'User-Agent': 'Mozilla/5.0 PersonalJobDashboard'})
+    personio = (board_identity(url) or ('', ''))[0] == 'personio'
+    raw, final = read_response(request, opener=PERSONIO_OPENER if personio else POSTING_OPENER,
+                               max_bytes=1_000_000 if personio else 3_000_000)
+    has_form = application_form_visible(job, raw.decode('utf-8', errors='replace'), final)
+    if (not has_form and render_form and not personio and report is not None
+            and config()['firecrawl_enabled'] and firecrawl_key()):
         try:
-            raw, final = read_response(request, opener=PERSONIO_OPENER, max_bytes=1_000_000)
-            if identity(final) != identity(url):
-                raise ValueError('page does not match the feed requisition')
-        except urllib.error.HTTPError as error:
-            if error.code == 429:
-                report['personio_throttled'] = True
-            raise ValueError(f'employer page returned HTTP {error.code}') from error
-        finally:
-            deadline = SEARCH_DEADLINE.get()
-            remaining = cfg['request_delay_seconds'] if deadline is None else deadline - time.monotonic()
-            time.sleep(max(0, min(cfg['request_delay_seconds'], remaining)))
-        page = raw.decode('utf-8', errors='replace')
-        page = re.sub(r'<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', '', page, flags=re.I | re.S)
-        headings = re.findall(r'<(title|h1)\b[^>]*>(.*?)</\1\s*>', page, flags=re.I | re.S)
-        title = norm(job['title'])
-        if not title or not any(f' {title} ' in f' {norm(clean(heading))} ' for _, heading in headings):
-            raise ValueError('employer page title does not match the feed')
-        has_form = application_form_visible(job, page, url)
-    except (ValueError, OSError) as error:
-        job.update(availability='Needs Verification', application_evidence=f'Personio feed only; {error}')
-        if job['queue'] == 'Confirmed':
-            job['queue'] = 'Review'
-        if isinstance(error, TimeoutError):
-            report.setdefault('failures', []).append('Personio posting check timed out: ' + (up.urlsplit(url).hostname or 'employer'))
-        report['log'].append(url + ': direct posting requires review')
-        return
-    job['application_evidence'] = 'Personio feed and exact employer posting checked'
+            data = firecrawl('scrape', {'url': url, 'formats': ['html', 'markdown'], 'maxAge': 0,
+                                       'waitFor': 3000}, report)
+            rendered_url = (data.get('metadata') or {}).get('url') or ''
+            has_form = application_form_visible(job, data.get('html') or '', rendered_url)
+        except PostingUnavailable:
+            raise
+        except (ValueError, OSError):
+            # A failed render cannot establish form evidence. The static page still proves the posting.
+            report.setdefault('log', []).append('Application form could not be confirmed by rendering.')
+    job['posting_verified'] = now()
+    job['application_evidence'] = 'Exact employer posting checked'
     if has_form:
-        job['application_verified'] = now()
+        job['application_verified'] = job['posting_verified']
+        job['application_evidence'] += '. Application form checked.'
     else:
-        if job['queue'] == 'Confirmed':
-            job['queue'] = 'Review'
-        job['application_evidence'] += '; application form needs verification'
+        job['application_evidence'] += '. Application form needs verification.'
+    return job
+
+
+POSTING_CHECKS_PER_RUN = 20
+RETAINED_POSTING_CHECKS = 8
+
+
+def posting_check_expiration(job, cfg):
+    checked = job.get('posting_verified')
+    if not checked:
+        return None
+    return dt.datetime.fromisoformat(checked) + dt.timedelta(hours=cfg['verification_valid_hours'])
+
+
+def finalize(job, cfg, report, *, check_posting=False, previous=None):
+    job = assess(job, cfg)
+    wants_form = job['queue'] == 'Confirmed'
+    if job.get('availability') == 'Closed' or not (
+        wants_form or check_posting or job.get('source') == 'Personio public employer feed'
+        or (previous and (previous.get('posting_verified') or previous.get('posting_check_failed')
+                          or previous.get('pending_match_alert')))
+    ):
+        return job
+
+    if previous and not previous.get('pending_match_alert') and previous.get('availability') == 'Open':
+        expiry = posting_check_expiration(previous, cfg)
+        same_posting = previous.get('url') == job['url'] and previous.get('title') == job['title']
+        if (same_posting and expiry and expiry >= dt.datetime.now(dt.timezone.utc)
+                and (not wants_form or previous.get('application_verified'))):
+            for field in ('posting_verified', 'application_verified', 'application_evidence'):
+                if previous.get(field):
+                    job[field] = previous[field]
+            job['posting_check_failed'] = False
+            return job
+
+    host = up.urlsplit(job['url']).hostname or 'employer'
+    limit = RETAINED_POSTING_CHECKS if previous else POSTING_CHECKS_PER_RUN
+    attempted = False
+    try:
+        if (report.get('posting_checks', 0) >= limit or host in report.get('throttled_posting_hosts', [])):
+            report['posting_checks_deferred'] = report.get('posting_checks_deferred', 0) + 1
+            raise ValueError('Direct posting check deferred until a later search')
+        attempted = True
+        report['posting_checks'] = report.get('posting_checks', 0) + 1
+        job['posting_check_attempted'] = now()
+        verify_application(job, report, render_form=wants_form)
+    except (ValueError, OSError) as error:
+        if isinstance(error, urllib.error.HTTPError):
+            if error.code == 429:
+                report.setdefault('throttled_posting_hosts', []).append(host)
+            reason = f'Employer posting returned HTTP {error.code}'
+        elif isinstance(error, TimeoutError):
+            reason = 'Employer posting check timed out'
+            report.setdefault('failures', []).append(reason + ': ' + host)
+        elif isinstance(error, ValueError):
+            reason = str(error)
+        else:
+            reason = 'Employer posting could not be reached'
+        job.update(availability='Needs Verification', application_evidence=reason, posting_check_failed=True)
+        job.pop('posting_verified', None)
+        job.pop('application_verified', None)
+        report.setdefault('log', []).append(host + ': ' + reason)
+    finally:
+        if attempted:
+            deadline = SEARCH_DEADLINE.get()
+            delay = cfg['request_delay_seconds']
+            remaining = delay if deadline is None else deadline - time.monotonic()
+            time.sleep(max(0, min(delay, remaining)))
+    if job.get('posting_verified'):
+        job['posting_check_failed'] = False
+    if wants_form and not job.get('application_verified'):
+        job['queue'] = 'Review'
+    return job
+
 
 class PostingParser(HTMLParser):
     def __init__(self):super().__init__();self.capture=False;self.scripts=[];self.links=[];self.chunks=[]
@@ -937,11 +1029,15 @@ def generic_posting(url,report,key):
         data=firecrawl('scrape',{'url':url,'formats':['html'],'maxAge':0},report)
         raw=data.get('html','');final=data.get('metadata',{}).get('url',url)
     else:
-        raw, final = read_response(ur.Request(url, headers={'User-Agent': 'Mozilla/5.0 PersonalJobDashboard'}))
+        raw, final = read_response(ur.Request(url, headers={'User-Agent': 'Mozilla/5.0 PersonalJobDashboard'}),
+                                   opener=POSTING_OPENER)
         raw = raw.decode('utf-8', errors='replace')
+    if posting_reference(final) != posting_reference(url):
+        raise ValueError('Employer posting redirected away from the requested page')
     parser=PostingParser();parser.feed(raw);postings=[x for s in parser.scripts for x in jsonld_jobs(s)]
     if len(postings)!=1:raise ValueError('No unique job-specific employer structured posting; needs manual verification')
     x=postings[0];org=x.get('hiringOrganization') or {};employer=org.get('name','');org_host=up.urlsplit(org.get('sameAs') or org.get('url') or '').hostname
+    host = up.urlsplit(final).hostname
     official=host.endswith(('.myworkdayjobs.com','.smartrecruiters.com')) or (org_host and (host==org_host or host.endswith('.'+org_host)))
     if not official:raise ValueError('Employer ownership of this domain not established')
     loc=x.get('jobLocation',[]);loc=loc if isinstance(loc,list) else [loc]
@@ -988,6 +1084,24 @@ def firecrawl(endpoint,payload,report):
         with connect() as c:c.execute('UPDATE usage SET credits=credits+? WHERE day=?',(credits,day))
     report['firecrawl_requests']+=1
     return result.get('data',{})
+def set_pending_alert(connection, job_id, pending):
+    connection.execute(
+        "UPDATE jobs SET listing=json_set(listing, '$.pending_match_alert', ?) WHERE id=?",
+        (int(pending), job_id),
+    )
+
+
+def release_pending_alert(connection, job_id, previous, current, searches):
+    if not previous.get('pending_match_alert'):
+        return
+    if current['availability'] == 'Closed':
+        set_pending_alert(connection, job_id, False)
+    elif current['availability'] == 'Open' and current.get('posting_verified'):
+        matches = prototype.matching_searches(service(), current, searches)
+        prototype.record_match_alerts(connection, job_id, matches, now())
+        set_pending_alert(connection, job_id, False)
+
+
 def run_pipeline(trigger='manual'):
     report={'new_qualified':0,'new_review':0,'reverified':0,'newly_closed':0,'duplicates':0,'failures':[],'top_new':[],'firecrawl_requests':0,'firecrawl_credits_reported':0,'log':[]}
     run_id = None
@@ -1071,17 +1185,23 @@ def run_pipeline(trigger='manual'):
                         elif hit.get('url'): discoveries.append(hit['url'])
                 except Exception as e:report['failures'].append('Firecrawl discovery: '+type(e).__name__+': '+str(e)[:160])
         else:report['log'].append('Public board mode: Firecrawl is disabled or no key is configured.')
-        known_identities = {job['identity'] for job in existing}
-        known_identities.update(ident for job in existing
-                                if (ident := identity(job['url'])).startswith('personio:'))
+        retained_by_identity = {identity(job['url']): job for job in existing}
+        known_identities = {job['identity'] for job in existing} | retained_by_identity.keys()
         candidates = {}
         seen = set()
         successful = 0
         with connect() as c:
             checked = {r['source']:r['checked'] for r in c.execute('SELECT source,checked FROM source_health')}
         disabled = set(cfg.get('disabled_sources', []))
+        pending_boards = {}
+        for job in existing:
+            board = board_identity(job['url'])
+            if board and job.get('pending_match_alert'):
+                attempted = job.get('posting_check_attempted', '')
+                pending_boards[board] = min(pending_boards.get(board, attempted), attempted)
         board_list = sorted((pair for pair in boards if '/'.join(pair) not in disabled),
-                            key=lambda pair: (checked.get('/'.join(pair), ''), pair))
+                            key=lambda pair: (pair not in pending_boards, pending_boards.get(pair, ''),
+                                              checked.get('/'.join(pair), ''), pair))
         for index, (platform, board) in enumerate(board_list):
             if not time_left(len(board_list) - index, 'employer boards'):
                 break
@@ -1096,7 +1216,8 @@ def run_pipeline(trigger='manual'):
                 by_id = {identity(j['url']):j for j in live}
                 prototype.source_result(service(),platform+'/'+board,'ok',len(live))
                 current=[j for j in existing if board_identity(j['url'])==(platform,board)]
-                current.sort(key=lambda j:j.get('last_verified',''))
+                current.sort(key=lambda job: (not job.get('pending_match_alert'),
+                                              job.get('posting_check_attempted', ''), job.get('last_verified', '')))
                 recheck_limit = min(cfg['max_rechecks'], 8) if platform == 'smartrecruiters' else cfg['max_rechecks']
                 with connect() as c:
                     for old in current[:recheck_limit]:
@@ -1104,20 +1225,25 @@ def run_pipeline(trigger='manual'):
                             break
                         ident=identity(old['url']);fresh=by_id.get(ident)
                         if fresh:
-                            if platform == 'personio' and (report.get('personio_page_checks', 0) >= 8
-                                                          or report.get('personio_throttled')):
-                                continue
                             fresh = hydrate_board_listing(board, fresh)
                             # Keep original human readable employer names; ATS slugs are identifiers.
                             fresh['employer']=old['employer'];fresh['history_confirmation']=old.get('history_confirmation',False)
-                            j=finalize(fresh,cfg,report);upsert(c,j);c.commit();report['reverified']+=1
+                            j = finalize(fresh, cfg, report, previous=old)
+                            job_id, _ = upsert(c, j)
+                            release_pending_alert(c, job_id, old, j, searches)
+                            c.commit()
+                            report['reverified'] += 1
                         elif platform == 'personio':
                             if old['availability'] != 'Closed':
                                 old.pop('application_verified', None)
+                                old.pop('posting_verified', None)
                                 old.update(availability='Needs Verification', queue='Review',
                                            last_verified=now(), application_evidence='Missing from Personio feed; check employer page')
                                 upsert(c,old);c.commit()
                         else:
+                            old.pop('posting_verified', None)
+                            old.pop('application_verified', None)
+                            old['pending_match_alert'] = False
                             old['availability']='Closed';old['queue']='Review';old['last_verified']=now()
                             if old.get('application_evidence')!='Absent from employer live board':report['newly_closed']+=1
                             old['application_evidence']='Absent from employer live board';upsert(c,old);c.commit()
@@ -1176,9 +1302,11 @@ def run_pipeline(trigger='manual'):
                 successful += 1
                 ident = identity(j['url'])
                 if ident in known_identities:
-                    j = finalize(j, cfg, report)
+                    old = retained_by_identity.get(ident, {})
+                    j = finalize(j, cfg, report, previous=old)
                     with connect() as c:
-                        upsert(c, j)
+                        job_id, _ = upsert(c, j)
+                        release_pending_alert(c, job_id, old, j, searches)
                     report['reverified'] += 1
                     continue
                 j = assess(j, cfg)
@@ -1210,14 +1338,14 @@ def run_pipeline(trigger='manual'):
                 report['deferred_candidates'] = len(ranked) - index
                 break
             progress('Saving results', new_count, min(len(ranked), limit))
-            if job['queue'] == 'Confirmed' or job.get('source') == 'Personio public employer feed':
-                job = finalize(job, cfg, report)
-            if job['availability'] != 'Open':
-                matched = []
+            job = finalize(job, cfg, report, check_posting=bool(matched))
             with connect() as c:
                 job_id, added = upsert(c, job)
-                if added:
-                    prototype.record_match_alerts(c, job_id, matched, now())
+                if added and matched:
+                    if job.get('posting_verified') and job['availability'] == 'Open':
+                        prototype.record_match_alerts(c, job_id, matched, now())
+                    elif job['availability'] != 'Closed':
+                        set_pending_alert(c, job_id, True)
             if not added:
                 report['duplicates'] += 1
             else:
@@ -1313,6 +1441,10 @@ def snapshot():
         if j.get('external_application'):
             j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
             continue
+        expires = posting_check_expiration(j, cfg)
+        j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
+        if expires:
+            j['posting_verification_expires'] = expires.isoformat(timespec='seconds')
         previous_queue=j.get('queue');previous_application=j.get('application_verified')
         assess(j,cfg)
         if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'

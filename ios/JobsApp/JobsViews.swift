@@ -660,12 +660,22 @@ struct JobDetail: View {
                             LabeledContent("Listing Status", value: availability)
                         }
                         if let url = job.postingURL {
-                            Link(destination: url) {
-                                Label(job.isExternalApplication ? "Open saved link" : "Open employer posting", systemImage: "arrow.up.right.square")
-                                    .frame(maxWidth: .infinity)
+                            let label = job.isExternalApplication ? "Open saved link"
+                                : workspace.isSample ? "Open sample link"
+                                : job.hasVerifiedPostingLink ? "Open checked employer posting"
+                                : "Open unverified posting link"
+                            if job.hasVerifiedPostingLink {
+                                Link(destination: url) {
+                                    Label(label, systemImage: "arrow.up.right.square")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.large)
+                            } else {
+                                Link(destination: url) {
+                                    Label(label, systemImage: "arrow.up.right.square")
+                                }
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
                         }
                         Button { editor = .tracking } label: {
                             LabeledContent("Application Tracking", value: job.status)
@@ -710,8 +720,13 @@ struct JobDetail: View {
                             if let checked = job.lastVerified, !checked.isEmpty {
                                 LabeledContent("Employer Source Checked", value: displayTimestamp(checked))
                             }
+                            if let checked = job.postingVerified, !checked.isEmpty {
+                                LabeledContent("Direct Posting Checked", value: displayTimestamp(checked))
+                                    .accessibilityIdentifier("directPostingChecked")
+                            }
                             if let verified = job.applicationVerified, !verified.isEmpty {
                                 LabeledContent("Application Form Verified", value: displayTimestamp(verified))
+                                    .accessibilityIdentifier("applicationFormChecked")
                             }
                             ForEach(job.reviewBlockers + (job.matchGaps ?? []), id: \.self) { blocker in
                                 Label(blocker, systemImage: "exclamationmark.circle")

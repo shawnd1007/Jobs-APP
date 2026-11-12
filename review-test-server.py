@@ -22,6 +22,8 @@ with tempfile.TemporaryDirectory(prefix='review-qa-',dir=app.DATA) as folder:
                 j.update(employer='QA Fixture '+str(j['id']),title='Financial Analyst QA '+str(j['id']),url='https://example.com/qa-'+str(j['id']),location='Remote - United States' if j['id']!=4 else 'Remote - Mexico',remote=True,availability='Open',queue='Review',score=80,description='Isolated test record; no employment claim.',explanation='Test salary and location review.',salary_text='Salary not yet verified',application_evidence='QA application evidence only.')
                 if j['id']==1:
                     j['description']='Responsibilities:\nReconcile sample accounts in Excel.\nBuild SQL reports.'
+                elif j['id']==2:
+                    j['posting_verified'] = app.now()
             else:j['availability']='Closed'
             c.execute('UPDATE jobs SET listing=? WHERE id=?',(json.dumps(j),j['id']))
     class QAHandler(app.Handler):

@@ -10,6 +10,10 @@ const assert=require('node:assert/strict');
  browser=await chromium.launch({headless:true,...(process.platform==='win32'?{channel:'msedge'}:{})});const page=await browser.newPage({viewport:{width:390,height:844}});page.setDefaultTimeout(10000);let errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:18084');await page.waitForSelector('article[data-id="1"]');
  const card=id=>page.locator(`article[data-id="${id}"]`),tab=key=>page.locator(`[data-bucket="${key}"]`);
+ await card(1).getByRole('link',{name:'Open unverified posting link'}).waitFor();
+ await card(2).getByRole('link',{name:'Open checked employer posting'}).waitFor();
+ await card(2).getByText('Employer description & verification',{exact:true}).click();
+ await card(2).getByText(/Direct posting checked:.*Application form verified: Never/s).waitFor();
  await card(1).getByText('2 duties use profile skills',{exact:true}).waitFor();
  await card(1).getByText('Experience matched to duties',{exact:true}).click();
  await card(1).getByText('Reconcile sample accounts in Excel.',{exact:false}).first().waitFor();
@@ -49,6 +53,6 @@ const assert=require('node:assert/strict');
  assert.equal(await form.getByLabel('Job title').inputValue(),'Payroll Coordinator');
  await form.getByRole('button',{name:'Cancel'}).click();
  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);assert.equal(overflow,false);assert.deepEqual(errors,[]);
- console.log(JSON.stringify({dutyEvidence:true,approvalChecklist:true,readyBucket:true,approvalPersistsAfterReload:true,appliedBucket:true,interviewBucket:true,holdNotesPersist:true,dismissRetainsHistory:true,outOfAreaBlocked:true,externalApplicationTracking:true,mobileOverflow:overflow,errors}));
+ console.log(JSON.stringify({dutyEvidence:true,postingLabels:true,approvalChecklist:true,readyBucket:true,approvalPersistsAfterReload:true,appliedBucket:true,interviewBucket:true,holdNotesPersist:true,dismissRetainsHistory:true,outOfAreaBlocked:true,externalApplicationTracking:true,mobileOverflow:overflow,errors}));
  }finally{if(browser)await browser.close();try{await fetch('http://127.0.0.1:18084/qa-stop',{method:'POST'});}catch{}setTimeout(()=>server.kill(),1500).unref();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

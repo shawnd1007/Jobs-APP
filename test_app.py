@@ -356,7 +356,8 @@ class PersistenceTests(unittest.TestCase):
                      salary_type='base')
   def board(platform, slug):
    return postings if (platform, slug) == ('smartrecruiters', 'fictional') else []
-  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=board):
+  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=board), \
+       patch.object(app, 'read_response', return_value=(b'<h1>Billing Specialist</h1>', postings[0]['url'])):
    app.LOCK.acquire()
    report = app.run_pipeline()
    self.assertEqual(app.snapshot()['unread_match_count'], 1)
@@ -403,11 +404,11 @@ class PersistenceTests(unittest.TestCase):
   cfg['firecrawl_enabled'] = True
   with patch.object(app, 'safe_url'), patch.object(app, 'config', return_value=cfg), \
        patch.object(app, 'firecrawl_key', return_value='fictional-key'), \
-       patch.object(app.OPENER, 'open') as request, patch.object(app, 'firecrawl') as render:
+       patch.object(app.POSTING_OPENER, 'open') as request, patch.object(app, 'firecrawl') as render:
    response = request.return_value.__enter__.return_value
    response.url = url
    response.read.return_value = b'<title>Financial Analyst</title>'
-   render.return_value = {'html': '<title>Financial Analyst</title><form>Submit application</form>',
+   render.return_value = {'html': '<title>Financial Analyst</title><form><button>Submit application</button></form>',
                           'metadata': {'url': url}}
    report = {}
    self.assertTrue(app.verify_application(dict(job), report)['application_verified'])
@@ -426,6 +427,37 @@ class PersistenceTests(unittest.TestCase):
   self.assertFalse(app.application_form_visible(job, listing + newsletter, url))
   self.assertFalse(app.application_form_visible(job, listing + '<script>"<form>Submit application</form>"</script>', url))
   self.assertTrue(app.application_form_visible(job, listing + '<form><input name="resume" type="file"></form>', url))
+
+ def test_direct_posting_rejects_wrong_role_redirect_and_fake_form(self):
+  url = 'https://jobs.lever.co/fictional/billing-22/apply'
+  job = {'url': url, 'title': 'Billing Analyst'}
+  form = '<form><button>Submit application</button></form>'
+  with patch.object(app,'read_response') as read:
+   with self.assertRaisesRegex(ValueError, 'feed requisition'):
+    app.verify_application(dict(job, requisition='different-requisition'), render_form=False)
+   read.assert_not_called()
+  with self.assertRaisesRegex(ValueError, 'redirected'):
+   app.application_form_visible(job, '<h1>Billing Analyst</h1>'+form, url.replace('billing-22', 'billing-23'))
+  with self.assertRaisesRegex(ValueError, 'single requisition'):
+   app.application_form_visible(job, '<h1>Billing Analyst</h1>'+form, url.replace('/apply', '/careers'))
+  with self.assertRaisesRegex(ValueError, 'title'):
+   app.application_form_visible(job, '<h1>Senior Billing Analyst</h1>'+form, url)
+  with self.assertRaisesRegex(ValueError, 'title'):
+   app.application_form_visible(job, '<script>"<h1>Billing Analyst</h1>"</script>'+form, url)
+  with self.assertRaisesRegex(ValueError, 'unavailable'):
+   app.application_form_visible(job, '<h1>Billing Analyst</h1><p>This job is no longer available.</p>'+form, url)
+  self.assertFalse(app.application_form_visible(job, '<h1>Billing Analyst</h1><form>Submit application</form>', url))
+  self.assertTrue(app.application_form_visible(job, '<title>Fictional Employer - Billing Analyst</title>'+form, url))
+  self.assertEqual(app.posting_reference('https://boards.greenhouse.io/fictional/jobs/12?utm_source=test'),
+                   app.posting_reference('https://job-boards.greenhouse.io/fictional/jobs/12'))
+  self.assertNotEqual(app.posting_reference('https://example.com/careers?posting=1'),
+                      app.posting_reference('https://example.com/careers?posting=2'))
+
+ def test_generic_posting_refuses_requisition_substitution(self):
+  url = 'https://example.com/careers?posting=1'
+  with patch.object(app,'read_response',return_value=(b'<title>Billing Analyst</title>',url.replace('=1','=2'))):
+   with self.assertRaisesRegex(ValueError,'redirected'):
+    app.generic_posting(url,{},'')
 
  def test_daily_search_ignores_manual_runs_and_bounds_failed_retries(self):
   utc = app.dt.datetime(2026, 11, 12, 13, tzinfo=app.dt.timezone.utc)

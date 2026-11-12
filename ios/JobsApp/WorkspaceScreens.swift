@@ -123,6 +123,12 @@ private struct SearchReport: View {
                 if let deferred = run.report.deferredSourceDetails, deferred > 0 {
                     LabeledContent("Board Details Deferred", value: deferred.formatted())
                 }
+                if let checks = run.report.postingChecks {
+                    LabeledContent("Direct Posting Checks", value: checks.formatted())
+                }
+                if let deferred = run.report.postingChecksDeferred, deferred > 0 {
+                    LabeledContent("Direct Checks Deferred", value: deferred.formatted())
+                }
                 if let requests = run.report.firecrawlRequests, requests > 0 {
                     LabeledContent("Firecrawl Requests", value: requests.formatted())
                     if let credits = run.report.firecrawlCreditsReported {

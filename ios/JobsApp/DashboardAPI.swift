@@ -37,6 +37,8 @@ struct Job: Decodable, Identifiable {
     var matchedDutyCount: Int? = nil
     var scoreBreakdown: ScoreBreakdown? = nil
     var applicationVerified: String? = nil
+    var postingVerified: String? = nil
+    var postingVerificationExpires: String? = nil
     var externalApplication: Bool? = nil
     var interest: Interest?
     var matchedSkills: [String]?
@@ -117,6 +119,13 @@ struct Job: Decodable, Identifiable {
     }
 
     var isExternalApplication: Bool { externalApplication == true }
+
+    var hasVerifiedPostingLink: Bool {
+        guard availability == "Open", let postingVerificationExpires,
+              let expires = ISO8601DateFormatter().date(from: postingVerificationExpires)
+        else { return false }
+        return expires >= .now
+    }
 
     var postingURL: URL? { url.flatMap(DashboardAPI.webURL) }
 
@@ -254,6 +263,8 @@ struct SearchRun: Decodable, Identifiable {
         let duplicates: Int?
         let deferredCandidates: Int?
         let deferredSourceDetails: Int?
+        let postingChecks: Int?
+        let postingChecksDeferred: Int?
         let firecrawlRequests: Int?
         let firecrawlCreditsReported: Double?
         let failures: [String]?
