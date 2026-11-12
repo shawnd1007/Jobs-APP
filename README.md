@@ -6,7 +6,7 @@ Build 9 is a local-first, single-workspace prototype with a browser dashboard an
 
 ## What works in Build 9
 
-- **Find roles.** Pull openings from Greenhouse, Lever, Ashby, and SmartRecruiters employer boards. Browse the full collection or open **For You** to see ranked recommendations.
+- **Find roles.** Pull openings from Greenhouse, Lever, Ashby, SmartRecruiters, and employer-enabled Personio boards. Searches show progress and keep results from sources that respond. Browse the full collection or open **For You** to see ranked recommendations.
 - **Personalize matching.** Import a résumé on iPhone, select supported skills and experience, and set role, location and pay preferences. Job details explain the score and identify details to verify.
 - **Save searches.** Keep separate sets of criteria and review new matches in the alert inbox. Local iPhone notification delivery still needs a signed-device check.
 - **Manage applications.** Save or pass on roles, apply on the employer’s site, and use **My Jobs** to track stages, notes, and follow-ups.

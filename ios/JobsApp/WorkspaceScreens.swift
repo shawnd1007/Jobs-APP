@@ -6,6 +6,17 @@ import UserNotifications
 struct SearchScreen: View {
     let workspace: Workspace
 
+    private func searchOutcome(_ run: SearchRun) -> String {
+        let found = (run.report.newQualified ?? 0) + (run.report.newReview ?? 0)
+        let result = found == 1 ? "1 new listing saved." : "\(found) new listings saved."
+        switch run.state {
+        case "partial": return "Search finished with incomplete checks. " + result + " Run again to retry."
+        case "failed": return "The search couldn’t complete. Previously saved listings are still here. Try again."
+        case "interrupted": return "The last search was interrupted. Run it again to continue."
+        default: return found == 0 ? "Search finished. No new listings matched." : "Search finished. " + result
+        }
+    }
+
     var body: some View {
         List {
             if let dashboard = workspace.dashboard {
@@ -13,17 +24,35 @@ struct SearchScreen: View {
                     Button("Run Employer Search", systemImage: "magnifyingglass") {
                         Task { await workspace.startSearch() }
                     }
-                    .disabled(!workspace.connected || dashboard.running || workspace.startingSearch || workspace.saving)
-                    if workspace.connected && (dashboard.running || workspace.startingSearch) {
-                        ProgressView("Checking employer sources…")
+                    .disabled(!workspace.connected || workspace.searchRunning || workspace.startingSearch || workspace.saving)
+                    if workspace.searchConnectionLost {
+                        Text("Can’t confirm the search status. The Mac may still be searching.")
+                            .foregroundStyle(.secondary)
+                        Button("Check search status") { Task { await workspace.checkSearchStatus() } }
+                    } else if workspace.startingSearch {
+                        ProgressView("Starting the search…")
+                    } else if workspace.searchRunning {
+                        if let progress = workspace.searchStatus?.run?.progress {
+                            ProgressView(progress.label)
+                            if let source = progress.source {
+                                Text(source).font(.caption).foregroundStyle(.secondary)
+                            }
+                        } else {
+                            ProgressView("Checking employer sources…")
+                        }
+                        Text("You can keep browsing while the Mac searches.")
+                            .font(.footnote).foregroundStyle(.secondary)
                     } else if !workspace.connected {
                         Text("Reconnect to your Mac to find new jobs.").foregroundStyle(.secondary)
+                    } else if let run = dashboard.runs.first, run.finished != nil {
+                        Text(searchOutcome(run)).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("searchOutcome")
                     }
                     if let error = workspace.searchError { Text(error).foregroundStyle(.red) }
                 } header: {
                     Text("Find New Jobs")
                 } footer: {
-                    Text("The Mac checks configured employer sources and updates this workspace.")
+                    Text("The Mac checks employer sources and updates this workspace. Some checks can take a few minutes.")
                 }
                 if let searches = dashboard.savedSearches {
                     Section("Your matches") {
@@ -390,6 +419,7 @@ private struct PreferencesEditor: View {
                 boardField("Greenhouse", "greenhouse")
                 boardField("Lever", "lever")
                 boardField("SmartRecruiters", "smartrecruiters")
+                boardField("Personio", "personio")
                 multiline("Employer posting URLs, one per line", $draft.employerURLs)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
             }

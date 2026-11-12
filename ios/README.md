@@ -46,7 +46,7 @@ For physical iPhone testing, select your development team under **Signing & Capa
 
 ## Search and AI
 
-The backend checks Greenhouse, Ashby, Lever and SmartRecruiters feeds. It can also extract structured job data from individual employer pages. Some pages need manual review. Job details show evidence from posting duties when they match skills described in the search profile.
+The backend checks Greenhouse, Ashby, Lever, SmartRecruiters and employer-enabled Personio feeds. **Find New Jobs** shows the stage and current board, and reports when some sources could not finish. You can browse while the Mac searches and retry after an incomplete run. It can also extract structured job data from individual employer pages. Some pages need manual review. Job details show evidence from posting duties when they match skills described in the search profile.
 
 To request AI career advice, put your key in `secrets/openai.key` on the Mac, enable AI in **Preferences**, and request advice from a job’s details. The backend sends your profile and the posting to OpenAI when you confirm a request. The daily limit counts attempts. Saved advice can be viewed in the app alongside the employer evidence and your decision.
 

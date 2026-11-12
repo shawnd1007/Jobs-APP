@@ -35,7 +35,7 @@ It addresses a practical problem: collecting links is easy; knowing which links 
 
 The implemented capabilities are:
 
-- Employer-board retrieval from Greenhouse, Ashby, Lever and SmartRecruiters.
+- Employer-board retrieval from Greenhouse, Ashby, Lever, SmartRecruiters and Personio.
 - Limited discovery through public web search and best-effort extraction from other employer posting URLs.
 - Location, published base-salary and title checks.
 - Configurable skill-weight scoring with readable explanations.
@@ -147,6 +147,7 @@ An applicant tracking system, or ATS, hosts an employer's recruitment board. `bo
 | Greenhouse | `https://job-boards.greenhouse.io/BOARD` | Public board jobs endpoint with descriptions |
 | Lever | `https://jobs.lever.co/BOARD` | Public postings endpoint |
 | SmartRecruiters | `https://jobs.smartrecruiters.com/BOARD` | Public Posting API with pagination and per-requisition details |
+| Personio | `https://BOARD.jobs.personio.com` (also `.de` links) | Employer-enabled XML feed and exact requisition page check |
 
 The board slug is the employer identifier in the URL. Enter that slug in the matching Preferences field. A job-specific URL and a board URL are different: the former identifies one requisition; the latter identifies the feed to revisit.
 
@@ -155,6 +156,8 @@ Board names are normalized to lowercase. Existing jobs, configured additions and
 These feeds do not require Firecrawl. They are the foundation of the current search pipeline. Public availability does not imply exhaustive coverage or permission to bypass site controls.
 
 The SmartRecruiters adapter checks the complete public index, up to 3,000 postings per board, before treating a missing requisition as closed. Each run checks details for up to eight tracked postings and sixteen new postings per board. The new-posting budget prioritizes enabled saved searches with title criteria, then the main search profile. A share of the budget rotates through other postings. The run report shows how many board details were deferred. [SmartRecruiters Posting API](https://developers.smartrecruiters.com/docs/endpoints)
+
+Personio feeds use the employer’s career-site slug and the public English XML feed. Jobs checks the exact requisition page before reporting a result as open or sending a match alert. It checks the application form separately and leaves pay unknown when the feed does not supply verified base pay. A posting missing from the feed needs verification; it is not marked closed based on that absence alone. [Personio XML setup](https://support.personio.de/hc/en-us/articles/207576365-Integrate-jobs-from-Personio-into-your-website-via-XML) · [Personio posting links](https://developer.personio.de/docs/integration-of-open-positions)
 
 ### Public web discovery
 
@@ -173,6 +176,8 @@ Generic URLs are attempted least-recently-checked first. Repeated failures canno
 `run_pipeline()` backs up the database, loads preferences and history, discovers sources, fetches boards, refreshes existing requisitions, evaluates new candidates, attempts bounded generic URLs and saves a report. Manual and scheduled runs share this pipeline and a process lock.
 
 The pipeline collects candidates from the checked sources before applying the new-listing limit. It prioritizes roles that pass the initial pay, location, and fit checks, then saved-search matches, fit score, and posting date. The report shows how many candidates fell beyond the limit. Limits also bound rechecks, generic pages, public searches and optional provider usage. It does not pad the result list to a target count. The configured target and preferred salary ceiling are informational.
+
+Find New Jobs shows the search stage, current employer and count of checks attempted. Public requests have a 12-second deadline covering DNS, redirects and the response body; an employer board index has up to 35 seconds in total. After four minutes the search stops starting network checks, saves available results, and reports incomplete coverage. Sources deferred by the time limit get another chance on the next run, with the least recently checked boards first. A failed or incomplete board download does not close retained jobs. A lost status connection is shown separately from a failed search.
 
 ### Scheduling on the Mac
 
@@ -537,7 +542,7 @@ A first-time visitor can explore fictional listings and practice application tra
 
 ## 20. Limits and next milestones
 
-Build 9 runs as a trusted-network prototype with one shared workspace. The signed iPhone alert path and system Files selection still need verification. Discovery covers four employer feed families, with limits around dynamic forms, Workday, salary tiers and remote hiring rules. The API returns the full dashboard snapshot.
+Build 9 runs as a trusted-network prototype with one shared workspace. The signed iPhone alert path and system Files selection still need verification. Discovery covers five employer feed families, with limits around dynamic forms, Workday, salary tiers and remote hiring rules. The API returns the full dashboard snapshot.
 
 The [roadmap](NEXT-STEPS.md) prioritizes daily reliability and the quality of verified, direct opportunities. Public service readiness requires authenticated accounts, tested data isolation and recovery, and validation of provider costs and customer value. These requirements come from the [approved product vision](PRODUCT-VISION.md).
 

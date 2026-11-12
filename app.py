@@ -17,6 +17,8 @@ import urllib.parse as up
 import urllib.request as ur
 import xml.etree.ElementTree as ET
 import prototype
+from contextvars import ContextVar
+from queue import Empty, Queue
 import sys
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +30,13 @@ DATA.mkdir(parents=True, exist_ok=True)
 DB = DATA / 'jobs.sqlite3'
 STATUSES = ['Not Applied','Planning to Apply','Applied','Assessment Received','Interview Scheduled','Interview Completed','Offer Received','Rejected','Withdrawn','Position Closed','Needs Verification']
 LOCK = threading.Lock()
+SEARCH_ACTIVE = threading.Event()
+SEARCH_DEADLINE = ContextVar('search_deadline', default=None)
+BOARD_DEADLINE = ContextVar('board_deadline', default=None)
+NETWORK_SLOTS = threading.BoundedSemaphore(3)
+SEARCH_SECONDS = 240
+BOARD_SECONDS = 35
+REQUEST_SECONDS = 12
 logging.basicConfig(filename=DATA / 'errors.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 def now(): return dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
@@ -60,10 +69,14 @@ BOARD_HOSTS = {
     'jobs.ashbyhq.com': 'ashby', 'jobs.lever.co': 'lever',
     'jobs.smartrecruiters.com': 'smartrecruiters', 'careers.smartrecruiters.com': 'smartrecruiters',
 }
-BOARD_PLATFORMS = frozenset(BOARD_HOSTS.values())
+BOARD_PLATFORMS = frozenset(BOARD_HOSTS.values()) | {'personio'}
+PERSONIO_SLUG = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
+PERSONIO_HOST = re.compile(r'([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.jobs\.personio\.(?:com|de)')
 
 def identity(url):
     u=up.urlsplit(url); host=(u.hostname or '').lower(); path=u.path.rstrip('/'); parts=path.split('/')
+    if (board := PERSONIO_HOST.fullmatch(host)) and (job := re.fullmatch(r'/job/([0-9]+)', path)):
+        return f'personio:{board[1]}:{job[1]}'
     if host in ('boards.greenhouse.io','job-boards.greenhouse.io') and len(parts)>=4:
         return 'greenhouse:'+parts[1].lower()+':'+parts[3]
     if host=='jobs.ashbyhq.com' and len(parts)>=3: return 'ashby:'+parts[1].lower()+':'+parts[2]
@@ -87,6 +100,7 @@ def stored_board_posting(ident):
         'ashby': f'https://jobs.ashbyhq.com/{path}{posting_path}/application',
         'lever': f'https://jobs.lever.co/{path}{posting_path}/apply',
         'smartrecruiters': f'https://jobs.smartrecruiters.com/{path}{posting_path}',
+        'personio': f'https://{board}.jobs.personio.com/job/{posting_path}',
     }
     return urls[platform], posting
 
@@ -100,21 +114,69 @@ class SafeRedirect(ur.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         safe_url(newurl); return super().redirect_request(req,fp,code,msg,headers,newurl)
 OPENER=ur.build_opener(SafeRedirect())
+
+class NoRedirect(ur.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+PERSONIO_OPENER = ur.build_opener(NoRedirect())
+
+def network_call(operation, seconds=REQUEST_SECONDS):
+    """Bound the whole network operation, including DNS, redirects and response reads."""
+    search_deadline = SEARCH_DEADLINE.get()
+    if search_deadline is None:
+        return operation(seconds)
+    deadline = min(search_deadline, BOARD_DEADLINE.get() or search_deadline)
+    remaining = min(seconds, deadline - time.monotonic())
+    if remaining <= 0:
+        raise TimeoutError('Search time limit reached')
+    if not NETWORK_SLOTS.acquire(blocking=False):
+        raise TimeoutError('Previous employer requests are still timing out')
+    result = Queue(1)
+
+    def read():
+        try:
+            result.put((True, operation(remaining)))
+        except Exception as error:
+            result.put((False, error))
+        finally:
+            NETWORK_SLOTS.release()
+
+    try:
+        threading.Thread(target=read, daemon=True).start()
+    except Exception:
+        NETWORK_SLOTS.release()
+        raise
+    try:
+        ok, value = result.get(timeout=remaining)
+    except Empty:
+        raise TimeoutError(f'Employer request exceeded {remaining:.0f} seconds') from None
+    if not ok:
+        raise value
+    return value
+
+
+def read_response(request, *, opener=OPENER, max_bytes=3_000_000, seconds=REQUEST_SECONDS,
+                  check_url=True):
+    def read(timeout):
+        if check_url:
+            safe_url(request.full_url)
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise ValueError('Employer response exceeds the supported size')
+            return raw, response.url
+    return network_call(read, seconds)
+
+
 def fetch(url, payload=None, key=None):
-    safe_url(url)
     headers={'User-Agent':'PersonalJobDashboard/1.0','Accept':'application/json'}
     if payload is not None: headers['Content-Type']='application/json'
     if key: headers['Authorization']='Bearer '+key
-    for attempt in range(3):
-        try:
-            req=ur.Request(url,data=json.dumps(payload).encode() if payload is not None else None,headers=headers)
-            with OPENER.open(req,timeout=35) as r: return json.load(r)
-        except urllib.error.HTTPError as e:
-            if e.code not in (429,500,502,503,504) or attempt==2: raise
-        except (TimeoutError,urllib.error.URLError):
-            if attempt==2: raise
-        time.sleep(2**attempt*2)
-    raise RuntimeError('Request retries exhausted')
+    request=ur.Request(url,data=json.dumps(payload).encode() if payload is not None else None,headers=headers)
+    raw, _ = read_response(request, max_bytes=16_000_000)
+    return json.loads(raw)
+
 def init():
     with connect() as c:
         c.executescript('''CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, identity TEXT UNIQUE NOT NULL, fallback TEXT, listing TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
@@ -161,6 +223,13 @@ def init():
 def upsert(c,j):
     ident=identity(j['url']); fallback='|'.join(norm(str(j.get(k,''))) for k in ('employer','title','location'))
     row=c.execute('SELECT * FROM jobs WHERE identity=?',(ident,)).fetchone()
+    if not row and ident.startswith('personio:'):
+        _, tenant, requisition = ident.split(':')
+        aliases = [f'https://{tenant}.jobs.personio.{suffix}/job/{requisition}' for suffix in ('com', 'de')]
+        prior = c.execute('SELECT * FROM jobs WHERE identity IN (?,?)', aliases).fetchall()
+        if len(prior) > 1:
+            raise ValueError('Multiple retained Personio records match this requisition; manual review needed')
+        row = prior[0] if prior else None
     if not row:
         alternatives = c.execute('SELECT * FROM jobs WHERE fallback=?', (fallback,)).fetchall()
         if len(alternatives) == 1:
@@ -458,13 +527,15 @@ def assess(j,cfg):
 def board_jobs(platform,board):
     if platform=='greenhouse':
         data=fetch('https://boards-api.greenhouse.io/v1/boards/'+up.quote(board,safe='')+'/jobs?content=true')
+        if not isinstance(data.get('jobs'), list): raise ValueError('Invalid Greenhouse feed')
         out=[]
-        for x in data.get('jobs',[]):
+        for x in data['jobs']:
             out.append({'title':x['title'],'employer':board,'url':x['absolute_url'],'location':x.get('location',{}).get('name',''),'description':posting_text(x.get('content')),'posted':x.get('updated_at',''),'remote': 'remote' in x.get('location',{}).get('name','').lower(),'availability':'Open','last_verified':now(),'source':'Greenhouse public live board','requisition':str(x['id']),'application_evidence':'Listed in employer live board with absolute application URL','salary_text':'Salary not yet verified'})
         return out
     if platform=='ashby':
         data=fetch('https://api.ashbyhq.com/posting-api/job-board/'+up.quote(board,safe='')+'?includeCompensation=true');out=[]
-        for x in data.get('jobs',[]):
+        if not isinstance(data.get('jobs'), list): raise ValueError('Invalid Ashby feed')
+        for x in data['jobs']:
             if x.get('isListed') is False: continue
             j={'title':x['title'],'employer':board,'url':x.get('applyUrl') or x['jobUrl'],'location':x.get('location',''),'description':x.get('descriptionPlain',''),'posted':x.get('publishedAt',''),'remote':x.get('isRemote',False),'availability':'Open','last_verified':now(),'source':'Ashby public live board','requisition':x['id'],'application_evidence':'Listed employer job and application URL','salary_text':'Salary Not Published'}
             comp=x.get('compensation') or {}; tiers=comp.get('compensationTiers') or []
@@ -489,7 +560,59 @@ def board_jobs(platform,board):
         return out
     if platform == 'smartrecruiters':
         return smartrecruiters_board(board)
+    if platform == 'personio':
+        return personio_board(board)
     raise ValueError('Unsupported board')
+
+def personio_board(board):
+    if not PERSONIO_SLUG.fullmatch(board):
+        raise ValueError('Invalid Personio career-site slug')
+    base = f'https://{board}.jobs.personio.com'
+    request = ur.Request(base + '/xml?language=en', headers={'User-Agent': 'PersonalJobDashboard/1.0'})
+    try:
+        raw, final = read_response(request, opener=PERSONIO_OPENER, max_bytes=4_000_000)
+    except urllib.error.HTTPError as error:
+        if 300 <= error.code < 400:
+            raise ValueError('Personio feed redirected; use the employer career-site slug') from error
+        raise
+    if final != request.full_url:
+        raise ValueError('Personio feed redirected; use the employer career-site slug')
+    return personio_positions(board, raw)
+
+def personio_positions(board, data):
+    if len(data) > 4_000_000:
+        raise ValueError('Personio feed exceeds the supported size')
+    xml = data.decode('utf-8-sig')
+    if re.search(r'<!\s*(?:DOCTYPE|ENTITY)\b', xml, re.I):
+        raise ValueError('Unexpected declarations in Personio feed')
+    root = ET.fromstring(xml)
+    if root.tag != 'workzag-jobs' or len(root) > 2000 or any(node.tag != 'position' for node in root):
+        raise ValueError('Unexpected Personio feed structure')
+
+    jobs = []
+    seen = set()
+    for position in root:
+        requisition = position.findtext('id', '').strip()
+        title = position.findtext('name', '').strip()
+        if not re.fullmatch(r'[1-9][0-9]{0,19}', requisition) or not title or requisition in seen:
+            raise ValueError('Missing or duplicate Personio position identity')
+        seen.add(requisition)
+        sections = []
+        for section in position.findall('./jobDescriptions/jobDescription'):
+            heading = posting_text(section.findtext('name'))
+            body = posting_text(section.findtext('value'))
+            if body:
+                sections.extend(filter(None, (heading, body)))
+        office = position.findtext('office', '').strip()
+        jobs.append(dict(
+            title=title, employer=position.findtext('subcompany', '').strip() or board,
+            url=f'https://{board}.jobs.personio.com/job/{requisition}', requisition=requisition, location=office,
+            remote=bool(re.search(r'\bremote\b', office, re.I)), description='\n'.join(sections),
+            posted=position.findtext('createdAt', '').strip(), availability='Open', last_verified=now(),
+            source='Personio public employer feed', application_evidence='Published in the employer XML feed',
+            salary_text='Salary Not Published',
+        ))
+    return jobs
 
 def rotating_postings(listings, run_id, limit):
     if len(listings) <= limit:
@@ -570,18 +693,18 @@ def hydrate_board_listing(board, listing):
 
 def board_identity(url):
     u=up.urlsplit(url);parts=u.path.strip('/').split('/')
+    if board := PERSONIO_HOST.fullmatch((u.hostname or '').lower()):
+        return 'personio', board[1]
     platform = BOARD_HOSTS.get((u.hostname or '').lower())
     return (platform,parts[0].lower()) if platform and parts[0] else None
 def verify_application(j, report=None):
     """Verify the specific requisition and look for evidence of an application form."""
     url = j['url']
-    safe_url(url)
     visible = False
     try:
         request = ur.Request(url, headers={'User-Agent': 'Mozilla/5.0 PersonalJobDashboard'})
-        with OPENER.open(request, timeout=25) as response:
-            raw = response.read(3000000).decode('utf-8', errors='replace')
-            final = response.url
+        raw, final = read_response(request)
+        raw = raw.decode('utf-8', errors='replace')
     except OSError:
         if report is None or not config()['firecrawl_enabled'] or not firecrawl_key():
             raise
@@ -625,12 +748,60 @@ def application_form_visible(j, raw, final):
 
 def finalize(j,cfg,report):
     j=assess(j,cfg)
-    if j['queue']=='Confirmed':
+    if j.get('source') == 'Personio public employer feed':
+        verify_personio_page(j, cfg, report)
+    elif j['queue']=='Confirmed':
         try:verify_application(j,report)
         except Exception as e:
             j['queue']='Review';j['application_evidence']='Needs Verification: '+str(e)[:160]
+            if isinstance(e, TimeoutError):
+                report.setdefault('failures', []).append('Application page check timed out: ' + (up.urlsplit(j['url']).hostname or 'employer'))
             report['log'].append(j['url']+': application requires review')
     return j
+
+def verify_personio_page(job, cfg, report):
+    job.pop('application_verified', None)
+    url = job['url']
+    try:
+        if report.get('personio_page_checks', 0) >= 20 or report.get('personio_throttled'):
+            raise ValueError('direct posting check deferred')
+        report['personio_page_checks'] = report.get('personio_page_checks', 0) + 1
+        request = ur.Request(url, headers={'User-Agent': 'PersonalJobDashboard/1.0'})
+        try:
+            raw, final = read_response(request, opener=PERSONIO_OPENER, max_bytes=1_000_000)
+            if identity(final) != identity(url):
+                raise ValueError('page does not match the feed requisition')
+        except urllib.error.HTTPError as error:
+            if error.code == 429:
+                report['personio_throttled'] = True
+            raise ValueError(f'employer page returned HTTP {error.code}') from error
+        finally:
+            deadline = SEARCH_DEADLINE.get()
+            remaining = cfg['request_delay_seconds'] if deadline is None else deadline - time.monotonic()
+            time.sleep(max(0, min(cfg['request_delay_seconds'], remaining)))
+        page = raw.decode('utf-8', errors='replace')
+        page = re.sub(r'<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', '', page, flags=re.I | re.S)
+        headings = re.findall(r'<(title|h1)\b[^>]*>(.*?)</\1\s*>', page, flags=re.I | re.S)
+        title = norm(job['title'])
+        if not title or not any(f' {title} ' in f' {norm(clean(heading))} ' for _, heading in headings):
+            raise ValueError('employer page title does not match the feed')
+        has_form = application_form_visible(job, page, url)
+    except (ValueError, OSError) as error:
+        job.update(availability='Needs Verification', application_evidence=f'Personio feed only; {error}')
+        if job['queue'] == 'Confirmed':
+            job['queue'] = 'Review'
+        if isinstance(error, TimeoutError):
+            report.setdefault('failures', []).append('Personio posting check timed out: ' + (up.urlsplit(url).hostname or 'employer'))
+        report['log'].append(url + ': direct posting requires review')
+        return
+    job['application_evidence'] = 'Personio feed and exact employer posting checked'
+    if has_form:
+        job['application_verified'] = now()
+    else:
+        if job['queue'] == 'Confirmed':
+            job['queue'] = 'Review'
+        job['application_evidence'] += '; application form needs verification'
+
 class PostingParser(HTMLParser):
     def __init__(self):super().__init__();self.capture=False;self.scripts=[];self.links=[];self.chunks=[]
     def handle_starttag(self,tag,attrs):
@@ -651,14 +822,15 @@ def jsonld_jobs(value):
         return jsonld_jobs(value.get('@graph',[]))
     return []
 def generic_posting(url,report,key):
-    safe_url(url)
     host=up.urlsplit(url).hostname
     if any(host==d or host.endswith('.'+d) for d in ('indeed.com','linkedin.com','ziprecruiter.com','glassdoor.com','talent.com','jooble.org','remotive.com')):raise ValueError('Aggregator application URL excluded')
     if key:
+        network_call(lambda _: safe_url(url))
         data=firecrawl('scrape',{'url':url,'formats':['html'],'maxAge':0},report)
         raw=data.get('html','');final=data.get('metadata',{}).get('url',url)
     else:
-        with OPENER.open(ur.Request(url,headers={'User-Agent':'Mozilla/5.0 PersonalJobDashboard'}),timeout=30) as r:raw=r.read(3000000).decode('utf-8',errors='replace');final=r.url
+        raw, final = read_response(ur.Request(url, headers={'User-Agent': 'Mozilla/5.0 PersonalJobDashboard'}))
+        raw = raw.decode('utf-8', errors='replace')
     parser=PostingParser();parser.feed(raw);postings=[x for s in parser.scripts for x in jsonld_jobs(s)]
     if len(postings)!=1:raise ValueError('No unique job-specific employer structured posting; needs manual verification')
     x=postings[0];org=x.get('hiringOrganization') or {};employer=org.get('name','');org_host=up.urlsplit(org.get('sameAs') or org.get('url') or '').hostname
@@ -685,6 +857,8 @@ def backup():
     with connect() as src, sqlite3.connect(dest, factory=Connection) as target:src.backup(target)
     for old in sorted(folder.glob('*.sqlite3'))[:-config()['backup_retention']]:old.unlink()
 def firecrawl(endpoint,payload,report):
+    if (deadline := SEARCH_DEADLINE.get()) is not None and time.monotonic() >= deadline:
+        raise TimeoutError('Search time limit reached')
     keyfile=ROOT/'secrets'/'firecrawl.key'; key=keyfile.read_text().strip() if keyfile.exists() else ''
     if not key: raise ValueError('Firecrawl key not configured; public board discovery remains available')
     day=now()[:10]
@@ -697,7 +871,8 @@ def firecrawl(endpoint,payload,report):
         c.execute('UPDATE usage SET requests=requests+1,reserved=reserved+? WHERE day=?',(reserve,day))
     # No automatic billable retry: uncertain responses may already have consumed credits.
     req=ur.Request('https://api.firecrawl.dev/v2/'+endpoint,data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
-    with ur.urlopen(req,timeout=70) as r: result=json.load(r)
+    raw, _ = read_response(req, opener=PERSONIO_OPENER, max_bytes=6_000_000, seconds=45, check_url=False)
+    result = json.loads(raw)
     if not result.get('success'):raise ValueError('Firecrawl request failed')
     credits=result.get('creditsUsed')
     if credits is not None:
@@ -707,7 +882,26 @@ def firecrawl(endpoint,payload,report):
     return result.get('data',{})
 def run_pipeline(trigger='manual'):
     report={'new_qualified':0,'new_review':0,'reverified':0,'newly_closed':0,'duplicates':0,'failures':[],'top_new':[],'firecrawl_requests':0,'firecrawl_credits_reported':0,'log':[]}
-    run_id=None
+    run_id = None
+    deadline = time.monotonic() + SEARCH_SECONDS
+    token = SEARCH_DEADLINE.set(deadline)
+    SEARCH_ACTIVE.set()
+    report['progress'] = {'stage': 'Preparing search'}
+
+    def progress(stage, completed=None, total=None, source=None):
+        report['progress'] = dict(stage=stage, completed=completed, total=total, source=source)
+        with connect() as c:
+            c.execute('UPDATE runs SET report=? WHERE id=?', (json.dumps(report), run_id))
+
+    def time_left(remaining, kind):
+        if time.monotonic() < deadline:
+            return True
+        report['failures'].append(f'Search time limit reached; {remaining} {kind} deferred. Run again to continue.')
+        return False
+
+    def pause():
+        time.sleep(max(0, min(cfg['request_delay_seconds'], deadline - time.monotonic())))
+
     try:
         with connect() as c:
             cursor = c.execute('INSERT INTO runs(started,state,report,trigger) VALUES(?,?,?,?)',
@@ -730,25 +924,35 @@ def run_pipeline(trigger='manual'):
         key=firecrawl_key()
         if cfg.get('public_web_search_enabled'):
             start=dt.date.today().toordinal()*cfg.get('public_web_queries_per_run',3)
-            for offset in range(cfg.get('public_web_queries_per_run',3)):
+            total = cfg.get('public_web_queries_per_run',3)
+            for offset in range(total):
+                if not time_left(total - offset, 'public discovery queries'):
+                    break
+                progress('Discovering employer sources', offset, total)
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
                 domains=['jobs.ashbyhq.com','job-boards.greenhouse.io','jobs.lever.co','myworkdayjobs.com','jobs.smartrecruiters.com']
                 regions=cfg.get('target_locations') or ['remote United States','Jacksonville Florida','Buford Suwanee Duluth Georgia']
                 query='"'+category+'" jobs '+regions[offset%len(regions)]+' site:'+domains[(start+offset)%len(domains)]
                 try:
                     url='https://www.bing.com/search?format=rss&q='+up.quote(query)
-                    with OPENER.open(ur.Request(url,headers={'User-Agent':'PersonalJobDashboard/1.0'}),timeout=25) as response:feed=ET.fromstring(response.read(1000000))
+                    raw, _ = read_response(ur.Request(url, headers={'User-Agent':'PersonalJobDashboard/1.0'}),
+                                           max_bytes=1_000_000)
+                    feed = ET.fromstring(raw)
                     for item in feed.findall('./channel/item'):
                         url=item.findtext('link','');b=board_identity(url)
                         if b:boards.add(b)
                         elif url.startswith('https://') and re.search(r'(myworkdayjobs\.com|smartrecruiters\.com|/careers?/|/jobs?/)',url):discoveries.append(url)
                     report['log'].append('Public web discovery: '+category)
                 except Exception as e:report['failures'].append('Public web discovery: '+type(e).__name__)
-                time.sleep(cfg['request_delay_seconds'])
+                pause()
         if cfg['firecrawl_enabled'] and key:
             # Rotate categories over days so all categories receive coverage within a week.
             start=dt.date.today().toordinal()*cfg['firecrawl_searches_per_run']
-            for offset in range(cfg['firecrawl_searches_per_run']):
+            total = cfg['firecrawl_searches_per_run']
+            for offset in range(total):
+                if not time_left(total - offset, 'provider discovery queries'):
+                    break
+                progress('Discovering employer sources', offset, total)
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
                 try:
                     hits=firecrawl('search',{'query':category+' jobs remote United States OR Jacksonville OR Suwanee OR Buford employer careers','limit':cfg['search_results'],'sources':['web'],'tbs':'qdr:w'},report)
@@ -759,25 +963,51 @@ def run_pipeline(trigger='manual'):
                 except Exception as e:report['failures'].append('Firecrawl discovery: '+type(e).__name__+': '+str(e)[:160])
         else:report['log'].append('Public board mode: Firecrawl is disabled or no key is configured.')
         known_identities = {job['identity'] for job in existing}
+        known_identities.update(ident for job in existing
+                                if (ident := identity(job['url'])).startswith('personio:'))
         candidates = {}
         seen = set()
         successful = 0
-        for platform,board in sorted(boards):
-            if platform+'/'+board in cfg.get('disabled_sources',[]):continue
+        with connect() as c:
+            checked = {r['source']:r['checked'] for r in c.execute('SELECT source,checked FROM source_health')}
+        disabled = set(cfg.get('disabled_sources', []))
+        board_list = sorted((pair for pair in boards if '/'.join(pair) not in disabled),
+                            key=lambda pair: (checked.get('/'.join(pair), ''), pair))
+        for index, (platform, board) in enumerate(board_list):
+            if not time_left(len(board_list) - index, 'employer boards'):
+                break
+            progress('Checking employer boards', index, len(board_list), board)
             try:
-                live=board_jobs(platform,board);successful+=1; by_id={identity(j['url']):j for j in live}
+                board_token = BOARD_DEADLINE.set(time.monotonic() + BOARD_SECONDS)
+                try:
+                    live = board_jobs(platform, board)
+                finally:
+                    BOARD_DEADLINE.reset(board_token)
+                successful += 1
+                by_id = {identity(j['url']):j for j in live}
                 prototype.source_result(service(),platform+'/'+board,'ok',len(live))
                 current=[j for j in existing if board_identity(j['url'])==(platform,board)]
                 current.sort(key=lambda j:j.get('last_verified',''))
                 recheck_limit = min(cfg['max_rechecks'], 8) if platform == 'smartrecruiters' else cfg['max_rechecks']
                 with connect() as c:
                     for old in current[:recheck_limit]:
+                        if time.monotonic() >= deadline:
+                            break
                         ident=identity(old['url']);fresh=by_id.get(ident)
                         if fresh:
+                            if platform == 'personio' and (report.get('personio_page_checks', 0) >= 8
+                                                          or report.get('personio_throttled')):
+                                continue
                             fresh = hydrate_board_listing(board, fresh)
                             # Keep original human readable employer names; ATS slugs are identifiers.
                             fresh['employer']=old['employer'];fresh['history_confirmation']=old.get('history_confirmation',False)
                             j=finalize(fresh,cfg,report);upsert(c,j);c.commit();report['reverified']+=1
+                        elif platform == 'personio':
+                            if old['availability'] != 'Closed':
+                                old.pop('application_verified', None)
+                                old.update(availability='Needs Verification', queue='Review',
+                                           last_verified=now(), application_evidence='Missing from Personio feed; check employer page')
+                                upsert(c,old);c.commit()
                         else:
                             old['availability']='Closed';old['queue']='Review';old['last_verified']=now()
                             if old.get('application_evidence')!='Absent from employer live board':report['newly_closed']+=1
@@ -816,16 +1046,21 @@ def run_pipeline(trigger='manual'):
                 prototype.source_result(service(),platform+'/'+board,'error',error=type(e).__name__+': '+str(e))
                 report['failures'].append(platform+'/'+board+': '+type(e).__name__+': '+str(e)[:160]);logging.exception('Board failed %s/%s',platform,board)
                 # Failures never imply closure; queue freshness expires independently.
-            if run_id:
-                with connect() as c:c.execute('UPDATE runs SET report=? WHERE id=?',(json.dumps(report),run_id))
-            time.sleep(cfg['request_delay_seconds'])
+            progress('Checking employer boards', index + 1, len(board_list))
+            pause()
         with connect() as c:known_urls=[r['source'] for r in c.execute("SELECT source FROM source_health WHERE source LIKE 'https://%'")]
         extra=list(dict.fromkeys([j['url'] for j in existing if not board_identity(j['url'])]+discoveries+cfg['additional_employer_urls']+known_urls))
         extra=[u for u in extra if u not in cfg.get('disabled_sources',[])]
         # Least recently attempted first: failed pages cannot starve the rest.
         with connect() as c:checked={r['source']:r['checked'] for r in c.execute('SELECT source,checked FROM source_health')}
         extra.sort(key=lambda u:checked.get(u,''))
-        for url in extra[:cfg.get('generic_urls_per_run',5)]:
+        page_limit = min(len(extra), cfg.get('generic_urls_per_run', 5))
+        attempted_pages = 0
+        for index, url in enumerate(extra[:page_limit]):
+            if not time_left(page_limit - index, 'employer pages'):
+                break
+            attempted_pages += 1
+            progress('Checking individual postings', index, page_limit, up.urlsplit(url).hostname)
             try:
                 j = generic_posting(url, report, key if cfg['firecrawl_enabled'] else '')
                 prototype.source_result(service(), url, 'ok', 1)
@@ -847,9 +1082,12 @@ def run_pipeline(trigger='manual'):
                     candidates[ident] = (j, matched)
             except Exception as e:
                 prototype.source_result(service(),url,'manual review',error=type(e).__name__+': '+str(e))
+                if isinstance(e, TimeoutError) or (isinstance(e, urllib.error.URLError) and not isinstance(e, urllib.error.HTTPError)):
+                    report['failures'].append('Employer page could not be reached: ' + (up.urlsplit(url).hostname or 'unknown employer'))
                 report['log'].append('Employer URL needs manual review: '+url+' ('+type(e).__name__+': '+str(e)[:100]+')')
             finally:
-                time.sleep(cfg['request_delay_seconds'])
+                pause()
+        progress('Ranking results')
         ranked = sorted(candidates.values(), key=lambda item: (
             item[0]['queue'] == 'Confirmed', bool(item[1]), item[0]['matched_duty_count'], item[0]['score'],
             item[0].get('posted') or '',
@@ -857,12 +1095,16 @@ def run_pipeline(trigger='manual'):
         limit = cfg['max_new_candidates']
         new_count = 0
         report['deferred_candidates'] = 0
+        progress('Saving results', 0, min(len(ranked), limit))
         for index, (job, matched) in enumerate(ranked):
             if new_count >= limit:
                 report['deferred_candidates'] = len(ranked) - index
                 break
-            if job['queue'] == 'Confirmed':
+            progress('Saving results', new_count, min(len(ranked), limit))
+            if job['queue'] == 'Confirmed' or job.get('source') == 'Personio public employer feed':
                 job = finalize(job, cfg, report)
+            if job['availability'] != 'Open':
+                matched = []
             with connect() as c:
                 job_id, added = upsert(c, job)
                 if added:
@@ -876,12 +1118,16 @@ def run_pipeline(trigger='manual'):
                     report['top_new'].append({key: job[key] for key in ('title', 'employer', 'url', 'score')})
                 else:
                     report['new_review'] += 1
-        report['unprocessed_employer_urls']=extra[cfg.get('generic_urls_per_run',5):][:50]
+        report['unprocessed_employer_urls']=extra[attempted_pages:][:50]
         report['top_new']=sorted(report['top_new'],key=lambda j:-j['score'])[:10]
         report['manual_review'] = sum(
             j.get('queue') in ('Review', 'Location Review') and j.get('availability') != 'Closed'
             for j in records()
         )
+        if time.monotonic() >= deadline and not any('Search time limit' in issue for issue in report['failures']):
+            report['failures'].append('Search time limit reached; some checks may have been deferred.')
+        if not successful and not report['failures']:
+            report['failures'].append('No configured employer sources returned usable postings.')
         report['state'] = ('partial' if report['failures'] else 'success') if successful else 'failed'
     except Exception as e:
         logging.exception('Search failed');report['failures'].append(type(e).__name__+': '+str(e)[:180]);report['state']='failed'
@@ -892,15 +1138,19 @@ def run_pipeline(trigger='manual'):
                     c.execute('UPDATE runs SET finished=?,state=?,report=? WHERE id=?',
                               (now(), report.get('state', 'failed'), json.dumps(report), run_id))
         finally:
+            SEARCH_DEADLINE.reset(token)
+            SEARCH_ACTIVE.clear()
             LOCK.release()
     return report
 
 def start_run(trigger='manual'):
     if not LOCK.acquire(False):
         return False
+    SEARCH_ACTIVE.set()
     try:
         threading.Thread(target=run_pipeline, args=(trigger,), daemon=True).start()
     except Exception:
+        SEARCH_ACTIVE.clear()
         LOCK.release()
         raise
     return True
@@ -934,6 +1184,20 @@ def schedule():
             logging.exception('Scheduler')
         time.sleep(30)
 
+def search_status():
+    running = SEARCH_ACTIVE.is_set()
+    with connect() as c:
+        row = c.execute('SELECT id,state,started,finished,report FROM runs ORDER BY id DESC LIMIT 1').fetchone()
+    if not row:
+        return {'running': running, 'run': None}
+    run = dict(row)
+    report = json.loads(run.pop('report'))
+    run.update(progress=report.get('progress') if running and run['state'] == 'running' else None,
+               new_qualified=report.get('new_qualified', 0), new_review=report.get('new_review', 0),
+               failures=len(report.get('failures', [])))
+    return {'running': SEARCH_ACTIVE.is_set(), 'run': run}
+
+
 def snapshot():
     cfg=config();jobs=records();stamp=dt.datetime.now(dt.timezone.utc)
     for j in jobs:
@@ -954,7 +1218,7 @@ def snapshot():
             job['interest'] = interests.get(job['id'])
         runs=[dict(r) for r in c.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 30')]
         for r in runs:r['report']=json.loads(r['report'])
-    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':LOCK.locked(),'firecrawl_configured':bool(cfg['firecrawl_enabled'] and firecrawl_key()),'schedule_hour_utc':cfg['schedule_hour_utc']})
+    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':SEARCH_ACTIVE.is_set(),'firecrawl_configured':bool(cfg['firecrawl_enabled'] and firecrawl_key()),'schedule_hour_utc':cfg['schedule_hour_utc']})
 def save_interest(job_id, payload):
     state = payload.get('state')
     version = payload.get('version')
@@ -976,11 +1240,16 @@ def save_interest(job_id, payload):
 class Handler(BaseHTTPRequestHandler):
     def send(self,status,data,kind='application/json'):
         raw=json.dumps(data).encode() if kind=='application/json' else data.encode()
-        self.send_response(status);self.send_header('Content-Type',kind+'; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
+        self.send_response(status);self.send_header('Content-Type',kind+'; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Content-Length',str(len(raw)));self.end_headers()
+        try:
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
     def do_GET(self):
         path=up.urlsplit(self.path).path
         if path=='/api/dashboard':return self.send(200,snapshot())
         if path=='/api/v1/health':return self.send(200,{'status':'ok','api_version':1})
+        if path=='/api/v1/search-status':return self.send(200,search_status())
         if path=='/api/v1/dashboard':return self.send(200,snapshot())
         if path in ('/','/index.html'):return self.send(200,(ROOT/'site'/'index.html').read_text(encoding='utf-8-sig'),'text/html')
         if path=='/dashboard.js':return self.send(200,(ROOT/'site'/'dashboard.js').read_text(encoding='utf-8-sig'),'text/javascript')

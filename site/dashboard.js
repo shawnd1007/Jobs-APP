@@ -6,6 +6,44 @@ const unapplied=['Not Applied','Planning to Apply','Needs Verification'];
 const bucketInfo={review:['Review Inbox','Check details and decide what moves forward.'],ready:['Ready to Apply','Approved by you; no application recorded yet.'],applied:['Applied','Submitted applications and assessments.'],interviews:['Interviews','Scheduled or completed interviews.'],offers:['Offers','Offers received.'],hold:['On Hold','Waiting for more information or a later decision.'],archive:['Closed / Dismissed','Closed, rejected, withdrawn or dismissed jobs.'],all:['All History','Every record, including out-of-area jobs.']};
 let state,activeBucket=bucketInfo[location.hash.slice(1)]?location.hash.slice(1):'review';
 const drafts=new Set();
+let searchRunning=false, searchPolling=false, searchNeedsSync=false;
+function searchMessage(running,run){
+ if(running){
+  const p=run?.progress;
+  if(!p)return 'Checking employer sources… You can keep browsing.';
+  const count=p.total>0&&p.completed!=null?' ('+p.completed+' of '+p.total+')':'';
+  return p.stage+count+(p.source?' — '+p.source:'')+'… You can keep browsing.';
+ }
+ if(!run?.finished)return '';
+ if(run.state==='failed')return 'The search couldn’t complete. Saved listings are still here. Try again.';
+ if(run.state==='interrupted')return 'The last search was interrupted. Run it again to continue.';
+ const found=(run.new_qualified??run.report?.new_qualified??0)+(run.new_review??run.report?.new_review??0);
+ const saved=found===1?'1 new listing saved.':found+' new listings saved.';
+ if(run.state==='partial')return 'Search finished with incomplete checks. '+saved+' Run again to retry.';
+ return found?'Search finished. '+saved:'Search finished. No new listings matched.';
+}
+async function pollSearch(){
+ if(searchPolling||(!searchRunning&&!searchNeedsSync))return;
+ searchPolling=true;
+ try{
+  if(searchRunning){
+   const response=await fetch('/api/v1/search-status',{signal:AbortSignal.timeout(5000)});
+   if(!response.ok)throw Error('Unable to check status.');
+   const data=await response.json();
+   searchRunning=data.running;
+   $('search-progress').textContent=searchMessage(searchRunning,data.run);
+   $('run').disabled=searchRunning;
+   if(!searchRunning)searchNeedsSync=true;
+  }
+  if(searchNeedsSync&&!drafts.size&&!preferencesDirty){
+   await load();searchNeedsSync=false;
+  }
+ }catch{
+  $('search-progress').textContent=searchRunning
+   ?'Can’t confirm the search status. The Mac may still be searching. Retrying…'
+   :'Search finished. The dashboard hasn’t refreshed yet. Retrying…';
+ }finally{searchPolling=false;}
+}
 function bucket(j){
  if(j.availability==='Closed'||['Rejected','Withdrawn','Position Closed'].includes(j.status))return 'archive';
  if(j.status==='Offer Received')return 'offers';
@@ -19,7 +57,7 @@ function bucket(j){
 }
 function notify(message){$('notice').textContent=message;}
 function discardCheck(){if(drafts.size&&!confirm('Discard unsaved changes?'))return false;drafts.clear();return true;}
-async function load(){const r=await fetch('/api/dashboard');if(!r.ok)throw Error('Could not load the shared job database.');state=await r.json();render();}
+async function load(){const r=await fetch('/api/dashboard',{signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error('Could not load the shared job database.');state=await r.json();render();}
 function selectBucket(key){if(!discardCheck())return;followupOnly=false;activeBucket=key;history.replaceState(null,'','#'+key);document.querySelectorAll('.controls input').forEach(e=>e.value='');document.querySelectorAll('.controls select').forEach(e=>e.selectedIndex=0);render();$('bucket-title').scrollIntoView({behavior:'smooth',block:'start'});}
 function fillSelect(id,values,label){const old=$(id).value;$(id).innerHTML=option('',label)+values.map(v=>option(v)).join('');if([...$(id).options].some(o=>o.value===old))$(id).value=old;}
 function render(){
@@ -43,7 +81,10 @@ function render(){
  ];
  $('summary').innerHTML=metrics.map(([count,label])=>`<span class="tag">${count} ${label}</span>`).join(' ');
  $('system').textContent=`Daily search: ${state.preferences.schedule_enabled?state.schedule_hour_utc+':00 UTC':'paused'}. ${state.firecrawl_configured?'Firecrawl configured':'Public board mode'}. Last fully successful run: ${date(state.runs.find(r=>r.state==='success')?.finished)}. ${state.running?'Search running…':''}`;
- $('run').disabled=state.running;
+ searchRunning=state.running;
+ $('run').disabled=searchRunning;
+ const recent=state.runs[0];
+ $('search-progress').textContent=searchMessage(searchRunning,recent&&{...recent,progress:recent.report.progress});
  fillSelect('status',state.statuses,'All application statuses');fillSelect('company',[...new Set(jobs.map(j=>j.employer))].sort(),'All companies');fillSelect('category',[...new Set(jobs.map(j=>j.category||'Imported'))].sort(),'All categories');
  $('reports').innerHTML=state.runs.map(renderSearchReport).join('')||'No search reports yet.';
  filter();
@@ -113,7 +154,7 @@ function filter(){
  $('jobs').innerHTML=list.map(j=>`<article data-id="${j.id}"><div class="top"><span class="tag">${esc(j.match_label)} · ${j.score}/100</span><em>#${j.id}</em></div><div class="company">${esc(j.employer)}</div><h2>${esc(j.title)}</h2><div class="salary">${esc(j.salary_text||'Salary Not Published')}</div><em>${esc(j.location)}</em><div class="note">${esc(j.location_reason)}</div><div class="badges"><span class="tag decision-${esc(j.review_decision.toLowerCase())}">${esc(j.review_decision==='Approved'?'Approved by you':j.review_decision==='Pending'?'Awaiting review':j.review_decision)}</span><span class="tag">${esc(j.status)}</span><span class="tag">${j.queue==='Confirmed'?'Employer verified':'Automatic checks incomplete'}</span>${j.availability==='Closed'?'<span class="tag">Closed</span>':''}${listingBadges(j)}</div><div class="why">${esc(j.explanation)}</div>${j.duty_evidence?.length?`<details><summary>Experience matched to duties</summary><ul>${j.duty_evidence.map(item=>`<li><strong>${esc(item.skill)}</strong> · ${esc(item.duty)}</li>`).join('')}</ul></details>`:''}<details><summary>Employer description & verification</summary><p class="why">${esc(j.description)}</p><p class="note">${esc(j.application_evidence||'Not independently verified')}<br>Source: ${esc(j.source)}<br>Employer source checked: ${esc(date(j.last_verified))}<br>Application form verified: ${esc(date(j.application_verified))}<br>Posted: ${esc(j.posted||'Unknown')}<br>Tracking updated: ${esc(date(j.tracking_updated))}</p></details><div class="actions"><a class="btn employer-link" href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">Open employer posting ↗</a>${unapplied.includes(j.status)?`<button class="btn secondary mark-applied">${bucket(j)==='ready'?'Mark as applied':'Already applied'}</button>`:''}</div>${aiPanel(j)}${reviewPanel(j)}${trackingPanel(j)}</article>`).join('')||`<div class="empty"><h2>No jobs in this bucket yet</h2><p>${activeBucket==='ready'?'Approve a job in Review Inbox to move it here.':activeBucket==='applied'?'Mark a job as applied to move it here.':'Try another bucket or clear your filters.'}</p></div>`;
  bindCards();bindAI();
 }
-async function post(url,payload){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Jobs-Client':'dashboard'},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw Error(data.error||'Could not save');return data;}
+async function post(url,payload){const r=await fetch(url,{method:'POST',...(url==='/api/run'?{signal:AbortSignal.timeout(5000)}:{}),headers:{'Content-Type':'application/json','X-Jobs-Client':'dashboard'},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw Error(data.error||'Could not save');return data;}
 function allowSave(key){return ![...drafts].some(k=>k!==key)||confirm('Other unsaved edits will be discarded after saving this decision. Continue?');}
 function bindCards(){document.querySelectorAll('article').forEach(card=>{
  const j=state.jobs.find(j=>j.id===+card.dataset.id),review=card.querySelector('.review-panel'),tracking=card.querySelector('.tracking-panel');
@@ -136,8 +177,14 @@ function bindCards(){document.querySelectorAll('article').forEach(card=>{
  const quick=card.querySelector('.mark-applied');if(quick)quick.onclick=()=>saveTracking(true);
  });}
 document.querySelectorAll('.controls input,.controls select').forEach(e=>e.oninput=()=>{if(discardCheck())filter();});
-$('run').onclick=async()=>{try{await post('/api/run',{});state.running=true;$('run').disabled=true;notify('Search started. Review decisions and application tracking are preserved.');}catch(e){notify(e.message);}};
+$('run').onclick=async()=>{
+ $('run').disabled=true;
+ $('search-progress').textContent='Starting the search…';
+ try{await post('/api/run',{});}catch(e){notify(e.message);}
+ searchRunning=true;
+ void pollSearch();
+};
 $('refresh').onclick=()=>{if(discardCheck())load().catch(e=>notify(e.message));};
 window.onbeforeunload=e=>{if(drafts.size||preferencesDirty){e.preventDefault();e.returnValue='';}};
-setInterval(()=>{if(!drafts.size&&!preferencesDirty&&state?.running)load().catch(()=>{});},15000);
+setInterval(pollSearch,2000);
 load().catch(e=>notify(e.message));

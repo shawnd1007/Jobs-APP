@@ -2,7 +2,7 @@
 
 [The approved product vision](PRODUCT-VISION.md) sets the direction. [The Build 9 checklist](STAGE-TWO.md) and [verification record](VERIFICATION.md) show where the current prototype stands. Each item below needs its own acceptance evidence.
 
-The matching follow-up adds [distinct duty evidence](COMPLETE-GUIDE.md#7-how-matching-and-verification-work) for ranking and adjacent-title discovery. Next, evaluate relevance on larger labeled sets across job families and continue to improve employer coverage.
+The matching follow-up adds [distinct duty evidence](COMPLETE-GUIDE.md#7-how-matching-and-verification-work) for ranking and adjacent-title discovery. The next follow-up adds employer-enabled Personio feeds and bounded search with progress and retry. Continue to validate relevance on larger labeled sets and measure discovery coverage and time to results.
 
 ## Make the local app dependable for daily use
 

@@ -4,22 +4,12 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 SOURCE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SOURCE))
-
-
-def fixture_board(platform, slug):
-    if (platform, slug) != ('ashby', 'fictional'):
-        raise ValueError('Unexpected board in the fictional search test.')
-    return [dict(
-        title='Payment Operations Specialist', employer='Fictional Lantern Payments',
-        description='Responsibilities:\nBuild SQL reports.\nReconcile invoices in Excel.',
-        location='Remote - United States', remote=True, availability='Open',
-        url='https://jobs.ashbyhq.com/fictional/job-new/application',
-    )]
 
 
 def serve():
@@ -32,12 +22,37 @@ def serve():
         cfg.update(
             categories=['billing analyst'], preferred_skills=['Excel', 'SQL'],
             profile='Fictional experience reconciling accounts using Excel and SQL.',
-            additional_boards={'ashby': ['fictional']}, target_locations=['United States'],
+            additional_boards={'ashby': ['fictional-slow'], 'personio': ['fictional']}, target_locations=['United States'],
             workplace_types=['remote'], request_delay_seconds=0, generic_urls_per_run=0,
         )
         (root / 'config.json').write_text(json.dumps(cfg), encoding='utf-8')
+        feed = (SOURCE / 'fixtures' / 'personio.xml').read_bytes()
+        slow_checks = 0
+
+        def slow_board(request, timeout):
+            nonlocal slow_checks
+            assert request.full_url == 'https://api.ashbyhq.com/posting-api/job-board/fictional-slow?includeCompensation=true'
+            slow_checks += 1
+            if slow_checks == 1:
+                time.sleep(8)
+            return fixture_response(request, timeout, b'{"jobs":[]}')
+
+        def fixture_response(request, timeout, payload=None):
+            url = request.full_url
+            payloads = {
+                'https://fictional.jobs.personio.com/xml?language=en': feed,
+                'https://fictional.jobs.personio.com/job/12345': b'<h1>Payment Operations Specialist</h1>',
+            }
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.url = url
+            response.read.return_value = payload if payload is not None else payloads[url]
+            return response
         with patch.object(app, 'ROOT', root), patch.object(app, 'SEED', SOURCE / 'seed.empty.html'), \
-             patch.object(app, 'board_jobs', side_effect=fixture_board):
+             patch.object(app, 'safe_url', side_effect=lambda url: url), \
+             patch.object(app, 'BOARD_SECONDS', 4), \
+             patch.object(app.OPENER, 'open', side_effect=slow_board), \
+             patch.object(app.PERSONIO_OPENER, 'open', side_effect=fixture_response):
             app.init()
             with app.connect() as connection:
                 for key, title in [('billing', 'Billing Analyst'), ('software', 'Software Engineer')]:

@@ -202,6 +202,30 @@ struct EmployerSource: Decodable, Identifiable {
     var id: String { source }
 }
 
+struct SearchStatus: Decodable {
+    struct Run: Decodable {
+        struct Progress: Decodable {
+            let stage: String
+            let completed: Int?
+            let total: Int?
+            let source: String?
+
+            var label: String {
+                guard let completed, let total, total > 0 else { return stage + "…" }
+                return "\(stage): \(completed) of \(total)"
+            }
+        }
+
+        let id: Int
+        let state: String
+        let started: String
+        let progress: Progress?
+    }
+
+    let running: Bool
+    let run: Run?
+}
+
 struct SearchRun: Decodable, Identifiable {
     let id: Int
     let started: String
@@ -308,6 +332,13 @@ enum DashboardAPI {
         return try snapshot(from: data, syncedAt: .now)
     }
 
+    static func searchStatus(at address: String) async throws -> SearchStatus {
+        let data = try await request("/api/v1/search-status", at: address)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(SearchStatus.self, from: data)
+    }
+
     fileprivate static func snapshot(from data: Data, syncedAt: Date) throws -> Snapshot {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -331,7 +362,7 @@ enum DashboardAPI {
         guard let url = endpoint(path, at: address) else {
             throw ServerError(status: 0, message: "Check the URL in Server Settings.")
         }
-        var request = URLRequest(url: url, timeoutInterval: path.hasSuffix("/ai-review") ? 105 : 15)
+        var request = URLRequest(url: url, timeoutInterval: path.hasSuffix("/ai-review") ? 105 : (path.hasSuffix("/search-status") ? 5 : 15))
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let body {
             request.httpMethod = "POST"

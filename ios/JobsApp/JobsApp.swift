@@ -23,6 +23,11 @@ final class Workspace {
     private(set) var cacheError: String?
     var connectionError: String?
     var searchError: String?
+    private(set) var searchStatus: SearchStatus?
+    private(set) var searchConnectionLost = false
+    private var checkingSearchStatus = false
+
+    var searchRunning: Bool { searchStatus?.running ?? dashboard?.running ?? false }
     private var latestLoad = UUID()
     let isSample: Bool
     private var keepOfflineCopy = true
@@ -42,6 +47,8 @@ final class Workspace {
         connected = false
         connectionError = nil
         searchError = nil
+        searchStatus = nil
+        searchConnectionLost = false
         latestLoad = UUID()
         cachedSnapshot = keepOfflineCopy && snapshot == nil ? OfflineWorkspace.load(for: address) : nil
         dashboard = cachedSnapshot?.dashboard
@@ -170,15 +177,62 @@ final class Workspace {
     }
 
     func startSearch() async {
-        guard !startingSearch else { return }
+        guard connected, !searchRunning, !startingSearch, !saving else { return }
+        let server = address
         startingSearch = true
         searchError = nil
         defer { startingSearch = false }
         do {
-            try await save("/api/run", [String: String]())
+            try await DashboardAPI.post("/api/run", at: server, body: [String: String]())
+            guard address == server else { return }
+            searchStatus = SearchStatus(running: true, run: nil)
         } catch {
-            searchError = error.localizedDescription
-            if (error as? DashboardAPI.ServerError)?.status == 409 { await refresh() }
+            guard address == server else { return }
+            if (error as? DashboardAPI.ServerError)?.status == 409 {
+                searchStatus = SearchStatus(running: true, run: nil)
+            } else if error is URLError {
+                searchError = "Couldn’t confirm that the Mac started the search. Check its status before trying again."
+                await checkSearchStatus()
+            } else {
+                searchError = error.localizedDescription
+            }
+        }
+    }
+
+    func followDashboardSearch() {
+        if dashboard?.running == true, searchStatus?.running == false { searchStatus = nil }
+    }
+
+    func checkSearchStatus() async {
+        guard !address.isEmpty, !checkingSearchStatus else { return }
+        let server = address
+        checkingSearchStatus = true
+        defer { checkingSearchStatus = false }
+        do {
+            let status = try await DashboardAPI.searchStatus(at: server)
+            guard address == server, !Task.isCancelled else { return }
+            searchConnectionLost = false
+            if status.running {
+                searchError = nil
+                searchStatus = status
+            } else {
+                // Sync new listings and alerts before the running task exits and cancels itself.
+                await refresh(replacingInFlight: true)
+                guard address == server, !Task.isCancelled else { return }
+                searchConnectionLost = !connected
+                if connected { searchStatus = status }
+            }
+        } catch {
+            guard address == server, !Task.isCancelled else { return }
+            if (error as? DashboardAPI.ServerError)?.status == 404 {
+                // Older Macs only publish search state in the full dashboard.
+                await refresh(replacingInFlight: true)
+                guard address == server, !Task.isCancelled else { return }
+                searchConnectionLost = !connected
+                if connected { searchStatus = nil }
+            } else {
+                searchConnectionLost = true
+            }
         }
     }
 }
@@ -232,12 +286,20 @@ private struct WorkspaceView: View {
             workspace.connect(to: DashboardAPI.serverAddress(address) ?? "")
             await workspace.refresh()
             while !Task.isCancelled {
-                let running = workspace.connected && workspace.dashboard?.running == true
-                do { try await Task.sleep(for: .seconds(running ? 2 : 10)) }
+                do { try await Task.sleep(for: .seconds(10)) }
                 catch { break }
-                if !workspace.saving && sample == nil {
+                if !workspace.saving && !workspace.searchRunning && sample == nil {
                     await workspace.refresh()
+                    // A fresh dashboard can reveal a search started on a different device.
+                    workspace.followDashboardSearch()
                 }
+            }
+        }
+        .task(id: scenePhase == .active && workspace.searchRunning && sample == nil) {
+            guard scenePhase == .active, workspace.searchRunning, sample == nil else { return }
+            while !Task.isCancelled && workspace.searchRunning {
+                await workspace.checkSearchStatus()
+                do { try await Task.sleep(for: .seconds(2)) } catch { break }
             }
         }
     }

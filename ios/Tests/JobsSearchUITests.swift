@@ -47,6 +47,17 @@ final class JobsSearchUITests: XCTestCase {
         let run = app.buttons["Run Employer Search"]
         XCTAssertTrue(run.waitForExistence(timeout: 8))
         run.tap()
+        XCTAssertTrue(app.staticTexts["fictional-slow"].waitForExistence(timeout: 8))
+        let outcome = app.staticTexts["searchOutcome"]
+        XCTAssertTrue(outcome.waitForExistence(timeout: 15))
+        XCTAssertTrue(outcome.label.contains("incomplete checks"))
+        XCTAssertTrue(outcome.label.contains("1 new listing saved"))
+        XCTAssertTrue(run.isEnabled)
+        run.tap()
+        let retryFinished = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "No new listings matched"), object: outcome)
+        XCTAssertEqual(XCTWaiter.wait(for: [retryFinished], timeout: 15), .completed)
+        XCTAssertTrue(run.isEnabled)
         app.tabBars.buttons["Browse"].tap()
         XCTAssertTrue(app.staticTexts["Payment Operations Specialist"].waitForExistence(timeout: 25))
         XCTAssertTrue(app.staticTexts["All Listings · 3"].exists)

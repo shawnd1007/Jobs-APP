@@ -94,6 +94,8 @@ def save_preferences(a, payload):
         for names in boards.values():
             if not isinstance(names, list) or len(names) > 150 or any(not isinstance(n, str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,100}', n) for n in names):
                 raise ValueError('Use employer board slugs, for example deepgram')
+        if any(not a.PERSONIO_SLUG.fullmatch(name.lower()) for name in boards.get('personio', [])):
+            raise ValueError('Use the company part of the Personio career-site address')
         for url in updated['additional_employer_urls']: a.safe_url(url)
         groups = updated.get('skill_groups', [])
         if not isinstance(groups, list) or len(groups) > 20: raise ValueError('Invalid skill groups')

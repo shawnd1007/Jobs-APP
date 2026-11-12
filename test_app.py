@@ -1,6 +1,8 @@
 """Regression tests with fictional listings, profiles, and tracking records."""
 import json
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -26,6 +28,77 @@ class PersistenceTests(unittest.TestCase):
   j=app.records()[0];j['url']+='?utm_source=test#apply'
   with app.connect() as c:_,added=app.upsert(c,j)
   self.assertFalse(added);self.assertEqual(len(app.records()),50)
+
+ def test_personio_feed_preserves_official_requisition_and_duties(self):
+  feed = (Path(__file__).resolve().parent/'fixtures'/'personio.xml').read_bytes()
+  with patch.object(app,'safe_url',side_effect=lambda url:url), patch.object(app.PERSONIO_OPENER,'open') as request:
+   response = request.return_value.__enter__.return_value
+   response.url = 'https://fictional.jobs.personio.com/xml?language=en'
+   response.read.return_value = feed
+   job, = app.board_jobs('personio','fictional')
+   response.read.assert_called_once_with(4_000_001)
+  self.assertEqual(job['url'],'https://fictional.jobs.personio.com/job/12345')
+  self.assertEqual(app.identity('https://fictional.jobs.personio.de/job/12345/?language=en#apply'),app.identity(job['url']))
+  self.assertNotEqual(app.identity('https://another.jobs.personio.com/job/12345'),app.identity(job['url']))
+  self.assertIn('Responsibilities\nBuild SQL reports.',job['description'])
+  self.assertEqual(job['location'],'Remote - United States')
+  self.assertNotIn('application_verified',job)
+
+ def test_personio_feed_rejects_ambiguous_or_truncated_data(self):
+  position = b'<position><id>123</id><name>Fictional role</name></position>'
+  for data in (b'<html></html>', b'<workzag-jobs>', b'<!DOCTYPE workzag-jobs><workzag-jobs/>',
+               b'<workzag-jobs><error/></workzag-jobs>', b'<workzag-jobs>'+position*2+b'</workzag-jobs>',
+               b' ' * 4_000_001):
+   with self.subTest(prefix=data[:24]), self.assertRaises((ValueError,app.ET.ParseError)):
+    app.personio_positions('fictional',data)
+
+ def test_personio_checks_page_and_form_separately(self):
+  cfg = dict(app.config(), request_delay_seconds=0)
+  feed = (Path(__file__).resolve().parent/'fixtures'/'personio.xml').read_bytes()
+  job, = app.personio_positions('fictional',feed)
+  report = {'log': []}
+  with patch.object(app,'safe_url',side_effect=lambda url:url), patch.object(app.PERSONIO_OPENER,'open') as request:
+   response = request.return_value.__enter__.return_value
+   response.url = job['url']
+   response.read.return_value = b'<h1>Payment Operations Specialist</h1>'
+   checked = app.finalize(dict(job),cfg,report)
+   self.assertEqual(checked['availability'],'Open')
+   self.assertNotIn('application_verified',checked)
+   response.read.return_value = b'<h1>Payment Operations Specialist</h1><form><button>Submit application</button></form>'
+   self.assertIn('application_verified',app.finalize(dict(job),cfg,report))
+   request.side_effect = app.urllib.error.HTTPError(job['url'],404,'Not Found',None,None)
+   missing = app.finalize(dict(job),cfg,report)
+   self.assertEqual(missing['availability'],'Needs Verification')
+   self.assertIn('HTTP 404',missing['application_evidence'])
+   request.side_effect = app.urllib.error.HTTPError(job['url'],429,'Rate limited',None,None)
+   app.finalize(dict(job),cfg,report)
+   request.reset_mock()
+   self.assertEqual(app.finalize(dict(job),cfg,report)['availability'],'Needs Verification')
+   request.assert_not_called()
+
+ def test_personio_missing_or_failed_feed_preserves_tracking(self):
+  _, cfg = self.pipeline_fixture()
+  job = dict(title='Fictional role',employer='Fictional Employer',location='Remote - United States',
+             availability='Open',url='https://fictional.jobs.personio.de/job/123',application_verified=app.now())
+  with app.connect() as c:
+   job_id,_ = app.upsert(c,job)
+   c.execute('UPDATE jobs SET identity=? WHERE id=?',(job['url'],job_id))
+   c.execute("UPDATE tracking SET status='Applied',notes='Fictional confirmation' WHERE job_id=?",(job_id,))
+  def missing(platform,board):
+   if platform == 'personio': raise TimeoutError('Fictional feed timeout')
+   return []
+  with patch.object(app,'config',return_value=cfg), patch.object(app,'board_jobs',side_effect=missing):
+   app.LOCK.acquire(); result=app.run_pipeline()
+  self.assertTrue(any('personio/fictional' in failure for failure in result['failures']))
+  self.assertEqual(next(j for j in app.records() if j['id']==job_id)['availability'],'Open')
+  with patch.object(app,'config',return_value=cfg), patch.object(app,'board_jobs',return_value=[]):
+   app.LOCK.acquire(); app.run_pipeline()
+  saved=next(j for j in app.records() if j['id']==job_id)
+  self.assertEqual((saved['status'],saved['notes']),('Applied','Fictional confirmation'))
+  self.assertEqual(saved['availability'],'Needs Verification')
+  self.assertEqual(saved['identity'],'personio:fictional:123')
+  self.assertNotIn('application_verified',saved)
+  self.assertEqual(len(app.records()),2)
  def test_distinct_requisitions_do_not_share_application_history(self):
   first = dict(title='Billing Analyst', employer='Fictional Employer',
                location='Remote - United States',
@@ -294,6 +367,73 @@ class PersistenceTests(unittest.TestCase):
    c.execute(insert, (later.isoformat(), later.isoformat(), 'interrupted', '{}', 'scheduled'))
    self.assertFalse(app.scheduled_run_due(c, later + app.dt.timedelta(hours=1), 12))
    self.assertTrue(app.scheduled_run_due(c, utc + app.dt.timedelta(days=1), 12))
+
+ def test_search_continues_after_network_timeout_and_allows_retry(self):
+  cfg = dict(app.config(), additional_boards={'ashby':['slow','working']}, generic_urls_per_run=0,
+             firecrawl_enabled=False, public_web_search_enabled=False, request_delay_seconds=0)
+  before = {j['id']: j['availability'] for j in app.records()}
+  slow_started = threading.Event()
+  allow_slow_completion = threading.Event()
+  retry = False
+
+  def board(platform, slug):
+   if slug == 'slow' and not retry:
+    def stalled(_):
+     slow_started.set()
+     allow_slow_completion.wait(4)
+     return []
+    return app.network_call(stalled, seconds=0.35)
+   return []
+
+  try:
+   with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_identity', return_value=None), \
+        patch.object(app, 'board_jobs', side_effect=board):
+    self.assertTrue(app.start_run())
+    self.assertTrue(slow_started.wait(2))
+    current = app.search_status()
+    self.assertTrue(current['running'])
+    self.assertEqual(current['run']['progress']['source'], 'slow')
+    self.assertFalse(app.start_run())
+    self.assertTrue(app.LOCK.acquire(timeout=3))
+    app.LOCK.release()
+    status = app.search_status()
+    self.assertFalse(status['running'])
+    self.assertEqual(status['run']['state'], 'partial')
+    self.assertEqual(status['run']['failures'], 1)
+    self.assertEqual({j['id']: j['availability'] for j in app.records()}, before)
+    retry = True
+    self.assertTrue(app.start_run())
+    self.assertTrue(app.LOCK.acquire(timeout=3))
+    app.LOCK.release()
+    result = app.search_status()
+    self.assertEqual(result['run']['state'], 'success')
+    self.assertGreater(result['run']['id'], status['run']['id'])
+  finally:
+   allow_slow_completion.set()
+
+ def test_search_time_limit_defers_sources_without_discarding_results(self):
+  cfg = dict(app.config(), additional_boards={'ashby':['first','second','third']}, generic_urls_per_run=0,
+             firecrawl_enabled=False, public_web_search_enabled=False, request_delay_seconds=0)
+  visited = []
+  release = threading.Event()
+
+  def board(platform, slug):
+   visited.append(slug)
+   if slug == 'second':
+    app.network_call(lambda _: release.wait(4))
+   return []
+
+  try:
+   with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_identity', return_value=None), \
+        patch.object(app, 'board_jobs', side_effect=board), patch.object(app, 'SEARCH_SECONDS', 0.5):
+    app.LOCK.acquire()
+    report = app.run_pipeline()
+   self.assertEqual(visited, ['first', 'second'])
+   self.assertEqual(report['state'], 'partial')
+   self.assertTrue(any('1 employer boards deferred' in error for error in report['failures']))
+   self.assertFalse(app.search_status()['running'])
+  finally:
+   release.set()
 
  def test_scheduled_backup_failure_is_reported_and_releases_run_lock(self):
   with patch.object(app, 'backup', side_effect=OSError('Test backup failure')):

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<workzag-jobs>
+  <position>
+    <id>12345</id>
+    <name>Payment Operations Specialist</name>
+    <subcompany>Fictional Lantern Payments</subcompany>
+    <office>Remote - United States</office>
+    <jobDescriptions>
+      <jobDescription>
+        <name>Responsibilities</name>
+        <value><![CDATA[<ul><li>Build SQL reports.</li><li>Reconcile invoices in Excel.</li></ul>]]></value>
+      </jobDescription>
+      <jobDescription>
+        <name>Qualifications</name>
+        <value><![CDATA[<p>Experience with published financial controls.</p>]]></value>
+      </jobDescription>
+    </jobDescriptions>
+    <createdAt>2030-01-02T12:00:00+0000</createdAt>
+  </position>
+</workzag-jobs>

@@ -33,6 +33,8 @@ This reference lists 26 employer boards configured during development. The Build
 | SmartRecruiters | SIXT | `sixt` |
 | SmartRecruiters | Sutherland | `sutherland` |
 
+Personio can be added by entering an employer’s career-site slug after confirming its XML feed is enabled. For adapter validation, the public `and-e` feed returned 17 listings and one tested exact posting page opened. The `personio` feed returned two listings, but the exact page tested returned 404 and was flagged for verification. These checks did not add either board to the configured list above.
+
 Board coverage can include related finance and operations roles. Saved-search alerts apply each search’s title, skill, location, workplace and published salary criteria.
 
 For provider support, pagination and closure behavior, read [how discovery works](COMPLETE-GUIDE.md#6-how-employer-discovery-works). Source coverage expands as employer feeds can be checked reliably. [Product vision](PRODUCT-VISION.md)
