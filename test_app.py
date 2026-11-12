@@ -406,6 +406,75 @@ class PersistenceTests(unittest.TestCase):
    c.execute("UPDATE tracking SET status='Applied',notes='Keep this history' WHERE job_id=?",(j['id'],))
   cfg=app.config();cfg.update(public_web_search_enabled=False,firecrawl_enabled=False,request_delay_seconds=0,generic_urls_per_run=0)
   return j,cfg
+ def test_saved_searches_distinguish_employer_remote_hybrid_and_unclear_arrangements(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(categories=['Billing Analyst'], target_locations=['Austin, TX'], workplace_types=['remote'],
+             preferred_skills=['Excel'], skill_groups=[], salary_floor=80000,
+             additional_boards={'ashby':['fictional']})
+  for mode in ('remote','hybrid'):
+   criteria = dict(name='Fictional '+mode, title_terms=['Billing'], skills=['Excel'], locations=['Austin, TX'],
+                   workplace_types=[mode], salary_min=85000, salary_max=None, enabled=True)
+   self.assertEqual(app.prototype.change_saved_search(app,{'action':'save','criteria':criteria})[0],200)
+  def listing(key, workplace=None):
+   post = dict(id=key,title='Fictional Billing Analyst',location='Austin, TX',descriptionPlain='Reconcile in Excel.',
+               isRemote=True,applyUrl=f'https://jobs.ashbyhq.com/fictional/{key}/application')
+   post['compensation'] = {'compensationTiers':[{'components':[
+       {'compensationType':'Salary','currencyCode':'USD','interval':'1 YEAR','minValue':90000,'maxValue':110000}
+   ]}]}
+   if workplace:
+    post['workplaceType']=workplace
+   return post
+  posts = [listing('remote-job','Remote'),listing('hybrid-job','Hybrid'),listing('old-flag')]
+  base_board_jobs=app.board_jobs
+  def boards(platform, name):
+   return base_board_jobs(platform,name) if name=='fictional' else []
+  def page(request, **kwargs):
+   return b'<h1>Fictional Billing Analyst</h1>',request.full_url
+  with patch.object(app,'config',return_value=cfg), patch.object(app,'board_jobs',side_effect=boards), \
+       patch.object(app,'fetch') as feed, patch.object(app,'read_response',side_effect=page):
+   feed.return_value={'jobs':posts}
+   app.LOCK.acquire()
+   self.assertEqual(app.run_pipeline()['state'],'success')
+   dashboard = app.snapshot()
+   records = {row.get('requisition'):row for row in dashboard['jobs']}
+   alerts = {alert['search_name']:alert['job_id'] for alert in dashboard['match_alerts']}
+   self.assertEqual(alerts,{'Fictional remote':records['remote-job']['id'],'Fictional hybrid':records['hybrid-job']['id']})
+   self.assertEqual(records['old-flag']['work_arrangement'],'unknown')
+   self.assertEqual(records['old-flag']['location_eligibility'],'Review')
+   job_id = records['remote-job']['id']
+   with app.connect() as c:
+    c.execute("UPDATE tracking SET notes='Fictional application note' WHERE job_id=?",(job_id,))
+   feed.side_effect=TimeoutError('Fictional feed timeout')
+   app.LOCK.acquire()
+   interrupted = app.run_pipeline()
+   self.assertEqual(interrupted['state'],'partial')
+   self.assertTrue(any('ashby/fictional' in failure for failure in interrupted['failures']))
+   self.assertEqual(next(row for row in app.snapshot()['jobs'] if row['id']==job_id)['work_arrangement'],'remote')
+   feed.side_effect=None
+   posts[0].pop('workplaceType')
+   app.LOCK.acquire()
+   self.assertEqual(app.run_pipeline()['state'],'success')
+   refreshed = next(row for row in app.snapshot()['jobs'] if row['id']==job_id)
+   self.assertEqual((refreshed['work_arrangement'],refreshed['location_eligibility']),('unknown','Review'))
+   self.assertEqual(refreshed['notes'],'Fictional application note')
+   self.assertEqual(len(app.snapshot()['match_alerts']),2)
+
+ def test_lever_workplace_values_and_conflicting_posting_text(self):
+  postings = [dict(id=mode,text='Fictional Specialist',categories={'location':'Austin, TX'},workplaceType=mode,
+                   applyUrl=f'https://jobs.lever.co/fictional/{mode}/apply')
+              for mode in ('remote','hybrid','on-site','unspecified')]
+  with patch.object(app,'fetch',return_value=postings):
+   jobs = app.board_jobs('lever','fictional')
+  self.assertEqual([app.work_arrangement(job) for job in jobs],['remote','hybrid','onsite','unknown'])
+  criteria = dict(target_locations=['Austin, TX'],workplace_types=['remote'])
+  self.assertEqual(app.location_eligibility(jobs[1],criteria)[0],'Rejected')
+  conflicting = dict(jobs[0],description='You must work from the office three days per week.')
+  self.assertEqual(app.location_eligibility(conflicting,criteria),
+                   ('Review','Employer details disagree about the work arrangement','Other'))
+  onsite = dict(jobs[2],workplace_type=None)
+  self.assertEqual(app.location_eligibility(onsite,dict(workplace_types=['onsite']))[0],'Review')
+  self.assertEqual(app.location_eligibility(jobs[2],dict(workplace_types=['onsite']))[0],'Eligible')
+
  def test_live_feed_absence_closes_without_deleting_application(self):
   j,cfg=self.pipeline_fixture()
   with patch.object(app,'config',return_value=cfg),patch.object(app,'board_jobs',return_value=[]):
@@ -437,7 +506,7 @@ class PersistenceTests(unittest.TestCase):
    attempts.append(url)
    if fail and url == base+'102':
     raise TimeoutError('Fictional employer timeout')
-   posting = {'@type':'JobPosting','title':'Fictional Billing Analyst','description':'Reconcile payments in Excel.',
+   posting = {'@type':'JobPosting','title':'Fictional Billing Analyst','description':'This role is on-site. Reconcile payments in Excel.',
               'hiringOrganization':{'name':'Fictional Employer','sameAs':'https://example.com/'},
               'jobLocation':{'address':{'addressLocality':'Austin','addressRegion':'TX'}},
               'baseSalary':{'currency':'USD','value':{'minValue':90000,'maxValue':110000,'unitText':'YEAR'}}}
@@ -525,7 +594,7 @@ class PersistenceTests(unittest.TestCase):
   postings = [dict(title='Operations Assistant', employer='Fictional', location='Austin, TX',
                    url=f'https://jobs.smartrecruiters.com/fictional/{number}', requisition=str(number),
                    posted='2026-11-11', availability='Open') for number in range(1, 21)]
-  postings[0].update(title='Billing Specialist', description='Reconciliation duties.', posted='2026-11-01',
+  postings[0].update(title='Billing Specialist', description='This role is on-site. Reconciliation duties.', posted='2026-11-01',
                      salary_min=90000, salary_max=110000, salary_currency='USD', salary_period='year',
                      salary_type='base')
   def board(platform, slug):
@@ -548,7 +617,7 @@ class PersistenceTests(unittest.TestCase):
   url = 'https://jobs.lever.co/fictional/req-22'
   _, saved = app.add_external_application(dict(title='Billing Analyst', employer='Fictional Employer',
                                                 url=url, status='Applied', notes='Fictional application note.'))
-  posting = dict(title='Billing Analyst', employer='Fictional Employer', location='Austin, TX', remote=False,
+  posting = dict(title='Billing Analyst', employer='Fictional Employer', location='Austin, TX', workplace_type='onsite',
                  url=url+'/apply', requisition='req-22', source='Lever public live board',
                  description='Responsibilities: Reconciliation.', availability='Open',
                  salary_min=90000, salary_max=110000, salary_currency='USD', salary_period='year',

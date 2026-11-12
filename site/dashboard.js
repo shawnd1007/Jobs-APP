@@ -144,6 +144,8 @@ function listingBadges(job){
  if(job.queue==='Confirmed' && job.application_verified?.startsWith(today))labels.push('Verified Today');
  if(!job.salary_text || /salary not published/i.test(job.salary_text))labels.push('Salary Not Published');
  if(/salary not yet verified/i.test(job.salary_text??''))labels.push('Pay Needs Verification');
+ const workSetting={remote:'Remote',hybrid:'Hybrid',onsite:'On-site',unknown:'Work arrangement unclear',conflict:'Conflicting work arrangement'};
+ if(workSetting[job.work_arrangement])labels.push(workSetting[job.work_arrangement]);
  if(job.availability==='Needs Verification')labels.push('Needs Verification');
  if(Number.isInteger(job.matched_duty_count) && job.matched_duty_count>0){
   labels.push(job.matched_duty_count===1?'1 duty uses a profile skill':`${job.matched_duty_count} duties use profile skills`);

@@ -14,6 +14,8 @@ const assert=require('node:assert/strict');
  const secondOpening=page.locator('article').filter({has:page.locator('a[href="https://example.com/careers?posting=102"]')});
  await firstOpening.getByRole('heading',{name:'Fictional Reconciliation Analyst'}).waitFor();
  await secondOpening.getByRole('heading',{name:'Fictional Reconciliation Analyst'}).waitFor();
+ await firstOpening.getByText('Conflicting work arrangement',{exact:true}).waitFor();
+ await secondOpening.getByText('Remote',{exact:true}).waitFor();
  await firstOpening.locator('.tracking-panel summary').click();
  await firstOpening.locator('[name="notes"]').fill('Fictional note for requisition 101.');
  await firstOpening.locator('.tracking-panel .save').click();
@@ -105,6 +107,6 @@ const assert=require('node:assert/strict');
  assert.equal(await form.getByLabel('Job title').inputValue(),'Payroll Coordinator');
  await form.getByRole('button',{name:'Cancel'}).click();
  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);assert.equal(overflow,false);assert.deepEqual(errors,[]);
- console.log(JSON.stringify({dutyEvidence:true,postingLabels:true,separateRequisitions:true,applicationPrep:true,approvalChecklist:true,readyBucket:true,approvalPersistsAfterReload:true,appliedBucket:true,interviewBucket:true,holdNotesPersist:true,dismissRetainsHistory:true,outOfAreaBlocked:true,externalApplicationTracking:true,mobileOverflow:overflow,errors}));
+ console.log(JSON.stringify({dutyEvidence:true,postingLabels:true,separateRequisitions:true,workArrangementLabels:true,applicationPrep:true,approvalChecklist:true,readyBucket:true,approvalPersistsAfterReload:true,appliedBucket:true,interviewBucket:true,holdNotesPersist:true,dismissRetainsHistory:true,outOfAreaBlocked:true,externalApplicationTracking:true,mobileOverflow:overflow,errors}));
  }finally{if(browser)await browser.close();try{await fetch('http://127.0.0.1:18084/qa-stop',{method:'POST'});}catch{}setTimeout(()=>server.kill(),1500).unref();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -269,7 +269,7 @@ def init():
                          queue='Review', last_verified='', salary_text='Salary not yet verified',
                          description='', posted='', application_evidence='Stored requisition requires a fresh employer check.')
                 for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type',
-                              'compensation_details','application_verified','posting_verified'):
+                              'compensation_details','application_verified','posting_verified','workplace_type'):
                     j.pop(field, None)
             eligible,reason,area=location_eligibility(j,cfg)
             j.update(location_eligibility=eligible,location_reason=reason,area=area)
@@ -387,7 +387,7 @@ def upsert(c,j):
         if old.get('external_application'):
             old = {}
         # A fresh employer response owns these facts, including their absence.
-        for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified','posting_verified'):
+        for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified','posting_verified','workplace_type'):
             old.pop(field,None)
         old.update(j)
         c.execute('UPDATE jobs SET identity=?,fallback=?,listing=?,updated=? WHERE id=?',
@@ -448,21 +448,62 @@ def salary_qualifies(j,cfg):
     salary=base_salary(j)
     if cfg.get('salary_policy')=='minimum':salary=j.get('salary_min') if salary is not None else None
     return salary is not None and salary>=cfg['salary_floor']
-def preferred_location(loc, desc, remote, hybrid, cfg):
+WORK_ARRANGEMENT_LABELS = {'remote': 'Remote', 'hybrid': 'Hybrid', 'onsite': 'On-site'}
+PUBLISHED_WORK_IN_DESCRIPTION = re.compile(
+    r'\b(?:(?:position|role|schedule) (?:is|will be) |work (?:arrangement|setting):\s*)'
+    r'(fully remote|remote|hybrid|on[- ]?site|in[- ]office)\b'
+)
+OFFICE_ATTENDANCE = re.compile(
+    r'(?:required|must|expected)(?: to)? (?:work|be|attend|report).{0,60}(?:office|on.site)'
+    r'|(?:office|on.site).{0,40}\b(?:[1-5]|one|two|three|four|five) days? (?:per|a|each) week'
+)
+
+
+def normalize_workplace_type(value):
+    if not isinstance(value, str):
+        return None
+    key = re.sub(r'[\s-]+', '', value.casefold())
+    key = {'fullyremote': 'remote', 'inoffice': 'onsite'}.get(key, key)
+    return key if key in WORK_ARRANGEMENT_LABELS else None
+
+
+def work_arrangement(job, location=None, description=None):
+    location = clean(job.get('location')).lower() if location is None else location
+    description = clean(job.get('description')).lower() if description is None else description
+    declared = normalize_workplace_type(job.get('workplace_type'))
+    signals = {normalize_workplace_type(match[1]) for match in PUBLISHED_WORK_IN_DESCRIPTION.finditer(description)}
+    if re.search(r'\bhybrid\b', location):
+        signals.add('hybrid')
+    if re.search(r'\bremote\b', location):
+        signals.add('remote')
+    if re.search(r'\b(?:on[- ]?site|in[- ]office|not remote)\b', location):
+        signals.add('onsite')
+    if declared:
+        signals.add(declared)
+    # Ashby's older flag included hybrid roles. Wait for the explicit field or listing text.
+    if not signals and job.get('remote') is True and job.get('source') != 'Ashby public live board':
+        signals.add('remote')
+    if len(signals) > 1 or ('remote' in signals and OFFICE_ATTENDANCE.search(description)):
+        return 'conflict'
+    return next(iter(signals), 'unknown')
+
+
+def preferred_location(loc, desc, mode, cfg):
     targets = cfg.get('target_locations', [])
     modes = cfg.get('workplace_types', [])
-    mode = 'hybrid' if hybrid else 'remote' if remote else 'onsite'
-    area = {'hybrid': 'Hybrid', 'remote': 'Remote', 'onsite': 'On-site'}[mode]
-    if not loc:
-        return 'Review', 'Employer location is missing', area
+    area = WORK_ARRANGEMENT_LABELS.get(mode, 'Other')
+    if modes and mode == 'unknown':
+        return 'Review', 'Employer work arrangement is not published clearly', area
     if modes and mode not in modes:
-        if mode == 'onsite':
-            return 'Review', 'Confirm whether the employer offers your preferred work arrangement', area
         return 'Rejected', 'Work arrangement is outside your preferences', area
-    if remote and not hybrid and ('(' in loc or re.search(
+    if mode == 'remote' and ('(' in loc or re.search(
             r'(?:must (?:reside|live|be based|be located)|only in|restricted to|'
             r'exclud(?:es|ing)|except for|(?:hiring|eligible|approved) states)', loc + ' ' + desc)):
         return 'Review', 'Check the employer’s remote residence restrictions', area
+    if not targets and modes:
+        return 'Eligible', f'Published work arrangement matches {area}', area
+    if not loc:
+        return 'Review', 'Employer location is missing', area
     def location_words(value):
         value = re.sub(r'\bu\.s\.(?:a\.)?', 'us', value.lower())
         value = re.sub(r'\b(?:united states|usa)\b', 'us', value)
@@ -482,10 +523,13 @@ def location_eligibility(j,cfg):
     loc=clean(j.get('location','')).lower()
     loc=re.sub(r'\bu\.s\.(?:a\.)?', 'us',loc)
     desc=clean(j.get('description','')).lower()
-    remote=bool(j.get('remote')) or bool(re.search(r'\bremote\b',loc))
-    hybrid=bool(re.search(r'\bhybrid\b',loc)) or bool(re.search(r'(?:position|role|work arrangement|schedule) (?:is|will be) hybrid|(?:required|must|expected)(?: to)? (?:work|be|attend|report).{0,60}(?:office|on.site)|(?:office|on.site).{0,40}\b[1-5a-z]+ days? (?:per|a|each) week',desc))
+    mode = work_arrangement(j, loc, desc)
+    if mode == 'conflict':
+        return 'Review', 'Employer details disagree about the work arrangement', 'Other'
     if cfg.get('target_locations') or cfg.get('workplace_types'):
-        return preferred_location(loc, desc, remote, hybrid, cfg)
+        return preferred_location(loc, desc, mode, cfg)
+    remote = mode == 'remote'
+    hybrid = mode == 'hybrid'
     fl=bool(re.search(r'\b(florida|fl)\b',loc));ga=bool(re.search(r'\b(georgia|ga)\b',loc))
     us=bool(re.search(r'\b(united states|usa|us)\b',loc))
     states='alabama alaska arizona arkansas california colorado connecticut delaware hawaii idaho illinois indiana iowa kansas kentucky louisiana maine maryland massachusetts michigan minnesota mississippi missouri montana nebraska nevada new hampshire new jersey new mexico new york north carolina north dakota ohio oklahoma oregon pennsylvania rhode island south carolina south dakota tennessee texas utah vermont virginia washington west virginia wisconsin wyoming'
@@ -511,7 +555,7 @@ def location_eligibility(j,cfg):
             if re.search(r'\b(?:'+ '|'.join(rule['states'])+r')\b',loc):
                 return 'Eligible','Local office is in the approved '+area+' area',area
             return 'Review','Local city found; state needs confirmation','Other'
-    if remote and hybrid:return 'Review','Hybrid or office attendance requirement: confirm the office is in an approved local area','Other'
+    if hybrid and not loc:return 'Review','Hybrid or office attendance requirement: confirm the office is in an approved local area','Other'
     return 'Rejected' if loc else 'Review','Office location is outside Jacksonville or the Buford area' if loc else 'Office location missing','Other'
 def discovery_locations(cfg):
     if cfg.get('target_locations') or cfg.get('workplace_types'):
@@ -638,7 +682,8 @@ def qualification_checks(description):
 def assess(j,cfg):
     title=j.get('title','').lower(); desc=clean(j.get('description','')); text=(title+' '+desc).lower()
     eligible,location_reason,area=location_eligibility(j,cfg)
-    j.update(location_eligibility=eligible,location_reason=location_reason,area=area)
+    j.update(location_eligibility=eligible,location_reason=location_reason,area=area,
+             work_arrangement=work_arrangement(j))
     if base_salary(j) is None:
         ranges=re.findall(r'(?:annual\s+(?:base\s+)?salary|base\s+(?:salary|pay))[^$\n]{0,65}\$([\d,]+)\s*(?:-|–|to)\s*\$([\d,]+)',desc,re.I)
         if len(ranges)==1 and re.search(r'annual|per year|yearly',desc,re.I) and not re.search(r'(tier [123]|geographic.*(?:range|band)|per hour|hourly|\bCAD\b|Canadian dollars)',desc,re.I):
@@ -707,6 +752,7 @@ def board_jobs(platform,board):
         for x in data['jobs']:
             if x.get('isListed') is False: continue
             j={'title':x['title'],'employer':board,'url':x.get('applyUrl') or x['jobUrl'],'location':x.get('location',''),'description':x.get('descriptionPlain',''),'posted':x.get('publishedAt',''),'remote':x.get('isRemote',False),'availability':'Open','last_verified':now(),'source':'Ashby public live board','requisition':x['id'],'application_evidence':'Listed employer job and application URL','salary_text':'Salary Not Published'}
+            j['workplace_type'] = normalize_workplace_type(x.get('workplaceType'))
             comp=x.get('compensation') or {}; tiers=comp.get('compensationTiers') or []
             components=[z for tier in tiers for z in tier.get('components',[]) if z.get('compensationType')=='Salary' and z.get('currencyCode')=='USD' and z.get('interval')=='1 YEAR']
             if len(components)==1:
@@ -724,6 +770,7 @@ def board_jobs(platform,board):
             if x.get('additionalPlain'):
                 sections.extend(['Additional information', x['additionalPlain']])
             j={'title':x['text'],'employer':board,'url':x['applyUrl'],'location':loc,'description':'\n'.join(filter(None, sections)),'posted':dt.datetime.fromtimestamp(x['createdAt']/1000,dt.timezone.utc).isoformat() if x.get('createdAt') else '', 'remote':x.get('workplaceType')=='remote','availability':'Open','last_verified':now(),'source':'Lever public live board','requisition':x['id'],'application_evidence':'Employer live posting and applyUrl','salary_text':x.get('salaryDescriptionPlain') or 'Salary Not Published'}
+            j['workplace_type'] = normalize_workplace_type(x.get('workplaceType'))
             if salary.get('currency')=='USD' and salary.get('interval')=='per-year':j.update(salary_min=salary.get('min'),salary_max=salary.get('max'),salary_currency='USD',salary_period='year',salary_type='base')
             out.append(j)
         return out
@@ -838,6 +885,8 @@ def smartrecruiters_listing(board, item, detail_url=None):
     result = {
         'title': item['name'], 'employer': (item.get('company') or {}).get('name') or board,
         'location': address, 'remote': location.get('remote') is True,
+        'workplace_type': 'hybrid' if location.get('hybrid') is True else (
+            'remote' if location.get('remote') is True else None),
         'description': text, 'posted': item.get('releasedDate') or '',
         'url': link, 'requisition': posting,
         'availability': 'Closed' if item.get('active') is False else 'Open',

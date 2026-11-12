@@ -55,6 +55,7 @@ struct Job: Decodable, Identifiable {
     let employer: String
     let location: String?
     let locationEligibility: String?
+    var workArrangement: String? = nil
     let locationReason: String?
     let area: String?
     let category: String?
@@ -97,6 +98,9 @@ struct Job: Decodable, Identifiable {
     }
 
     var workSetting: String? {
+        if let workArrangement {
+            return ["remote": "Remote", "hybrid": "Hybrid", "onsite": "On-site"][workArrangement]
+        }
         if ["Remote", "Hybrid", "On-site"].contains(area ?? "") { return area }
         let text = location?.lowercased() ?? ""
         if text.contains("hybrid") { return "Hybrid" }

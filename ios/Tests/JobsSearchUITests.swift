@@ -63,6 +63,9 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertTrue(posting.waitForExistence(timeout: 25))
         XCTAssertTrue(app.staticTexts["All Listings · 3"].exists)
         posting.tap()
+        let workArrangement = app.descendants(matching: .any)
+            .matching(identifier: "employerWorkArrangement").firstMatch
+        XCTAssertTrue(workArrangement.waitForExistence(timeout: 8))
         let checkedLink = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "Open checked employer posting")).firstMatch
         XCTAssertTrue(checkedLink.waitForExistence(timeout: 8))

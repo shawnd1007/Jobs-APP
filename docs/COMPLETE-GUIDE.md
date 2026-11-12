@@ -211,6 +211,8 @@ Runs can be running, success, partial, failed or interrupted. Partial means usef
 
 Remote is not the same as work-from-anywhere. State/country restrictions and office attendance matter. Hybrid language can force review when the office is unclear. These checks are heuristics, so you must read the employer's full policy.
 
+Jobs uses the employer's published workplace type from Ashby and Lever when available, alongside explicit work arrangement language in the posting. Older Ashby remote flags can describe either remote or hybrid work. An office address alone does not establish that a role is on-site. Missing or conflicting arrangements stay in review when relevant and do not satisfy a strict work-arrangement alert. You can filter your main profile by a published work arrangement without choosing a location. Any country or state restrictions still need to be checked. [Ashby Job Postings API](https://developers.ashbyhq.com/docs/public-job-posting-api) · [Lever Postings API](https://github.com/lever/postings-api)
+
 ### Salary
 
 Only structured annual USD base pay or a narrowly parsed employer description qualifies as published base salary. Bonuses, commissions and OTE are not substitutes. Ambiguous tiers, currencies and periods remain uncertain.

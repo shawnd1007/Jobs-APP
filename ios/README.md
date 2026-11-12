@@ -56,6 +56,8 @@ To request AI career advice, put your key in `secrets/openai.key` on the Mac, en
 
 Open **Application Prep** from an employer listing to compare the employer’s duties with examples from your saved Search Profile. Add excerpts to the draft, edit them and save for that role. Reopen the draft from the connected iPhone app or web dashboard. Your application tracking notes are separate.
 
+Job details show the published work arrangement or say when it needs confirmation. The Browse work setting filter uses that same evidence.
+
 ## Where to edit in Xcode
 
 - `JobsApp.swift` starts the app, holds shared workspace state and shows the tab bar and connection settings.

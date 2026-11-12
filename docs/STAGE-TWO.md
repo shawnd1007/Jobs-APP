@@ -67,3 +67,8 @@ The web and connected iPhone job details include a worksheet that pairs employer
 ## Keep distinct employer openings separate
 
 Jobs retains requisition parameters in employer page URLs and no longer merges openings by employer, title and location. Search deduplicates tracking links to the same posting. Older keys upgrade in place when the retained URL is consistent. Ambiguous records stay in review with their original tracking and preparation drafts.
+
+
+## Apply work arrangement preferences to employer evidence
+
+Jobs carries employer-published remote, hybrid and on-site values through search, saved alerts and listing details. A missing or conflicting value stays in review when a work arrangement is required. On refresh, a removed employer value does not leave an obsolete label. Existing application notes and alert history stay with the job.

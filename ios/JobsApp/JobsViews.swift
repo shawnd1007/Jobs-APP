@@ -656,6 +656,10 @@ struct JobDetail: View {
                         if !workspace.isSample && !job.isExternalApplication {
                             LabeledContent("Employer Pay Details", value: job.publishedPay)
                         }
+                        if job.workArrangement != nil {
+                            LabeledContent("Work Arrangement", value: job.workSetting ?? "Needs confirmation")
+                                .accessibilityIdentifier("employerWorkArrangement")
+                        }
                         if !job.isExternalApplication, let availability = job.availability, !availability.isEmpty {
                             LabeledContent("Listing Status", value: availability)
                         }

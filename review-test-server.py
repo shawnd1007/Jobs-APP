@@ -30,6 +30,7 @@ with tempfile.TemporaryDirectory(prefix='review-qa-',dir=app.DATA) as folder:
             app.upsert(c, dict(
                 title='Fictional Reconciliation Analyst', employer='Fictional Employer',
                 url='https://example.com/careers?posting=' + requisition, location='Remote - United States',
+                workplace_type='hybrid' if requisition == '101' else 'remote',
                 description='Fictional employer posting for browser tests.', availability='Open',
             ))
     class QAHandler(app.Handler):

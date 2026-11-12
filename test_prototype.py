@@ -70,7 +70,7 @@ class PrototypeTests(unittest.TestCase):
         cfg = app.config()
         self.assertEqual(cfg['target_locations'], ['Austin, TX', 'United States'])
         self.assertEqual(cfg['preferred_skills'], ['SQL', 'Python'])
-        job = dict(title='Financial Analyst', location='Austin, TX', availability='Open',
+        job = dict(title='Financial Analyst', location='Austin, TX', availability='Open', workplace_type='onsite',
                    description='Experience with SQL and Python.')
         match = app.assess(job.copy(), cfg)
         self.assertEqual(match['location_eligibility'], 'Eligible')
@@ -101,7 +101,7 @@ class PrototypeTests(unittest.TestCase):
         cfg.update(additional_boards={'greenhouse': ['fictional']}, public_web_search_enabled=False,
                    firecrawl_enabled=False, request_delay_seconds=0, generic_urls_per_run=0)
         job = dict(title='Fictional Engineer', employer='Fictional', url='https://job-boards.greenhouse.io/fictional/jobs/98765',
-                   location='Austin, TX', availability='Open', description='SQL reporting',
+                   location='Austin, TX', availability='Open', description='SQL reporting', workplace_type='onsite',
                    salary_min=90000, salary_max=110000, salary_currency='USD', salary_period='year',
                    salary_type='base')
         def board(*_):
