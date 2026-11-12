@@ -62,4 +62,45 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Payment Operations Specialist"].waitForExistence(timeout: 25))
         XCTAssertTrue(app.staticTexts["All Listings · 3"].exists)
     }
+    @MainActor
+    func testTrackingExternalApplicationWithoutLink() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18085"]
+        app.launch()
+
+        XCTAssertTrue(app.tabBars.buttons["My Jobs"].waitForExistence(timeout: 15))
+        app.tabBars.buttons["My Jobs"].tap()
+        let add = app.buttons["Add Application"]
+        XCTAssertTrue(add.waitForExistence(timeout: 8))
+        add.tap()
+        let save = app.buttons["Save"]
+        XCTAssertFalse(save.isEnabled)
+        let title = app.textFields["Job title"]
+        title.tap()
+        title.typeText("Payroll Coordinator")
+        let employer = app.textFields["Employer"]
+        employer.tap()
+        employer.typeText("Fictional Wren")
+        save.tap()
+
+        let listing = app.staticTexts["Payroll Coordinator"]
+        XCTAssertTrue(listing.waitForExistence(timeout: 12))
+        listing.tap()
+        XCTAssertTrue(app.staticTexts["You entered these details. Jobs hasn’t verified the posting."]
+            .waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["Open saved link"].exists)
+        XCTAssertFalse(app.staticTexts["Why It Matches"].exists)
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.tabBars.buttons["My Jobs"].waitForExistence(timeout: 15))
+        app.tabBars.buttons["My Jobs"].tap()
+        let stage = app.descendants(matching: .any).matching(identifier: "applicationStage").firstMatch
+        XCTAssertTrue(stage.waitForExistence(timeout: 8))
+        stage.tap()
+        let applied = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Applied (")).firstMatch
+        XCTAssertTrue(applied.waitForExistence(timeout: 8))
+        applied.tap()
+        XCTAssertTrue(listing.waitForExistence(timeout: 8))
+    }
 }

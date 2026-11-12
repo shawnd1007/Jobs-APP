@@ -21,6 +21,28 @@ h2{margin:0;font-size:19px;color:#173347;line-height:1.3}.salary{font-size:18px;
 article[hidden]{display:none!important}@media(max-width:420px){main{padding:14px}.cards{grid-template-columns:minmax(0,1fr)}input,select{min-width:0;width:100%}header{padding:24px 16px}h1{font-size:25px}}</style></head><body>
 <header><a href="/" style="color:#deebf1">Homepage</a><h1>Your Career Workspace</h1><p>Find relevant work. Understand the fit. Keep your next steps together.</p></header>
 <main><nav class="workspace-nav" aria-label="Workspace"><button data-workspace="jobs" aria-selected="true">Jobs</button><button data-workspace="sources" aria-selected="false">Employer boards</button><button data-workspace="preferences" aria-selected="false">Preferences</button><button data-workspace="guide" aria-selected="false">How it works</button></nav><p id="notice" role="status" aria-live="polite"></p><section id="workspace-jobs" class="workspace-panel"><div class="callout"><div id="summary"></div><p id="system" role="status">Loading shared job database...</p><p id="search-progress" role="status"></p><button id="run" class="btn" disabled>Run Job Search Now</button> <button id="refresh" class="btn">Refresh dashboard</button></div>
+<button id="add-application" class="btn secondary" type="button" disabled>Add Application</button>
+<dialog id="application-dialog" aria-labelledby="application-heading">
+  <form id="application-form">
+    <h2 id="application-heading">Add Application</h2>
+    <p>Track an application you found outside Jobs.</p>
+    <div class="form-grid">
+      <label>Job title<input name="title" maxlength="200" required></label>
+      <label>Employer<input name="employer" maxlength="200" required></label>
+      <label>Location (optional)<input name="location" maxlength="200"></label>
+      <label>Posting link (optional)<input name="url" type="url" maxlength="2048" placeholder="https://"></label>
+      <label>Status<select name="status" required></select></label>
+      <label>Application date<input name="application_date" type="date"></label>
+      <label>Follow-up date<input name="follow_up" type="date"></label>
+      <label class="wide">Notes<textarea name="notes" maxlength="10000"></textarea></label>
+    </div>
+    <p id="application-message" role="status"></p>
+    <div class="form-actions">
+      <button id="cancel-application" class="btn secondary" type="button">Cancel</button>
+      <button id="save-application" class="btn" type="submit">Save application</button>
+    </div>
+  </form>
+</dialog>
 <nav id="buckets" aria-label="Job workflow buckets"></nav><section class="bucket-heading"><h2 id="bucket-title">Review Inbox</h2><p id="bucket-description"></p></section><div class="quick-views"><button data-preset="all">All roles</button><button data-preset="technical">Support</button><button data-preset="implementation">Implementation</button><button data-preset="followup">Follow-ups due</button></div><div class="controls">
 <input id="search" placeholder="Search company, title, description or notes" aria-label="Search">
 <select id="queue" aria-label="Automatic verification"><option value="all">All automatic checks</option><option value="Confirmed">Employer verified</option><option value="Review">Verification / salary review</option><option value="Location Review">Location needs confirmation</option><option value="Excluded">Excluded by requirements</option></select>

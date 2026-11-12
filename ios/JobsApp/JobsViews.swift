@@ -212,7 +212,12 @@ private struct JobCard: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            Text(job.concisePay).font(.subheadline.weight(.semibold))
+            if job.isExternalApplication {
+                Label("Added by you", systemImage: "person.crop.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text(job.concisePay).font(.subheadline.weight(.semibold))
+            }
             if job.source != "Fictional sample listing", job.availability == "Open" {
                 let utcDay = Date.now.ISO8601Format().prefix(10)
                 if job.queue == "Confirmed", job.applicationVerified?.prefix(10) == utcDay {
@@ -299,9 +304,10 @@ struct JobList: View {
 
     @State private var interestError: String?
     @State private var trackingJob: Job?
+    @State private var addingApplication = false
 
     var body: some View {
-        let jobs = workspace.dashboard?.jobs ?? []
+        let jobs = (workspace.dashboard?.jobs ?? []).filter { trackingOnly || !$0.isExternalApplication }
         let today = dateString(.now)
         let due = jobs.filter { $0.needsFollowUp(on: today) }
         let upcoming = jobs.filter { $0.trackingStage != .archive && $0.followUp > today }
@@ -344,6 +350,13 @@ struct JobList: View {
                 }
             }
             if trackingOnly {
+                if workspace.dashboard?.externalApplicationTracking == true {
+                    Button("Add Application", systemImage: "plus.circle") {
+                        filtering = false
+                        addingApplication = true
+                    }
+                    .disabled(!workspace.canWrite || workspace.saving)
+                }
                 Section("Follow-ups") {
                     followUpRow("Due or overdue", icon: "calendar.badge.clock", count: due.count, scope: .due)
                     followUpRow("Upcoming", icon: "calendar", count: upcoming.count, scope: .upcoming)
@@ -356,6 +369,7 @@ struct JobList: View {
                             .tag(item)
                     }
                 }
+                .accessibilityIdentifier(trackingOnly ? "applicationStage" : "listingView")
                 .onChange(of: bucket) { _, _ in filters.followUp = .none }
                 if filters.followUp != .none {
                     Button("Back to \(label(for: bucket))", systemImage: "arrow.uturn.backward") {
@@ -425,6 +439,13 @@ struct JobList: View {
             Button("Filters", systemImage: "slider.horizontal.3") { showingFilters = true }
         }
         .sheet(item: $trackingJob) { TrackingEditor(workspace: workspace, job: $0) }
+        .sheet(isPresented: $addingApplication) {
+            AddApplicationForm(workspace: workspace) { stage in
+                filters = JobFilters()
+                query = ""
+                bucket = stage
+            }
+        }
         .alert("Couldn’t update saved job", isPresented: Binding(
             get: { interestError != nil }, set: { if !$0 { interestError = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(interestError ?? "") }
@@ -630,17 +651,17 @@ struct JobDetail: View {
             if let job = workspace.dashboard?.jobs.first(where: { $0.id == jobID }) {
                 List {
                     Section {
-                        JobCard(job: job, showScore: true)
+                        JobCard(job: job, showScore: !job.isExternalApplication)
                             .accessibilityAddTraits(.isHeader)
-                        if !workspace.isSample {
+                        if !workspace.isSample && !job.isExternalApplication {
                             LabeledContent("Employer Pay Details", value: job.publishedPay)
                         }
-                        if let availability = job.availability, !availability.isEmpty {
+                        if !job.isExternalApplication, let availability = job.availability, !availability.isEmpty {
                             LabeledContent("Listing Status", value: availability)
                         }
                         if let url = job.postingURL {
                             Link(destination: url) {
-                                Label("Open employer posting", systemImage: "arrow.up.right.square")
+                                Label(job.isExternalApplication ? "Open saved link" : "Open employer posting", systemImage: "arrow.up.right.square")
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
@@ -651,76 +672,82 @@ struct JobDetail: View {
                         }
                         .accessibilityIdentifier("openApplicationTracking")
                     }
-                    Section("Why It Matches") {
-                        if let breakdown = job.scoreBreakdown {
-                            scoreRow("Target role", points: breakdown.targetRole, maximum: 45)
-                            scoreRow("Selected skills", points: breakdown.selectedSkills, maximum: 30)
-                            scoreRow("Skill groups", points: breakdown.skillGroups, maximum: 25)
-                            if let groups = job.matchedGroups, !groups.isEmpty {
-                                LabeledContent("Matched groups", value: groups.joined(separator: ", "))
+                    if job.isExternalApplication {
+                        Section("Posting Details") {
+                            Text("You entered these details. Jobs hasn’t verified the posting.")
+                        }
+                    } else {
+                        Section("Why It Matches") {
+                            if let breakdown = job.scoreBreakdown {
+                                scoreRow("Target role", points: breakdown.targetRole, maximum: 45)
+                                scoreRow("Selected skills", points: breakdown.selectedSkills, maximum: 30)
+                                scoreRow("Skill groups", points: breakdown.skillGroups, maximum: 25)
+                                if let groups = job.matchedGroups, !groups.isEmpty {
+                                    LabeledContent("Matched groups", value: groups.joined(separator: ", "))
+                                }
+                            } else if let explanation = job.explanation, !explanation.isEmpty {
+                                Text(explanation)
                             }
-                        } else if let explanation = job.explanation, !explanation.isEmpty {
-                            Text(explanation)
+                            if let skills = job.matchedSkills, !skills.isEmpty {
+                                LabeledContent("Matched skills", value: skills.joined(separator: ", "))
+                            }
                         }
-                        if let skills = job.matchedSkills, !skills.isEmpty {
-                            LabeledContent("Matched skills", value: skills.joined(separator: ", "))
-                        }
-                    }
-                    if let evidence = job.dutyEvidence, !evidence.isEmpty {
-                        Section("Duties Using Your Profile Skills") {
-                            ForEach(evidence, id: \.skill) { item in
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(item.skill).font(.subheadline.bold())
-                                    Text(item.duty).font(.subheadline).foregroundStyle(.secondary)
+                        if let evidence = job.dutyEvidence, !evidence.isEmpty {
+                            Section("Duties Using Your Profile Skills") {
+                                ForEach(evidence, id: \.skill) { item in
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(item.skill).font(.subheadline.bold())
+                                        Text(item.duty).font(.subheadline).foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
-                    }
-                    Section("Employer Verification") {
-                        LabeledContent("Automatic Checks", value: verificationLabel(for: job))
-                        if let reason = job.locationReason, !reason.isEmpty { Text(reason) }
-                        if let evidence = job.applicationEvidence, !evidence.isEmpty { Text(evidence) }
-                        if let source = job.source, !source.isEmpty { LabeledContent("Source", value: source) }
-                        if let checked = job.lastVerified, !checked.isEmpty {
-                            LabeledContent("Employer Source Checked", value: displayTimestamp(checked))
+                        Section("Employer Verification") {
+                            LabeledContent("Automatic Checks", value: verificationLabel(for: job))
+                            if let reason = job.locationReason, !reason.isEmpty { Text(reason) }
+                            if let evidence = job.applicationEvidence, !evidence.isEmpty { Text(evidence) }
+                            if let source = job.source, !source.isEmpty { LabeledContent("Source", value: source) }
+                            if let checked = job.lastVerified, !checked.isEmpty {
+                                LabeledContent("Employer Source Checked", value: displayTimestamp(checked))
+                            }
+                            if let verified = job.applicationVerified, !verified.isEmpty {
+                                LabeledContent("Application Form Verified", value: displayTimestamp(verified))
+                            }
+                            ForEach(job.reviewBlockers + (job.matchGaps ?? []), id: \.self) { blocker in
+                                Label(blocker, systemImage: "exclamationmark.circle")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        if let verified = job.applicationVerified, !verified.isEmpty {
-                            LabeledContent("Application Form Verified", value: displayTimestamp(verified))
-                        }
-                        ForEach(job.reviewBlockers + (job.matchGaps ?? []), id: \.self) { blocker in
-                            Label(blocker, systemImage: "exclamationmark.circle")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Section("Your Workflow") {
-                        let saved = job.interest?.state == "saved"
-                        Button(saved ? "Remove from Saved" : "Save to My Jobs", systemImage: saved ? "bookmark.fill" : "bookmark") {
-                            Task {
-                                do {
-                                    try await workspace.updateInterest(for: job.id, to: saved ? "none" : "saved",
-                                                                       version: job.interest?.version ?? 0)
-                                    interestError = nil
-                                } catch {
-                                    interestError = error.localizedDescription
-                                    await workspace.refresh()
+                        Section("Your Workflow") {
+                            let saved = job.interest?.state == "saved"
+                            Button(saved ? "Remove from Saved" : "Save to My Jobs", systemImage: saved ? "bookmark.fill" : "bookmark") {
+                                Task {
+                                    do {
+                                        try await workspace.updateInterest(for: job.id, to: saved ? "none" : "saved",
+                                                                           version: job.interest?.version ?? 0)
+                                        interestError = nil
+                                    } catch {
+                                        interestError = error.localizedDescription
+                                        await workspace.refresh()
+                                    }
+                                }
+                            }
+                            .disabled(workspace.saving || !workspace.canWrite)
+                            if let interestError { Text(interestError).foregroundStyle(.secondary) }
+                            if let action = job.interest {
+                                LabeledContent("Last List Action", value: displayTimestamp(action.updated))
+                            }
+                            if !workspace.isSample {
+                                Button { editor = .review } label: {
+                                    LabeledContent("Review and Approval", value: job.reviewDecision)
                                 }
                             }
                         }
-                        .disabled(workspace.saving || !workspace.canWrite)
-                        if let interestError { Text(interestError).foregroundStyle(.secondary) }
-                        if let action = job.interest {
-                            LabeledContent("Last List Action", value: displayTimestamp(action.updated))
+                        if let description = job.description, !description.isEmpty {
+                            Section("Employer Description") { Text(description).textSelection(.enabled) }
                         }
-                        if !workspace.isSample {
-                            Button { editor = .review } label: {
-                                LabeledContent("Review and Approval", value: job.reviewDecision)
-                            }
-                        }
+                        if !workspace.isSample { adviceSection(job) }
                     }
-                    if let description = job.description, !description.isEmpty {
-                        Section("Employer Description") { Text(description).textSelection(.enabled) }
-                    }
-                    if !workspace.isSample { adviceSection(job) }
                 }
                 .scrollContentBackground(.hidden)
                 .background(JobsTheme.canvas.ignoresSafeArea())
@@ -884,6 +911,64 @@ private struct ReviewEditor: View {
             get: { draft.checks[key] ?? false },
             set: { draft.checks[key] = $0 }
         ))
+    }
+}
+
+private struct AddApplicationForm: View {
+    @Environment(\.dismiss) private var dismiss
+    let workspace: Workspace
+    let saved: (JobBucket) -> Void
+    @State private var draft = Draft()
+
+    private struct Draft: Encodable {
+        var title = ""
+        var employer = ""
+        var location = ""
+        var url = ""
+        var status = "Applied"
+        var applicationDate = ""
+        var followUp = ""
+        var notes = ""
+
+        var stage: JobBucket {
+            switch status {
+            case "Interview Scheduled", "Interview Completed": return .interviews
+            case "Offer Received": return .offers
+            case "Rejected", "Withdrawn", "Position Closed": return .archive
+            default: return .applied
+            }
+        }
+    }
+
+    private var canSave: Bool {
+        !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !draft.employer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        SaveForm(title: "Add Application", workspace: workspace, saveDisabled: !canSave, reloadOnConflict: false) {
+            Section("Job Details") {
+                TextField("Job title", text: $draft.title)
+                TextField("Employer", text: $draft.employer)
+                TextField("Location (optional)", text: $draft.location)
+                TextField("Posting link (optional)", text: $draft.url)
+                    .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+            }
+            Section("Application") {
+                Picker("Status", selection: $draft.status) {
+                    ForEach(workspace.dashboard?.statuses.filter {
+                        !["Needs Verification", "Not Applied", "Planning to Apply"].contains($0)
+                    } ?? [], id: \.self) { Text($0).tag($0) }
+                }
+                OptionalDateField(label: "Application Date", value: $draft.applicationDate)
+                OptionalDateField(label: "Follow-up Date", value: $draft.followUp)
+                TextField("Application notes", text: $draft.notes, axis: .vertical).lineLimit(3...10)
+            }
+        } save: {
+            try await workspace.save("/api/applications", draft)
+            saved(draft.stage)
+            dismiss()
+        } reload: {}
     }
 }
 

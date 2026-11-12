@@ -125,6 +125,8 @@ def source_result(a, source, state, count=0, error=''):
 def source_snapshot(a, jobs, cfg):
     sources = set()
     for j in jobs:
+        if j.get('external_application'):
+            continue
         board = a.board_identity(j['url'])
         sources.add('/'.join(board) if board else j['url'])
     for platform, names in cfg['additional_boards'].items():
@@ -159,6 +161,8 @@ def _ai_review(a, job_id):
     if not cfg['ai_enabled'] or not ai_key(a): return 400, {'error': 'Enable AI in Preferences and configure the server API key first.'}
     j = next((j for j in a.records() if j['id'] == job_id), None)
     if not j: return 404, {'error': 'Job not found'}
+    if j.get('external_application'):
+        return 400, {'error': 'AI review needs an employer posting checked by Jobs.'}
     digest = fingerprint(j, cfg)
     # Reserve before the request. Uncertain network outcomes still count; never auto-retry paid calls.
     with a.connect() as c:

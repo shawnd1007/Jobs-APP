@@ -4,6 +4,8 @@ struct SaveForm<Content: View>: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
     let workspace: Workspace
+    var saveDisabled = false
+    var reloadOnConflict = true
     @ViewBuilder let content: () -> Content
     let save: () async throws -> Void
     let reload: () -> Void
@@ -43,7 +45,7 @@ struct SaveForm<Content: View>: View {
                     if workspace.saving || refreshing {
                         ProgressView()
                     } else {
-                        Button("Save") { Task { await submit() } }.disabled(hasConflict || !workspace.canWrite)
+                        Button("Save") { Task { await submit() } }.disabled(saveDisabled || hasConflict || !workspace.canWrite)
                     }
                 }
             }
@@ -61,7 +63,7 @@ struct SaveForm<Content: View>: View {
         do { try await save() }
         catch {
             errorMessage = error.localizedDescription
-            hasConflict = (error as? DashboardAPI.ServerError)?.status == 409
+            hasConflict = reloadOnConflict && (error as? DashboardAPI.ServerError)?.status == 409
         }
     }
 

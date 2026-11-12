@@ -49,6 +49,7 @@ function bucket(j){
  if(j.status==='Offer Received')return 'offers';
  if(j.status.startsWith('Interview'))return 'interviews';
  if(['Applied','Assessment Received'].includes(j.status))return 'applied';
+ if(j.external_application)return 'all';
  if(j.review_decision==='Dismissed')return 'archive';
  if(j.location_eligibility==='Rejected'||j.queue==='Excluded')return 'excluded';
  if(j.review_decision==='Hold')return 'hold';
@@ -83,6 +84,7 @@ function render(){
  $('system').textContent=`Daily search: ${state.preferences.schedule_enabled?state.schedule_hour_utc+':00 UTC':'paused'}. ${state.firecrawl_configured?'Firecrawl configured':'Public board mode'}. Last fully successful run: ${date(state.runs.find(r=>r.state==='success')?.finished)}. ${state.running?'Search running…':''}`;
  searchRunning=state.running;
  $('run').disabled=searchRunning;
+ $('add-application').disabled=!state.external_application_tracking;
  const recent=state.runs[0];
  $('search-progress').textContent=searchMessage(searchRunning,recent&&{...recent,progress:recent.report.progress});
  fillSelect('status',state.statuses,'All application statuses');fillSelect('company',[...new Set(jobs.map(j=>j.employer))].sort(),'All companies');fillSelect('category',[...new Set(jobs.map(j=>j.category||'Imported'))].sort(),'All categories');
@@ -151,16 +153,71 @@ function filter(){
  let list=state.jobs.filter(j=>(!followupOnly||(j.follow_up&&j.follow_up<=new Date().toLocaleDateString('en-CA')&&!['Rejected','Withdrawn','Position Closed'].includes(j.status)))&&(activeBucket==='all'||bucket(j)===activeBucket)&&(!text||[j.employer,j.title,j.description,j.notes,j.review_note].join(' ').toLowerCase().includes(text))&&(!$('status').value||j.status===$('status').value)&&(!$('company').value||j.employer===$('company').value)&&(!$('category').value||(j.category||'Imported')===$('category').value)&&(!$('area').value||j.area===$('area').value)&&(!$('score').value||j.score>=+$('score').value)&&(!$('salary').value||(j.salary_max||0)>=+$('salary').value)&&(!$('posted').value||(j.posted||'').slice(0,10)>=$('posted').value)&&(!$('verified').value||(j.application_verified||'').slice(0,10)>=$('verified').value)&&(queue==='all'||j.queue===queue));
  const sort=$('sort').value;list.sort((a,b)=>sort==='score'?b.score-a.score:sort==='salary'?(b.salary_max||0)-(a.salary_max||0):sort==='status'?a.status.localeCompare(b.status):String(b[sort]||'').localeCompare(String(a[sort]||''))||b.id-a.id);
  $('count').textContent=`${list.length} jobs in this view · ${state.jobs.length} retained in history. Human approval and employer verification are separate.`;
- $('jobs').innerHTML=list.map(j=>`<article data-id="${j.id}"><div class="top"><span class="tag">${esc(j.match_label)} · ${j.score}/100</span><em>#${j.id}</em></div><div class="company">${esc(j.employer)}</div><h2>${esc(j.title)}</h2><div class="salary">${esc(j.salary_text||'Salary Not Published')}</div><em>${esc(j.location)}</em><div class="note">${esc(j.location_reason)}</div><div class="badges"><span class="tag decision-${esc(j.review_decision.toLowerCase())}">${esc(j.review_decision==='Approved'?'Approved by you':j.review_decision==='Pending'?'Awaiting review':j.review_decision)}</span><span class="tag">${esc(j.status)}</span><span class="tag">${j.queue==='Confirmed'?'Employer verified':'Automatic checks incomplete'}</span>${j.availability==='Closed'?'<span class="tag">Closed</span>':''}${listingBadges(j)}</div><div class="why">${esc(j.explanation)}</div>${j.duty_evidence?.length?`<details><summary>Experience matched to duties</summary><ul>${j.duty_evidence.map(item=>`<li><strong>${esc(item.skill)}</strong> · ${esc(item.duty)}</li>`).join('')}</ul></details>`:''}<details><summary>Employer description & verification</summary><p class="why">${esc(j.description)}</p><p class="note">${esc(j.application_evidence||'Not independently verified')}<br>Source: ${esc(j.source)}<br>Employer source checked: ${esc(date(j.last_verified))}<br>Application form verified: ${esc(date(j.application_verified))}<br>Posted: ${esc(j.posted||'Unknown')}<br>Tracking updated: ${esc(date(j.tracking_updated))}</p></details><div class="actions"><a class="btn employer-link" href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">Open employer posting ↗</a>${unapplied.includes(j.status)?`<button class="btn secondary mark-applied">${bucket(j)==='ready'?'Mark as applied':'Already applied'}</button>`:''}</div>${aiPanel(j)}${reviewPanel(j)}${trackingPanel(j)}</article>`).join('')||`<div class="empty"><h2>No jobs in this bucket yet</h2><p>${activeBucket==='ready'?'Approve a job in Review Inbox to move it here.':activeBucket==='applied'?'Mark a job as applied to move it here.':'Try another bucket or clear your filters.'}</p></div>`;
+ $('jobs').innerHTML=list.map(j=>j.external_application?externalCard(j):`<article data-id="${j.id}"><div class="top"><span class="tag">${esc(j.match_label)} · ${j.score}/100</span><em>#${j.id}</em></div><div class="company">${esc(j.employer)}</div><h2>${esc(j.title)}</h2><div class="salary">${esc(j.salary_text||'Salary Not Published')}</div><em>${esc(j.location)}</em><div class="note">${esc(j.location_reason)}</div><div class="badges"><span class="tag decision-${esc(j.review_decision.toLowerCase())}">${esc(j.review_decision==='Approved'?'Approved by you':j.review_decision==='Pending'?'Awaiting review':j.review_decision)}</span><span class="tag">${esc(j.status)}</span><span class="tag">${j.queue==='Confirmed'?'Employer verified':'Automatic checks incomplete'}</span>${j.availability==='Closed'?'<span class="tag">Closed</span>':''}${listingBadges(j)}</div><div class="why">${esc(j.explanation)}</div>${j.duty_evidence?.length?`<details><summary>Experience matched to duties</summary><ul>${j.duty_evidence.map(item=>`<li><strong>${esc(item.skill)}</strong> · ${esc(item.duty)}</li>`).join('')}</ul></details>`:''}<details><summary>Employer description & verification</summary><p class="why">${esc(j.description)}</p><p class="note">${esc(j.application_evidence||'Not independently verified')}<br>Source: ${esc(j.source)}<br>Employer source checked: ${esc(date(j.last_verified))}<br>Application form verified: ${esc(date(j.application_verified))}<br>Posted: ${esc(j.posted||'Unknown')}<br>Tracking updated: ${esc(date(j.tracking_updated))}</p></details><div class="actions"><a class="btn employer-link" href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">Open employer posting ↗</a>${unapplied.includes(j.status)?`<button class="btn secondary mark-applied">${bucket(j)==='ready'?'Mark as applied':'Already applied'}</button>`:''}</div>${aiPanel(j)}${reviewPanel(j)}${trackingPanel(j)}</article>`).join('')||`<div class="empty"><h2>No jobs in this bucket yet</h2><p>${activeBucket==='ready'?'Approve a job in Review Inbox to move it here.':activeBucket==='applied'?'Mark a job as applied to move it here.':'Try another bucket or clear your filters.'}</p></div>`;
  bindCards();bindAI();
 }
+function externalCard(job) {
+ const link=job.url?`<a class="btn" href="${esc(job.url)}" target="_blank" rel="noopener noreferrer">Open saved link ↗</a>`:'';
+ return `<article data-id="${job.id}">
+   <span class="tag">Added by you</span>
+   <div class="company">${esc(job.employer)}</div>
+   <h2>${esc(job.title)}</h2>
+   <em>${esc(job.location)}</em>
+   <span class="tag">${esc(job.status)}</span>
+   <p class="note">You entered these details. Jobs hasn’t verified the posting.</p>
+   ${link}${trackingPanel(job)}
+ </article>`;
+}
+
+const applicationDialog=$('application-dialog');
+const applicationForm=$('application-form');
+const saveApplication=$('save-application');
+
+$('add-application').onclick=()=>{
+ if(!discardCheck())return;
+ applicationForm.reset();
+ $('application-message').textContent='';
+ applicationForm.elements.status.innerHTML=state.statuses.filter(status=>!unapplied.includes(status))
+  .map(status=>option(status)).join('');
+ applicationForm.elements.status.value='Applied';
+ applicationDialog.showModal();
+};
+$('cancel-application').onclick=()=>applicationDialog.close();
+applicationDialog.addEventListener('cancel',event=>{
+ if(saveApplication.disabled)event.preventDefault();
+});
+applicationForm.onsubmit=async event=>{
+ event.preventDefault();
+ saveApplication.disabled=true;
+ $('cancel-application').disabled=true;
+ $('application-message').textContent='';
+ try{
+  const payload=Object.fromEntries(new FormData(applicationForm));
+  const saved=await post('/api/applications',payload);
+  applicationDialog.close();
+  notify('Application saved.');
+  try{
+   await load();
+   const job=state.jobs.find(item=>item.id===saved.job_id);
+   if(job)selectBucket(bucket(job));
+  }catch{
+   notify('Application saved. Refresh to see it in Jobs.');
+  }
+ }catch(error){
+  $('application-message').textContent=error.message;
+ }finally{
+  saveApplication.disabled=false;
+  $('cancel-application').disabled=false;
+ }
+};
+
 async function post(url,payload){const r=await fetch(url,{method:'POST',...(url==='/api/run'?{signal:AbortSignal.timeout(5000)}:{}),headers:{'Content-Type':'application/json','X-Jobs-Client':'dashboard'},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw Error(data.error||'Could not save');return data;}
 function allowSave(key){return ![...drafts].some(k=>k!==key)||confirm('Other unsaved edits will be discarded after saving this decision. Continue?');}
 function bindCards(){document.querySelectorAll('article').forEach(card=>{
  const j=state.jobs.find(j=>j.id===+card.dataset.id),review=card.querySelector('.review-panel'),tracking=card.querySelector('.tracking-panel');
- review.querySelectorAll('input,textarea').forEach(e=>e.oninput=()=>drafts.add(j.id+':review'));
+ review?.querySelectorAll('input,textarea').forEach(e=>e.oninput=()=>drafts.add(j.id+':review'));
  tracking.querySelectorAll('input,textarea,select').forEach(e=>e.oninput=()=>{drafts.add(j.id+':tracking');tracking.querySelector('.saved').textContent='Unsaved changes';});
- review.querySelectorAll('[data-decision]').forEach(button=>button.onclick=async()=>{
+ review?.querySelectorAll('[data-decision]').forEach(button=>button.onclick=async()=>{
   if(!allowSave(j.id+':review'))return;
   const payload={decision:button.dataset.decision,version:j.review_version,tracking_version:j.version,note:review.querySelector('[name="review_note"]').value,reviewer:review.querySelector('[name="reviewer"]').value,checks:{}};
   for(const key of ['location','salary','application','history'])payload.checks[key]=review.querySelector(`[name="check_${key}"]`).checked;
@@ -185,6 +242,6 @@ $('run').onclick=async()=>{
  void pollSearch();
 };
 $('refresh').onclick=()=>{if(discardCheck())load().catch(e=>notify(e.message));};
-window.onbeforeunload=e=>{if(drafts.size||preferencesDirty){e.preventDefault();e.returnValue='';}};
+window.onbeforeunload=e=>{if(drafts.size||preferencesDirty||applicationDialog.open){e.preventDefault();e.returnValue='';}};
 setInterval(pollSearch,2000);
 load().catch(e=>notify(e.message));

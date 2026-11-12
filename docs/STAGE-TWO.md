@@ -47,3 +47,8 @@ Browse now separates **Filter listings** from **Find New Jobs**. The first narro
 ## Search progress and Personio
 
 Find New Jobs now shows its stage, source and progress. Source checks have deadlines; a partial run keeps the results it could verify and lets the user retry. The Personio adapter checks the public XML feed and the exact requisition page independently. A bounded public check verified an exact AND-E posting page and correctly flagged a separate feed result whose direct page returned 404. Neither check established an accessible application form. No employer boards were added to the owner’s preferences during these checks.
+
+
+## Track an application found elsewhere
+
+The connected iPhone app and browser can add an application with a title, employer and status. A link, location, notes and dates are optional. The record uses the existing stages and follow-up views. Duplicate checks protect existing records. Jobs preserves owner-entered provenance until it finds and saves the exact employer posting. An exact match keeps the application history on the same record.

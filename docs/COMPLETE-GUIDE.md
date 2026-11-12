@@ -135,6 +135,12 @@ Imagine a fictional employer publishes an Implementation Specialist role.
 
 The key design is **separate ownership of facts, decisions and history**. A crawler can update employer facts; it cannot decide that you applied. An AI can suggest questions; it cannot approve the listing.
 
+### Track an application found elsewhere
+
+Choose **Add Application** in the browser's Jobs view or on iPhone under **My Jobs**. Enter the job title and employer. The location, HTTPS posting link, application date, follow-up date and notes are optional. Choose the current application status. The record appears in that stage and uses the usual tracking editor and follow-ups.
+
+Jobs labels these details **Added by you**. The link is optional and opening it is your choice. Adding the record does not check the URL, add a search source, score the role or send an alert. If a later search saves the same exact posting, employer facts can take the place of the entered posting details while the application history stays attached. Jobs detects duplicate posting links and uses the supplied employer, title and location when a link is missing.
+
 ## 6. How employer discovery works
 
 ### Direct public ATS feeds
@@ -423,6 +429,7 @@ An API is the backend's request/response contract. The browser and the iPhone ap
 | `POST /api/run` | Empty object | Starts a background search, or conflict when one is active |
 | `POST /api/preferences` | Revision plus changed preferences | Save confirmation or validation/conflict error |
 | `POST /api/jobs/{id}/review` | Decision, review version, tracking version, checklist, note and optional reviewer | Saved decision or blockers/conflict |
+| `POST /api/applications` | Owner-entered job title, employer, application status and optional link, location, dates and notes | New tracking record or duplicate conflict |
 | `POST /api/jobs/{id}/tracking` | Tracking version, status, dates and notes | Save confirmation or conflict |
 | `POST /api/jobs/{id}/ai-review` | Empty object | Saved/cached advice outcome or configuration/budget/provider error |
 

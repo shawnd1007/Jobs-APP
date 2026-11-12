@@ -9,7 +9,7 @@ Build 9 is a local-first, single-workspace prototype with a browser dashboard an
 - **Find roles.** Pull openings from Greenhouse, Lever, Ashby, SmartRecruiters, and employer-enabled Personio boards. Searches show progress and keep results from sources that respond. Browse the full collection or open **For You** to see ranked recommendations.
 - **Personalize matching.** Import a résumé on iPhone, select supported skills and experience, and set role, location and pay preferences. Job details explain the score and identify details to verify.
 - **Save searches.** Keep separate sets of criteria and review new matches in the alert inbox. Local iPhone notification delivery still needs a signed-device check.
-- **Manage applications.** Save or pass on roles, apply on the employer’s site, and use **My Jobs** to track stages, notes, and follow-ups.
+- **Manage applications.** Save or pass on roles, apply on the employer’s site, and use **My Jobs** to track stages, notes, and follow-ups. Add applications you found elsewhere, even if the posting link is gone.
 - **Read offline.** Open the last synced workspace on iPhone to review real listings and application history when the Mac is unavailable.
 - **Request AI advice.** The optional OpenAI integration compares your profile with a posting. Build 9 checks use mocked providers. Paid execution and costs need separate validation.
 

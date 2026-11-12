@@ -8,6 +8,7 @@ struct Dashboard: Decodable {
     let runs: [SearchRun]
     let statuses: [String]
     let running: Bool
+    var externalApplicationTracking: Bool? = nil
     var preferences: Preferences
     let preferencesRevision: String
     let sources: [EmployerSource]
@@ -36,6 +37,7 @@ struct Job: Decodable, Identifiable {
     var matchedDutyCount: Int? = nil
     var scoreBreakdown: ScoreBreakdown? = nil
     var applicationVerified: String? = nil
+    var externalApplication: Bool? = nil
     var interest: Interest?
     var matchedSkills: [String]?
     let matchedGroups: [String]?
@@ -114,6 +116,8 @@ struct Job: Decodable, Identifiable {
         return "\(prefix)\(maximum.formatted(currency)) annual base"
     }
 
+    var isExternalApplication: Bool { externalApplication == true }
+
     var postingURL: URL? { url.flatMap(DashboardAPI.webURL) }
 
     var trackingStage: JobBucket? {
@@ -123,6 +127,7 @@ struct Job: Decodable, Identifiable {
         case .interviews: return .interviews
         case .offers: return .offers
         default:
+            if isExternalApplication { return .all }
             if interest?.state == "passed" { return .archive }
             if interest?.state == "saved" || bucket == .ready || bucket == .hold { return .all }
             return nil

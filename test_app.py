@@ -24,6 +24,55 @@ class PersistenceTests(unittest.TestCase):
   current=app.records()[0];self.assertEqual(current['status'],'Applied');self.assertEqual(current['notes'],note);self.assertEqual(current['availability'],'Closed')
   with app.connect() as c:j['availability']='Open';app.upsert(c,j)
   self.assertEqual(app.records()[0]['application_date'],applied_on);self.assertEqual(len(app.records()),50)
+ def test_external_application_keeps_owner_notes_and_promotes_only_exact_posting(self):
+  payload = dict(title='Quality Operations Analyst', employer='Fictional Cedar', location='Remote - United States',
+                 url='https://jobs.lever.co/fictional/req-a?utm_source=example', status='Interview Scheduled',
+                 application_date='2030-04-10', follow_up='2030-04-22', notes='Bring fictional work samples.')
+  code, saved = app.add_external_application(payload)
+  self.assertEqual(code, 201)
+  job_id = saved['job_id']
+  duplicate = dict(payload, title='Different title on a board', notes='Overwrite attempt',
+                   url='https://jobs.lever.co/fictional/req-a/apply')
+  self.assertEqual(app.add_external_application(duplicate)[0], 409)
+  current = next(j for j in app.snapshot()['jobs'] if j['id'] == job_id)
+  self.assertTrue(current['external_application'])
+  self.assertEqual(current['queue'], 'Tracking')
+  self.assertEqual(current['match_label'], 'Added by you')
+  self.assertNotIn('lever/fictional', [x['source'] for x in app.snapshot()['sources']])
+  self.assertEqual(app.save_review(job_id, {'decision':'Approved', 'version':0})[0], 400)
+  with app.connect() as c:
+   listing = dict(title=payload['title'], employer=payload['employer'], location=payload['location'],
+                  url='https://jobs.lever.co/fictional/req-b/apply', source='Lever public live board',
+                  description='Fictional employer duties.', availability='Open')
+   other_id, added = app.upsert(c, listing)
+   self.assertTrue(added)
+   self.assertNotEqual(other_id, job_id)
+   found_id, added = app.upsert(c, dict(listing, url='https://jobs.lever.co/fictional/req-a/apply'))
+   self.assertEqual(found_id, job_id)
+   self.assertFalse(added)
+  promoted = next(j for j in app.records() if j['id'] == job_id)
+  self.assertNotIn('external_application', promoted)
+  self.assertEqual(promoted['source'], 'Lever public live board')
+  self.assertEqual(promoted['status'], 'Interview Scheduled')
+  self.assertEqual(promoted['application_date'], '2030-04-10')
+  self.assertEqual(promoted['follow_up'], '2030-04-22')
+  self.assertEqual(promoted['notes'], payload['notes'])
+
+ def test_external_application_accepts_no_link_and_validates_fields(self):
+  payload = dict(title='Payroll Coordinator', employer='Fictional Wren', status='Applied')
+  for changes in ({'application_date':'2030-02-30'}, {'url':'javascript:alert(1)'},
+                  {'url':'https://someone:password@example.com/role'}, {'status':'Unknown'}, {'title':'   '}):
+   with self.subTest(changes=changes), self.assertRaises(ValueError):
+    app.add_external_application(dict(payload, **changes))
+  self.assertEqual(app.add_external_application(payload)[0], 201)
+  self.assertEqual(app.add_external_application(dict(payload, title=' Payroll   Coordinator '))[0], 409)
+  self.assertEqual(app.add_external_application(dict(payload, location='Toronto'))[0], 201)
+  self.assertEqual(app.external_link_key('https://example.com/careers?id=7&utm_source=board'),
+                   'https://example.com/careers?id=7')
+  self.assertNotEqual(app.external_link_key('https://example.com/careers?id=8'),
+                      app.external_link_key('https://example.com/careers?id=7'))
+  self.assertEqual(app.snapshot()['match_alerts'], [])
+
  def test_tracking_parameters_deduplicate(self):
   j=app.records()[0];j['url']+='?utm_source=test#apply'
   with app.connect() as c:_,added=app.upsert(c,j)
@@ -313,6 +362,35 @@ class PersistenceTests(unittest.TestCase):
    self.assertEqual(app.snapshot()['unread_match_count'], 1)
   self.assertEqual(report['new_review'], 1)
   self.assertEqual(report['deferred_source_details'], 4)
+
+ def test_employer_search_enriches_an_external_application_without_creating_alert(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(additional_boards={'lever': ['fictional']})
+  criteria = dict(name='Fictional billing search', title_terms=['Billing'], skills=['Reconciliation'],
+                  locations=['Austin, TX'], workplace_types=['onsite'], salary_min=85000,
+                  salary_max=None, enabled=True)
+  self.assertEqual(app.prototype.change_saved_search(app, {'action': 'save', 'criteria': criteria})[0], 200)
+  url = 'https://jobs.lever.co/fictional/req-22'
+  _, saved = app.add_external_application(dict(title='Billing Analyst', employer='Fictional Employer',
+                                                url=url, status='Applied', notes='Fictional application note.'))
+  posting = dict(title='Billing Analyst', employer='Fictional Employer', location='Austin, TX', remote=False,
+                 url=url+'/apply', requisition='req-22', source='Lever public live board',
+                 description='Responsibilities: Reconciliation.', availability='Open',
+                 salary_min=90000, salary_max=110000, salary_currency='USD', salary_period='year',
+                 salary_type='base')
+  def board(platform, slug):
+   return [posting] if (platform, slug) == ('lever', 'fictional') else []
+  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=board), \
+       patch.object(app, 'verify_application', side_effect=ValueError('Fictional form not verified')):
+   app.LOCK.acquire()
+   report = app.run_pipeline()
+  self.assertEqual(report['duplicates'], 1)
+  matching = [job for job in app.records() if job['title'] == 'Billing Analyst']
+  self.assertEqual(len(matching), 1)
+  self.assertEqual(matching[0]['id'], saved['job_id'])
+  self.assertFalse(matching[0].get('external_application'))
+  self.assertEqual(matching[0]['notes'], 'Fictional application note.')
+  self.assertEqual(app.snapshot()['unread_match_count'], 0)
 
  def test_overlapping_run_rejected(self):
   app.LOCK.acquire()

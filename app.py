@@ -12,10 +12,12 @@ import socket
 import sqlite3
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse as up
 import urllib.request as ur
 import xml.etree.ElementTree as ET
+from uuid import uuid4
 import prototype
 from contextvars import ContextVar
 from queue import Empty, Queue
@@ -207,6 +209,8 @@ def init():
         cfg = config()
         for row in c.execute('SELECT id,identity,listing FROM jobs').fetchall():
             j = json.loads(row['listing'])
+            if j.get('external_application'):
+                continue
             stored = stored_board_posting(row['identity'])
             if stored and identity(j['url']) != row['identity']:
                 # Older versions could replace a posting by title and retain the prior ID.
@@ -220,7 +224,96 @@ def init():
             j.update(location_eligibility=eligible,location_reason=reason,area=area)
             if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
             c.execute('UPDATE jobs SET listing=? WHERE id=?',(json.dumps(j),row['id']))
+def external_role_key(employer, title, location):
+    return tuple(' '.join(re.findall(r'\w+', unicodedata.normalize('NFKC', value).casefold()))
+                 for value in (employer, title, location))
+
+
+def external_link_key(url):
+    """Normalize an owner link without fetching it or dropping requisition parameters."""
+    if not url:
+        return ''
+    if any(char.isspace() or ord(char) < 32 or ord(char) == 127 or char == chr(92) for char in url):
+        raise ValueError('Enter a valid HTTPS posting link.')
+    parts = up.urlsplit(url)
+    if (parts.scheme != 'https' or not parts.hostname or parts.username or parts.password
+            or parts.port not in (None, 443)):
+        raise ValueError('Enter a valid HTTPS posting link.')
+    canonical = identity(url)
+    if not canonical.startswith('https:'):
+        return canonical
+    params = [(key, value) for key, value in up.parse_qsl(parts.query, keep_blank_values=True)
+              if not key.lower().startswith('utm_')]
+    host = parts.hostname.lower()
+    if ':' in host:
+        host = '[' + host + ']'
+    return up.urlunsplit(('https', host, parts.path.rstrip('/'), up.urlencode(sorted(params, key=lambda pair: pair[0])), ''))
+
+
+def add_external_application(payload):
+    if not isinstance(payload, dict):
+        raise ValueError('Enter the job title and employer.')
+
+    def field(name, limit):
+        value = payload.get(name, '')
+        if not isinstance(value, str) or len(value) > limit:
+            raise ValueError('One or more fields exceed their allowed length.')
+        return value.strip()
+
+    title, employer, location = field('title', 200), field('employer', 200), field('location', 200)
+    if not title or not employer:
+        raise ValueError('Enter the job title and employer.')
+    url = field('url', 2048)
+    link_key = external_link_key(url)
+    status = field('status', 40)
+    if status not in STATUSES or status in UNAPPLIED:
+        raise ValueError('Choose an application status.')
+    dates = {name: field(name, 10) for name in ('application_date', 'follow_up')}
+    for value in dates.values():
+        if not value:
+            continue
+        try:
+            if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}', value):
+                raise ValueError
+            dt.date.fromisoformat(value)
+        except ValueError:
+            raise ValueError('Enter valid application and follow-up dates.') from None
+    notes = field('notes', 10000)
+
+    # The transaction serializes duplicate detection with other writers and search results.
+    with connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        fallback = '|'.join(norm(value) for value in (employer, title, location))
+        role_key = external_role_key(employer, title, location)
+        for row in c.execute('SELECT listing FROM jobs'):
+            old = json.loads(row['listing'])
+            existing_url = old.get('url', '')
+            if link_key and existing_url:
+                try:
+                    same_link = external_link_key(existing_url) == link_key
+                except ValueError:
+                    continue
+                if same_link:
+                    return 409, {'error': 'This posting is already in Jobs. Search for it to update application tracking.'}
+                continue
+            if external_role_key(old['employer'], old['title'], old.get('location', '')) == role_key:
+                return 409, {'error': 'This role is already in Jobs. Search for it to update application tracking.'}
+        stamp = now()
+        listing = dict(title=title, employer=employer, location=location, url=url,
+                       external_application=True, source='Added by you',
+                       availability='Needs Verification', last_verified='',
+                       application_evidence='Posting details entered by you.')
+        job_id = c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?)',
+                           ('external:' + uuid4().hex, fallback, json.dumps(listing), stamp, stamp)).lastrowid
+        c.execute("""INSERT INTO tracking(job_id,status,application_date,follow_up,notes,updated)
+                     VALUES(?,?,?,?,?,?)""",
+                  (job_id, status, dates['application_date'], dates['follow_up'], notes, stamp))
+        return 201, {'saved': True, 'job_id': job_id}
+
+
 def upsert(c,j):
+    if not c.in_transaction:
+        c.execute('BEGIN IMMEDIATE')
     ident=identity(j['url']); fallback='|'.join(norm(str(j.get(k,''))) for k in ('employer','title','location'))
     row=c.execute('SELECT * FROM jobs WHERE identity=?',(ident,)).fetchone()
     if not row and ident.startswith('personio:'):
@@ -230,6 +323,16 @@ def upsert(c,j):
         if len(prior) > 1:
             raise ValueError('Multiple retained Personio records match this requisition; manual review needed')
         row = prior[0] if prior else None
+    if not row and j.get('source') not in (None, 'Original HTML, November 5, 2026'):
+        try:
+            link_key = external_link_key(j['url'])
+        except ValueError:
+            link_key = ''
+        if link_key:
+            for external in c.execute("SELECT * FROM jobs WHERE identity LIKE 'external:%'"):
+                if external_link_key(json.loads(external['listing'])['url']) == link_key:
+                    row = external
+                    break
     if not row:
         alternatives = c.execute('SELECT * FROM jobs WHERE fallback=?', (fallback,)).fetchall()
         if len(alternatives) == 1:
@@ -238,16 +341,19 @@ def upsert(c,j):
             old_board = board_identity(old['url'])
             new_board = board_identity(j['url'])
             # Distinct recruiting-platform IDs represent distinct openings.
-            if not (old_board and new_board) and not (old.get('requisition') and j.get('requisition')):
+            if not old.get('external_application') and not (old_board and new_board) and not (old.get('requisition') and j.get('requisition')):
                 row = previous
     stamp=now()
     if row:
         old=json.loads(row['listing'])
+        promoted = old.get('external_application', False)
+        if promoted:
+            old = {}
         # A fresh employer response owns these facts, including their absence.
         for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified'):
             old.pop(field,None)
         old.update(j)
-        canonical = ident if board_identity(j['url']) else row['identity']
+        canonical = ident if promoted or board_identity(j['url']) else row['identity']
         c.execute('UPDATE jobs SET identity=?,fallback=?,listing=?,updated=? WHERE id=?',
                   (canonical, fallback, json.dumps(old), stamp, row['id']))
         return row['id'],False
@@ -283,6 +389,8 @@ def save_review(job_id,d):
         expected=old['version'] if old else 0
         if d.get('version')!=expected:return 409,{'error':'Another device changed this review. Refresh before making a decision.'}
         j=json.loads(row['listing']);j['status']=row['status']
+        if j.get('external_application'):
+            return 400, {'error': 'Use application tracking for jobs you add yourself.'}
         if decision=='Approved':
             if d.get('tracking_version')!=row['version']:return 409,{'error':'Application tracking changed. Refresh before approving.'}
             blockers=review_blockers(j)
@@ -910,7 +1018,8 @@ def run_pipeline(trigger='manual'):
             searches = prototype.saved_searches(c)
         cfg = config()
         backup()
-        existing=records(); boards=set()
+        existing = [job for job in records() if not job.get('external_application')]
+        boards = set()
         for j in existing:
             b=board_identity(j['url'])
             if b:boards.add(b)
@@ -1122,7 +1231,7 @@ def run_pipeline(trigger='manual'):
         report['top_new']=sorted(report['top_new'],key=lambda j:-j['score'])[:10]
         report['manual_review'] = sum(
             j.get('queue') in ('Review', 'Location Review') and j.get('availability') != 'Closed'
-            for j in records()
+            for j in records() if not j.get('external_application')
         )
         if time.monotonic() >= deadline and not any('Search time limit' in issue for issue in report['failures']):
             report['failures'].append('Search time limit reached; some checks may have been deferred.')
@@ -1201,6 +1310,9 @@ def search_status():
 def snapshot():
     cfg=config();jobs=records();stamp=dt.datetime.now(dt.timezone.utc)
     for j in jobs:
+        if j.get('external_application'):
+            j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
+            continue
         previous_queue=j.get('queue');previous_application=j.get('application_verified')
         assess(j,cfg)
         if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
@@ -1218,7 +1330,7 @@ def snapshot():
             job['interest'] = interests.get(job['id'])
         runs=[dict(r) for r in c.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 30')]
         for r in runs:r['report']=json.loads(r['report'])
-    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':SEARCH_ACTIVE.is_set(),'firecrawl_configured':bool(cfg['firecrawl_enabled'] and firecrawl_key()),'schedule_hour_utc':cfg['schedule_hour_utc']})
+    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':SEARCH_ACTIVE.is_set(),'external_application_tracking':True,'firecrawl_configured':bool(cfg['firecrawl_enabled'] and firecrawl_key()),'schedule_hour_utc':cfg['schedule_hour_utc']})
 def save_interest(job_id, payload):
     state = payload.get('state')
     version = payload.get('version')
@@ -1261,6 +1373,18 @@ class Handler(BaseHTTPRequestHandler):
         host=self.headers.get('Host','');origin=self.headers.get('Origin','')
         if self.headers.get('X-Jobs-Client')!='dashboard' or (origin and up.urlsplit(origin).netloc!=host):return self.send(403,{'error':'Same-origin dashboard required'})
         if self.path=='/api/run':return self.send(202 if start_run() else 409,{'running':True})
+        if self.path == '/api/applications':
+            try:
+                size = int(self.headers.get('Content-Length', 0))
+                if not 0 < size <= 50000:
+                    raise ValueError('The application form is too large or empty.')
+                payload = json.loads(self.rfile.read(size))
+                status, result = add_external_application(payload)
+            except (json.JSONDecodeError, UnicodeError):
+                return self.send(400, {'error': 'Could not read the application form.'})
+            except ValueError as error:
+                return self.send(400, {'error': str(error)})
+            return self.send(status, result)
         if self.path=='/api/saved-searches':
             try:
                 size = int(self.headers.get('Content-Length',0))

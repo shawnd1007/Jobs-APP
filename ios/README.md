@@ -44,6 +44,10 @@ After the first successful sync, the app can reopen your last connected workspac
 
 For physical iPhone testing, select your development team under **Signing & Capabilities** and run the app on the phone from Xcode. Put the Mac and iPhone on the same trusted network. For native Python, stop the loopback server first and restart with `JOBS_BIND_HOST` set to the Mac’s private LAN IP. For Docker, change the host IP in the Compose port mapping from `127.0.0.1` to that LAN IP and recreate the service. Allow local network access if iOS asks. Enter the Mac’s local hostname, for example `http://your-mac.local:8084`. macOS shows the local hostname under **System Settings → General → Sharing**. The backend has no sign-in. Keep the port off public networks and avoid router port forwarding.
 
+## Track an application you found elsewhere
+
+In the connected workspace, open **My Jobs → Add Application**. A job title, employer and current status are enough. Add a link, notes and dates if you have them. The application appears in the matching stage, with your other follow-ups. Jobs labels the posting details **Added by you** until a search saves an exact employer match.
+
 ## Search and AI
 
 The backend checks Greenhouse, Ashby, Lever, SmartRecruiters and employer-enabled Personio feeds. **Find New Jobs** shows the stage and current board, and reports when some sources could not finish. You can browse while the Mac searches and retry after an incomplete run. It can also extract structured job data from individual employer pages. Some pages need manual review. Job details show evidence from posting duties when they match skills described in the search profile.
