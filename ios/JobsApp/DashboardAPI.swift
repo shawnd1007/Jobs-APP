@@ -509,9 +509,33 @@ struct SavedSearch: Decodable, Identifiable {
 }
 
 struct MatchAlert: Decodable, Identifiable {
+    enum State: String {
+        case current, unavailable, closed, paused, recheck, changed
+
+        var label: String {
+            switch self {
+            case .current: "Current match"
+            case .unavailable: "Posting unavailable"
+            case .closed: "Posting closed"
+            case .paused: "Search paused"
+            case .recheck: "Posting needs a fresh check"
+            case .changed: "No longer matches this search"
+            }
+        }
+    }
+
     let id: Int
     let jobId: Int
     let searchName: String
     let created: String
     let unread: Bool
+    let currentState: String?
+
+    func state(for job: Job?) -> State {
+        guard let job else { return .unavailable }
+        if job.availability == "Closed" { return .closed }
+        let reported = currentState.map { State(rawValue: $0) ?? .unavailable } ?? .current
+        guard reported == .current else { return reported }
+        return job.hasVerifiedPostingLink ? .current : .recheck
+    }
 }

@@ -55,15 +55,25 @@ def serve():
              patch.object(app.PERSONIO_OPENER, 'open', side_effect=fixture_response), \
              patch.object(app.POSTING_OPENER, 'open', side_effect=fixture_response):
             app.init()
+            app.prototype.change_saved_search(app, {'action': 'save', 'criteria': dict(
+                name='Fictional payments search', skills=['Excel'], locations=['United States'],
+                workplace_types=['remote'], salary_min=80000, salary_max=None, enabled=True,
+            )})
             with app.connect() as connection:
+                search_id = app.prototype.saved_searches(connection)[0]['id']
                 for key, title in [('billing', 'Billing Analyst'), ('software', 'Software Engineer')]:
-                    app.upsert(connection, dict(
+                    job = dict(
                         title=title, employer='Fictional Cedar Accounts',
                         description=('Responsibilities:\nReconcile payments using Excel.' if key == 'billing'
                                      else 'Fictional starter listing.'),
                         location='Remote - United States', remote=True, availability='Open',
                         url=f'https://example.com/{key}',
-                    ))
+                    )
+                    if key == 'billing':
+                        job.update(posting_verified=app.now(), salary_min=85000, salary_max=105000,
+                                   salary_currency='USD', salary_period='year', salary_type='base')
+                    job_id, _ = app.upsert(connection, job)
+                    app.prototype.record_match_alerts(connection, job_id, [search_id], app.now())
             with ThreadingHTTPServer(('127.0.0.1', 18085), app.Handler) as server:
                 print('Jobs search fixture ready at http://127.0.0.1:18085', flush=True)
                 try:

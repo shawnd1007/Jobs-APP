@@ -212,14 +212,18 @@ def enrich_snapshot(a, result):
                   sources=source_snapshot(a, result['jobs'], cfg), ai_configured=bool(ai_key(a)))
     with a.connect() as c:
         searches = saved_searches(c)
-        names = {search['id']: search['name'] for search in searches}
         result['saved_searches'] = searches
         result['unread_match_count'] = c.execute('SELECT COUNT(*) FROM match_alerts WHERE unread=1').fetchone()[0]
-        result['match_alerts'] = [dict(r, unread=bool(r['unread']), search_name=names[r['search_id']])
-                                  for r in c.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200')
-                                  if r['search_id'] in names]
+        alert_rows = c.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200').fetchall()
         advice = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM ai_reviews')}
         usage = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
+    searches_by_id = {search['id']: search for search in searches}
+    jobs_by_id = {job['id']: job for job in result['jobs']}
+    result['match_alerts'] = [
+        dict(row, unread=bool(row['unread']), search_name=search['name'],
+             current_state=match_alert_state(a, jobs_by_id.get(row['job_id']), search))
+        for row in alert_rows if (search := searches_by_id.get(row['search_id']))
+    ]
     result['ai_attempts_today'] = usage[0] if usage else 0
     for j in result['jobs']:
         saved = advice.get(j['id'])
@@ -261,6 +265,18 @@ def matching_searches(a, job, searches):
         if high >= search['salary_min'] and (search['salary_max'] is None or low <= search['salary_max']):
             matches.append(search['id'])
     return matches
+
+
+def match_alert_state(a, job, search):
+    if job is None or job.get('identity_review') or job.get('recruitee_offer_changed'):
+        return 'unavailable'
+    if job.get('availability') == 'Closed':
+        return 'closed'
+    if not search['enabled']:
+        return 'paused'
+    if not job.get('posting_link_verified'):
+        return 'recheck'
+    return 'current' if matching_searches(a, job, [search]) else 'changed'
 
 
 def record_match_alerts(c, job_id, search_ids, created):

@@ -96,7 +96,7 @@ final class Workspace {
             let result = try await DashboardAPI.load(at: address)
             guard latestLoad == load, !Task.isCancelled else { return }
             accept(result)
-            await MatchNotifications.deliver(result.dashboard.matchAlerts ?? [], server: address)
+            await MatchNotifications.deliver(for: self)
         } catch {
             guard latestLoad == load, !Task.isCancelled else { return }
             connected = false

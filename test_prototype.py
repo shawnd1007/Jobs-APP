@@ -136,15 +136,44 @@ class PrototypeTests(unittest.TestCase):
             with app.connect() as c:
                 c.execute("UPDATE jobs SET listing=json_set(listing,'$.posting_verified',?) WHERE id=?",
                           ('2000-01-01T00:00:00+00:00', retained['id']))
-            stale = next(item for item in app.snapshot()['jobs'] if item['id'] == retained['id'])
+            stale_dashboard = app.snapshot()
+            stale = next(item for item in stale_dashboard['jobs'] if item['id'] == retained['id'])
             self.assertFalse(stale['posting_link_verified'])
+            self.assertEqual({a['current_state'] for a in stale_dashboard['match_alerts']}, {'recheck'})
+            self.assertEqual(run()['state'], 'success')
+            recovered = app.snapshot()
+            self.assertEqual(recovered['match_alerts'], dashboard['match_alerts'])
+
+            search = dashboard['saved_searches'][0]
+            for version, changes, expected in (
+                (search['version'], {'enabled': False}, 'paused'),
+                (search['version'] + 1, {'salary_min': 130000, 'salary_max': None}, 'changed'),
+                (search['version'] + 2, {}, 'current'),
+            ):
+                self.assertEqual(prototype.change_saved_search(app, {
+                    'action': 'save', 'id': search['id'], 'version': version,
+                    'criteria': dict(search, **changes),
+                })[0], 200)
+                updated_alert = next(item for item in app.snapshot()['match_alerts']
+                                     if item['search_id'] == search['id'])
+                self.assertEqual(updated_alert['current_state'], expected)
+                self.assertTrue(updated_alert['unread'])
+
+            with app.connect() as c:
+                c.execute("UPDATE jobs SET listing=json_set(listing,'$.availability','Closed') WHERE id=?",
+                          (retained['id'],))
+            closed = app.snapshot()
+            self.assertEqual({a['current_state'] for a in closed['match_alerts']}, {'closed'})
+            self.assertEqual([a['id'] for a in closed['match_alerts']],
+                             [a['id'] for a in dashboard['match_alerts']])
+            self.assertEqual(closed['unread_match_count'], 2)
         alerts = dashboard['match_alerts']
         self.assertEqual({item['search_name'] for item in alerts}, {'Austin SQL', 'Second search'})
         self.assertEqual(len(alerts), 2)
         self.assertEqual(dashboard['unread_match_count'], 2)
         self.assertEqual(prototype.change_saved_search(app, {'action': 'read', 'through': alerts[0]['id']})[0], 200)
         self.assertEqual(app.snapshot()['unread_match_count'], 0)
-        search = dashboard['saved_searches'][0]
+        search = app.snapshot()['saved_searches'][0]
         stale = {'action': 'delete', 'id': search['id'], 'version': search['version'] + 1}
         self.assertEqual(prototype.change_saved_search(app, stale)[0], 409)
         self.assertEqual(prototype.change_saved_search(app, dict(stale, version=search['version']))[0], 200)

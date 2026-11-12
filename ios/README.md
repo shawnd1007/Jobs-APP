@@ -82,7 +82,7 @@ Open **Alerts → Saved Searches → New Saved Search**. Give the search a name,
 
 Use **Run Employer Search** to check configured sources now, or enable **Daily Employer Search** in Preferences to check while the Mac service runs. A new listing can match several searches. Each search receives one alert per new listing. Pausing a saved search stops future alerts for it. Editing and resuming apply to future discoveries.
 
-Open **Alerts → Match Alerts** to view the latest 200 matches and mark them read. You can enable iPhone notifications there. The Mac records matches during a search even when the app is closed. The app displays a local notification when it next connects and sees unread matches. Delivery while the app is closed would require push or another delivery channel.
+Open **Alerts → Match Alerts** to view the latest 200 matches and mark them read. You can enable iPhone notifications there. The Mac records matches during a search even when the app is closed. When the app reconnects, it can notify you about unread matches whose posting checks are still current and whose saved searches still match. Closed jobs, expired checks, and paused or changed searches remain visible in the inbox with their status. An unread match can become eligible again after a successful recheck. Delivery while the app is closed would require push or another delivery channel.
 
 ### Test filtering and discovery on a simulator
 
@@ -95,7 +95,7 @@ xcodebuild -project "ios/Shawn's iPhone Job App.xcodeproj" -scheme JobsSearchQA 
   -destination 'platform=iOS Simulator,id=TEST_SIMULATOR_ID' -parallel-testing-enabled NO test
 ```
 
-The suite covers filtering and clearing a sample query, opening connection settings from the sample, filtering a connected list, and discovering and verifying a new Recruitee fixture posting through **Find New Jobs**. Stop the fixture with Ctrl-C when done.
+The suite covers filtering and clearing a sample query, opening connection settings from the sample, filtering a connected list, discovering and verifying a new Recruitee fixture posting through **Find New Jobs**, and keeping match history visible after marking it read. Stop the fixture with Ctrl-C when done.
 
 ### macOS certificate trust
 

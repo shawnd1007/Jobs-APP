@@ -543,7 +543,7 @@ Keep database backups separately from Git. If a real secret is committed, revoke
 
 The SwiftUI app under `ios/` connects to the shared Python backend. **For You** ranks open listings by role fit and match score. **Browse** shows retained listings across runs. **My Jobs** organizes saved listings and application stages.
 
-The Search Profile supports résumé import with a device-local preview, suggested and custom skills, work locations and annual base pay. Saved searches use their own criteria. The backend records verified new matches, and the iPhone can show a local notification after it reconnects and sees unread matches.
+The Search Profile supports résumé import with a device-local preview, suggested and custom skills, work locations and annual base pay. Saved searches use their own criteria. The backend records verified new matches. At sync, the iPhone uses the current posting check and saved-search criteria to decide which unread matches can notify you. Alert history stays visible with its current status. An unread match whose check expired can notify you if a later check succeeds and it still matches. The same iPhone suppresses repeat notifications for that alert.
 
 After a successful connection, the iPhone keeps a protected offline copy of the most recently synced workspace unless you turn it off in Settings. Offline mode supports reading saved jobs, tracking details and reports. Saves and new searches require the Mac. A form stays open with its draft if a network interruption prevents a confirmed save. When changing the server address, the app validates the new workspace before switching.
 

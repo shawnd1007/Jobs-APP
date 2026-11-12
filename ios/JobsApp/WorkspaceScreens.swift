@@ -911,7 +911,7 @@ private struct MatchInbox: View {
                 }
                 if let message { Text(message).foregroundStyle(.secondary) }
             } footer: {
-                Text("The Mac records matches while the app is closed. iPhone notifications appear when the app next checks the Mac.")
+                Text("The Mac records matches while the app is closed. The iPhone can notify you after syncing when a match is still current.")
             }
             Section("Recent Matches") {
                 if alerts.isEmpty { Text("No matching jobs yet.").foregroundStyle(.secondary) }
@@ -923,6 +923,8 @@ private struct MatchInbox: View {
                             Text(alert.searchName).font(.subheadline).foregroundStyle(.tint)
                             Text(jobs[alert.jobId]?.title ?? "Job unavailable")
                                 .fontWeight(alert.unread ? .bold : .regular)
+                            Text(alert.state(for: jobs[alert.jobId]).label)
+                                .font(.caption).foregroundStyle(.secondary)
                             Text(displayTimestamp(alert.created)).font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -949,26 +951,38 @@ private struct MatchInbox: View {
 
 @MainActor
 enum MatchNotifications {
-    static func deliver(_ alerts: [MatchAlert], server: String) async {
+    static func deliver(for workspace: Workspace) async {
+        guard workspace.dashboard?.matchAlerts?.isEmpty == false else { return }
+        let server = workspace.address
         let center = UNUserNotificationCenter.current()
         let status = await center.notificationSettings().authorizationStatus
         guard status == .authorized || status == .provisional else { return }
-        let key = "lastMatchAlert:" + server
-        let cursor = UserDefaults.standard.integer(forKey: key)
-        let fresh = alerts.filter { $0.unread && $0.id > cursor }
-        guard let newest = fresh.first else { return }
+        guard workspace.connected, workspace.address == server, let dashboard = workspace.dashboard,
+              let alerts = dashboard.matchAlerts, let oldestID = alerts.map(\.id).min()
+        else { return }
+
+        let defaults = UserDefaults.standard
+        let key = "notifiedMatchAlerts:" + server
+        let legacyCursor = defaults.integer(forKey: "lastMatchAlert:" + server)
+        let claimed = Set((defaults.array(forKey: key) as? [Int] ?? []).filter { $0 >= oldestID })
+        let jobs = Dictionary(uniqueKeysWithValues: dashboard.jobs.map { ($0.id, $0) })
+        let fresh = alerts.filter {
+            $0.unread && $0.id > legacyCursor && !claimed.contains($0.id)
+                && $0.state(for: jobs[$0.jobId]) == .current
+        }
+        guard let newest = fresh.max(by: { $0.id < $1.id }) else { return }
+        let ids = Set(fresh.map(\.id))
         let content = UNMutableNotificationContent()
         content.title = fresh.count == 1 ? "New match for \(newest.searchName)" : "New job matches"
         content.body = fresh.count == 1 ? "Open Match Alerts to review the listing."
             : "\(fresh.count) new matches for your saved searches."
         content.sound = .default
         let request = UNNotificationRequest(identifier: key + ":\(newest.id)", content: content, trigger: nil)
-        UserDefaults.standard.set(newest.id, forKey: key)
+        defaults.set(Array(claimed.union(ids)), forKey: key)
         do { try await center.add(request) }
         catch {
-            if UserDefaults.standard.integer(forKey: key) == newest.id {
-                UserDefaults.standard.set(cursor, forKey: key)
-            }
+            let latest = Set(defaults.array(forKey: key) as? [Int] ?? [])
+            defaults.set(Array(latest.subtracting(ids)), forKey: key)
         }
     }
 }

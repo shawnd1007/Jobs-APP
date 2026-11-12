@@ -85,3 +85,9 @@ The salary checkpoint passed 75 Python tests and both sequential browser suites 
 Browser Preferences and iPhone Search Profile accept hosted Recruitee career-site slugs. Jobs reads the public XML feed, preserves employer duties and checks the exact posting before sending a saved-search alert. A failed check can retry. A missing offer stays in review. A reused posting link keeps the original tracking and blocks approval until the original offer is available again.
 
 Verified on macOS with 77 Python tests, both sequential browser suites, four iPhone 18 Pro simulator tests and an unsigned device release build. A bounded public check read one feed and verified two exact posting pages. See the [employer board list](EMPLOYER-BOARDS.md) for the public sample and draft PR #2 for hosted checks.
+
+## Keep match notifications current
+
+Match Alerts keeps earlier results and shows when a posting is closed, needs another check, or no longer fits the saved search. The iPhone schedules notifications only for unread matches that still qualify and have a current posting check. A later successful recheck can make an older unread alert eligible again. The phone remembers which alerts it has already notified about.
+
+Verified with 77 Python tests, both sequential browser suites, five iPhone 18 Pro simulator tests, and an unsigned device release build. The simulator verified that marking alerts read preserves both current and unverified history. A stub notification center exercised eligibility, older-alert recovery, scheduling retry, and duplicate suppression. Notification delivery on a signed physical iPhone remains unverified.

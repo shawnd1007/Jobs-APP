@@ -80,6 +80,27 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "applicationFormChecked").firstMatch.exists)
     }
     @MainActor
+    func testMatchInboxKeepsUnverifiedHistoryWhenMarkedRead() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18085"]
+        app.launch()
+
+        let alerts = app.tabBars.buttons["Alerts"]
+        XCTAssertTrue(alerts.waitForExistence(timeout: 15))
+        alerts.tap()
+        app.staticTexts["Match Alerts"].tap()
+        XCTAssertTrue(app.navigationBars["Match Alerts"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Current match"].exists)
+        XCTAssertTrue(app.staticTexts["Posting needs a fresh check"].exists)
+        let markRead = app.buttons["Mark All Read"]
+        markRead.tap()
+        XCTAssertTrue(markRead.waitForNonExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Billing Analyst"].exists)
+        XCTAssertTrue(app.staticTexts["Software Engineer"].exists)
+    }
+
+    @MainActor
     func testTrackingExternalApplicationWithoutLink() {
         continueAfterFailure = false
         let app = XCUIApplication()
