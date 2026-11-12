@@ -23,6 +23,9 @@ struct ForYou: View {
                 && (!workspace.isSample || ($0.score > 0 && ($0.salaryMax ?? .infinity) >= Double(sampleFloor)))
         }
         let ranked = candidates.sorted { first, second in
+            let firstDuties = first.matchedDutyCount ?? 0
+            let secondDuties = second.matchedDutyCount ?? 0
+            if firstDuties != secondDuties { return firstDuties > secondDuties }
             let firstPriority = priority(first)
             let secondPriority = priority(second)
             if firstPriority != secondPriority { return firstPriority > secondPriority }
@@ -222,6 +225,11 @@ private struct JobCard: View {
                 }
             }
             if showScore {
+                if let count = job.matchedDutyCount, count > 0 {
+                    Label(count == 1 ? "1 duty uses a profile skill" : "\(count) duties use profile skills",
+                          systemImage: "list.bullet.clipboard")
+                        .font(.footnote).foregroundStyle(JobsTheme.accent)
+                }
                 if let skills = job.matchedSkills, !skills.isEmpty {
                     Label(skills.prefix(3).joined(separator: " · "), systemImage: "checkmark.circle")
                         .font(.footnote)
@@ -282,8 +290,10 @@ private struct JobCard: View {
 struct JobList: View {
     let workspace: Workspace
     var trackingOnly = false
+    var openEmployerSearch: (() -> Void)? = nil
     @State private var bucket: JobBucket = .all
     @State private var query = ""
+    @FocusState private var filtering: Bool
     @State private var filters = JobFilters()
     @State private var showingFilters = false
 
@@ -306,6 +316,33 @@ struct JobList: View {
         }
 
         List {
+            Section {
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
+                    TextField(trackingOnly ? "Filter tracked jobs" : "Filter listings", text: $query)
+                        .accessibilityIdentifier("listingFilter")
+                        .autocorrectionDisabled()
+                        .submitLabel(.search)
+                        .focused($filtering)
+                        .onSubmit { filtering = false }
+                    if !query.isEmpty {
+                        Button("Clear search", systemImage: "xmark.circle.fill") { query = "" }
+                            .labelStyle(.iconOnly).buttonStyle(.borderless)
+                    }
+                }
+                if let openEmployerSearch {
+                    Button(workspace.isSample ? "Connect for Live Search" : "Find New Jobs",
+                           systemImage: workspace.isSample ? "desktopcomputer" : "arrow.clockwise") {
+                        filtering = false
+                        openEmployerSearch()
+                    }
+                }
+            } footer: {
+                if !trackingOnly {
+                    Text(workspace.isSample ? "Filter the fictional listings in this sample."
+                         : "Filter listings already in Jobs, or find new jobs from employer sources.")
+                }
+            }
             if trackingOnly {
                 Section("Follow-ups") {
                     followUpRow("Due or overdue", icon: "calendar.badge.clock", count: due.count, scope: .due)
@@ -339,7 +376,8 @@ struct JobList: View {
                 if visible.isEmpty {
                     ContentUnavailableView(
                         filters.followUp != .none ? "No follow-ups in this view"
-                            : trackingOnly && bucket == .all && query.isEmpty ? "No saved roles here" : "No listings here",
+                            : !query.isEmpty ? "No matching listings"
+                            : trackingOnly && bucket == .all ? "No saved roles here" : "No listings here",
                         systemImage: trackingOnly ? "bookmark" : "magnifyingglass",
                         description: Text(filters.followUp != .none
                             ? "You can set a date from a job’s application tracking form."
@@ -381,7 +419,7 @@ struct JobList: View {
         .background(JobsTheme.canvas.ignoresSafeArea())
         .navigationTitle(trackingOnly ? "My Jobs" : "Browse")
         .navigationDestination(for: Int.self) { JobDetail(workspace: workspace, jobID: $0) }
-        .searchable(text: $query, prompt: "Role, employer, or location")
+        .scrollDismissesKeyboard(.interactively)
         .refreshable { await workspace.refresh() }
         .toolbar {
             Button("Filters", systemImage: "slider.horizontal.3") { showingFilters = true }
@@ -629,7 +667,7 @@ struct JobDetail: View {
                         }
                     }
                     if let evidence = job.dutyEvidence, !evidence.isEmpty {
-                        Section("Experience Matched to Duties") {
+                        Section("Duties Using Your Profile Skills") {
                             ForEach(evidence, id: \.skill) { item in
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text(item.skill).font(.subheadline.bold())

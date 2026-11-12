@@ -79,7 +79,7 @@ function renderSearchReport(run){
 }
 function reviewReasons(j){
  const reasons=[];
- if(j.location_eligibility!=='Eligible')reasons.push(j.location_reason||'Confirm Florida/Georgia remote eligibility or an approved local office.');
+ if(j.location_eligibility!=='Eligible')reasons.push(j.location_reason||'Confirm the employer can hire in one of your preferred locations.');
  if(!(j.salary_currency==='USD'&&j.salary_period==='year'&&j.salary_type==='base'&&j.salary_max))reasons.push('Base salary has not been independently confirmed.');
  if(j.queue!=='Confirmed')reasons.push(j.application_evidence||'Some employer or application checks are incomplete.');
  if(j.history_confirmation||j.status==='Needs Verification')reasons.push('Confirm whether this specific job has already been applied to.');
@@ -88,7 +88,7 @@ function reviewReasons(j){
 function reviewPanel(j){
  const checks=j.review_checks||{},isOpen=false,blocked=j.review_blockers||[];
  return `<details class="review-panel" ${isOpen?'open':''}><summary>Review & approval · ${esc(j.review_decision)}</summary><div class="review-reasons"><strong>What to check</strong><ul>${reviewReasons(j).map(s=>`<li>${esc(s)}</li>`).join('')||'<li>Employer checks passed. Confirm fit and application history before approving.</li>'}</ul></div><p class="why">Read the employer posting and the match/gaps above. Your approval is saved separately from automatic verification.</p>${[
- ['location','I checked: remote work is eligible for FL/GA, or the office is in Jacksonville / the Buford area.'],['salary','I checked: the published base salary meets my saved salary policy; bonuses and OTE do not count.'],['application','I checked: this exact employer job is open and has an application available.'],['history','I checked: we have not already applied to this specific job.']
+ ['location','The location and work setting meet my saved preferences.'],['salary','I checked: the published base salary meets my saved salary policy; bonuses and OTE do not count.'],['application','I checked: this exact employer job is open and has an application available.'],['history','I checked: we have not already applied to this specific job.']
  ].map(([key,label])=>`<label class="check"><input type="checkbox" name="check_${key}" ${checks[key]?'checked':''}><span>${esc(label)}</span></label>`).join('')}<label>Reviewed by (optional)<input name="reviewer" maxlength="120" value="${esc(j.review_reviewer)}" placeholder="Your name"></label><label>Review notes <span class="hint">Explain any missing pay, location or application information you confirmed.</span><textarea name="review_note" placeholder="What I checked, remaining questions, or why this should be held or dismissed…">${esc(j.review_note)}</textarea></label>${blocked.length?`<p class="blocked">Approval blocked: ${esc(blocked.join(' '))}</p>`:''}<div class="decision-buttons"><button class="btn approve" data-decision="Approved" ${blocked.length?'disabled':''}>Approve for application</button><button class="btn secondary" data-decision="Hold">Hold / need information</button><button class="btn dismiss" data-decision="Dismissed">Dismiss</button>${j.review_decision!=='Pending'?'<button class="btn secondary" data-decision="Pending">Send back to review</button>':''}</div><p class="hint">Approval moves an unapplied job to Ready to Apply. It does not submit an application.</p>${j.review_updated?`<p class="hint">Last review: ${esc(date(j.review_updated))}${j.review_reviewer?' · '+esc(j.review_reviewer):''}</p>`:''}<div class="review-message" role="status"></div></details>`;
 }
 function trackingPanel(j){return `<details class="tracking-panel"><summary>Application tracking · ${esc(j.status)}</summary><label>Application status<select name="status">${state.statuses.map(s=>`<option ${s===j.status?'selected':''}>${esc(s)}</option>`).join('')}</select></label><label>Application date<input name="application_date" type="date" value="${esc(j.application_date)}"></label><label>Follow-up date<input name="follow_up" type="date" value="${esc(j.follow_up)}"></label><label>Application notes<textarea name="notes">${esc(j.notes)}</textarea></label><button class="btn save">Save tracking</button><div class="saved" role="status"></div></details>`;}
@@ -100,6 +100,9 @@ function listingBadges(job){
  if(!job.salary_text || /salary not published/i.test(job.salary_text))labels.push('Salary Not Published');
  if(/salary not yet verified/i.test(job.salary_text??''))labels.push('Pay Needs Verification');
  if(job.availability==='Needs Verification')labels.push('Needs Verification');
+ if(Number.isInteger(job.matched_duty_count) && job.matched_duty_count>0){
+  labels.push(job.matched_duty_count===1?'1 duty uses a profile skill':`${job.matched_duty_count} duties use profile skills`);
+ }
  return labels.map(label=>`<span class="tag">${label}</span>`).join('');
 }
 function filter(){

@@ -33,6 +33,7 @@ struct Job: Decodable, Identifiable {
     }
 
     var dutyEvidence: [DutyEvidence]? = nil
+    var matchedDutyCount: Int? = nil
     var scoreBreakdown: ScoreBreakdown? = nil
     var applicationVerified: String? = nil
     var interest: Interest?

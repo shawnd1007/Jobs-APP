@@ -46,6 +46,14 @@ def connect():
     c=sqlite3.connect(DB, timeout=30, factory=Connection); c.row_factory=sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON'); c.execute('PRAGMA journal_mode=WAL'); return c
 def clean(s): return html.unescape(re.sub('<[^>]+>', ' ', s or '')).strip()
+
+def posting_text(value):
+    """Keep section and bullet boundaries from employer HTML."""
+    markup = html.unescape(value or '')
+    markup = re.sub(r'<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', '', markup, flags=re.I | re.S)
+    markup = re.sub(r'</?(?:h[1-6]|p|div|li|ul|ol|section|br)\b[^>]*>', '\n', markup, flags=re.I)
+    return '\n'.join(line for raw in clean(markup).splitlines() if (line := ' '.join(raw.split())))
+
 def norm(s): return re.sub(r'[^a-z0-9]+',' ',s.lower()).strip()
 BOARD_HOSTS = {
     'boards.greenhouse.io': 'greenhouse', 'job-boards.greenhouse.io': 'greenhouse',
@@ -296,33 +304,86 @@ def discovery_locations(cfg):
         return ('Eligible', 'Review')
     return ('Eligible',)
 
+def profile_candidate(job, cfg, report):
+    role_match = job['category'] != 'Other / Review'
+    location_match = job['location_eligibility'] in discovery_locations(cfg)
+    if role_match and not location_match:
+        report['skipped_location'] = report.get('skipped_location', 0) + 1
+    return ((role_match or job['matched_duty_count'] >= 2) and location_match
+            and job['queue'] != 'Excluded' and job['availability'] != 'Closed')
+
+
+RESPONSIBILITY_HEADINGS = frozenset({
+    'responsibilities', 'responsibilities include', 'key responsibilities', 'your responsibilities',
+    'duties', 'key duties', 'what you will do', 'what you ll do', 'what you do',
+    'what you will be doing', 'what you ll be doing', 'your impact',
+})
+NON_DUTY_HEADINGS = frozenset({
+    'qualifications', 'required qualifications', 'minimum qualifications', 'basic qualifications',
+    'preferred qualifications', 'requirements', 'job requirements', 'skills and experience',
+    'what you bring', 'what you will bring', 'what you ll bring', 'who you are', 'nice to have',
+    'what we are looking for', 'what we re looking for', 'who we are looking for',
+    'about us', 'about the company', 'company description', 'additional information',
+    'benefits', 'compensation', 'what we offer', 'equal opportunity',
+})
+DUTY_ACTION = re.compile(
+    r'^(?:(?:you (?:will|would)|this role will)\s+)?'
+    r'(?:analy[sz]e|audit|build|coordinate|create|design|develop|document|handle|implement|'
+    r'investigate|lead|maintain|manage|monitor|own|prepare|process|reconcile|report|resolve|'
+    r'review|support|track|train|troubleshoot|validate|verify)\b', re.I
+)
+
+def employer_duties(description):
+    duties_section = False
+    excluded_section = False
+    for raw in re.split(r'[\r\n•]+', description):
+        line = re.sub(r'^(?:[-–*]+|\d+[.)])\s*', '', raw.strip())
+        heading, colon, tail = line.partition(':')
+        label = norm(heading)
+        if label in RESPONSIBILITY_HEADINGS or label in NON_DUTY_HEADINGS:
+            duties_section = label in RESPONSIBILITY_HEADINGS
+            excluded_section = not duties_section
+            line = tail.strip() if colon else ''
+        if excluded_section:
+            continue
+        for duty in re.split(r'(?<=[.!?;])\s+', line):
+            if not duty or re.search(
+                r'\b(?:required|qualifications|years of experience|proficien(?:cy|t)|preferred|'
+                r'experience (?:in|with|using)|you (?:have|bring)|no (?:experience|knowledge))\b', duty, re.I
+            ):
+                continue
+            if DUTY_ACTION.match(duty) or (duties_section and re.match(r'^[A-Za-z]+ing\b', duty)):
+                yield ' '.join(duty.split())
 
 def experience_evidence(description, profile, skills):
-    """Find explicit résumé terms in sentences that describe actual work."""
+    """Quote employer duties that use selected skills also mentioned in the profile."""
     if not profile or not skills:
         return []
-    profile = clean(profile).lower()
-    def mentioned(term, text):
-        return term in text and bool(re.search(r'(?<![\w+#])' + re.escape(term) + r'(?![\w+#])', text))
-
-    supported = [skill for skill in skills if len(skill) > 2 and mentioned(skill, profile)]
+    profile_clauses = [clause for clause in re.split(r'[\n;]+|(?<=[.!?])\s+', clean(profile)) if not re.search(
+        r'\b(?:learning|want to learn|plan to learn|no (?:prior )?experience|never (?:used|worked with)|'
+        r'not (?:familiar|experienced)|new to)\b', clause, re.I
+    )]
+    supported = {}
+    for skill in skills:
+        pattern = re.compile(r'(?<![\w+#])' + re.escape(skill) + r'(?![\w+#])', re.I)
+        if any(pattern.search(clause) for clause in profile_clauses):
+            supported[skill] = pattern
     if not supported:
         return []
-    lines = re.split(r'[\r\n•]+|(?<=[.!?])\s+', description)
     evidence = {}
-    for line in lines:
-        line = ' '.join(line.split())
-        lower = line.lower()
-        if not re.search(r'\b(?:analy[sz]e|audit|build|coordinate|create|design|develop|handle|implement|investigate|lead|maintain|manage|monitor|own|prepare|process|reconcile|report|resolve|review|support|track|validate|verify|work)\b', lower):
-            continue
-        if re.search(r'\b(?:required|qualifications|years of experience|proficien(?:cy|t)|preferred|you (?:have|bring))\b', lower):
-            continue
-        for term in supported:
-            if mentioned(term, lower):
-                evidence.setdefault(term, line[:240])
-        if len(evidence) >= 8:
-            break
-    return [{'skill': skill, 'duty': duty} for skill, duty in list(evidence.items())[:8]]
+    for duty in dict.fromkeys(employer_duties(description)):
+        for skill, pattern in supported.items():
+            if (match := pattern.search(duty)) and match.end() <= 240:
+                evidence.setdefault(skill, []).append(duty[:240])
+
+    # Give each skill one quote and prefer a different duty when several skills overlap.
+    used = set()
+    matches = []
+    for skill, duties in sorted(evidence.items(), key=lambda item: len(item[1]))[:8]:
+        duty = next((candidate for candidate in duties if norm(candidate) not in used), duties[0])
+        used.add(norm(duty))
+        matches.append({'skill': skill, 'duty': duty})
+    return matches
 
 def qualification_checks(description):
     checks = []
@@ -373,13 +434,14 @@ def assess(j,cfg):
         reasons.append("Selected skills: " + ", ".join(matched_skills))
     reasons.extend(group['label'] for group in matched_groups)
     evidence = experience_evidence(desc, cfg.get('profile', ''), matched_skills)
+    matched_duty_count = len({norm(item['duty']) for item in evidence})
     gaps = qualification_checks(desc) if desc.strip() else [
         'Employer description missing. Review the posting for duties and requirements.'
     ]
     j.update(
         category=category, score=score, eligibility=eligible, score_breakdown=breakdown,
         matched_skills=matched_skills, matched_groups=[group['label'] for group in matched_groups],
-        match_gaps=gaps, duty_evidence=evidence,
+        match_gaps=gaps, duty_evidence=evidence, matched_duty_count=matched_duty_count,
         explanation=(
             f"Profile fit {score}/100. Target role {breakdown['target_role']}/45, "
             f"selected skills {breakdown['selected_skills']}/30, "
@@ -398,7 +460,7 @@ def board_jobs(platform,board):
         data=fetch('https://boards-api.greenhouse.io/v1/boards/'+up.quote(board,safe='')+'/jobs?content=true')
         out=[]
         for x in data.get('jobs',[]):
-            out.append({'title':x['title'],'employer':board,'url':x['absolute_url'],'location':x.get('location',{}).get('name',''),'description':clean(x.get('content','')),'posted':x.get('updated_at',''),'remote': 'remote' in x.get('location',{}).get('name','').lower(),'availability':'Open','last_verified':now(),'source':'Greenhouse public live board','requisition':str(x['id']),'application_evidence':'Listed in employer live board with absolute application URL','salary_text':'Salary not yet verified'})
+            out.append({'title':x['title'],'employer':board,'url':x['absolute_url'],'location':x.get('location',{}).get('name',''),'description':posting_text(x.get('content')),'posted':x.get('updated_at',''),'remote': 'remote' in x.get('location',{}).get('name','').lower(),'availability':'Open','last_verified':now(),'source':'Greenhouse public live board','requisition':str(x['id']),'application_evidence':'Listed in employer live board with absolute application URL','salary_text':'Salary not yet verified'})
         return out
     if platform=='ashby':
         data=fetch('https://api.ashbyhq.com/posting-api/job-board/'+up.quote(board,safe='')+'?includeCompensation=true');out=[]
@@ -416,7 +478,12 @@ def board_jobs(platform,board):
         data=fetch('https://api.lever.co/v0/postings/'+up.quote(board,safe='')+'?mode=json');out=[]
         for x in data:
             loc=x.get('categories',{}).get('location',''); salary=x.get('salaryRange') or {}
-            j={'title':x['text'],'employer':board,'url':x['applyUrl'],'location':loc,'description':x.get('descriptionPlain','')+' '+clean(' '.join(z.get('content','') for z in x.get('lists',[]))),'posted':dt.datetime.fromtimestamp(x['createdAt']/1000,dt.timezone.utc).isoformat() if x.get('createdAt') else '', 'remote':x.get('workplaceType')=='remote','availability':'Open','last_verified':now(),'source':'Lever public live board','requisition':x['id'],'application_evidence':'Employer live posting and applyUrl','salary_text':x.get('salaryDescriptionPlain') or 'Salary Not Published'}
+            sections = [x.get('descriptionPlain') or '']
+            for section in x.get('lists', []):
+                sections.extend([posting_text(section.get('text')), posting_text(section.get('content'))])
+            if x.get('additionalPlain'):
+                sections.extend(['Additional information', x['additionalPlain']])
+            j={'title':x['text'],'employer':board,'url':x['applyUrl'],'location':loc,'description':'\n'.join(filter(None, sections)),'posted':dt.datetime.fromtimestamp(x['createdAt']/1000,dt.timezone.utc).isoformat() if x.get('createdAt') else '', 'remote':x.get('workplaceType')=='remote','availability':'Open','last_verified':now(),'source':'Lever public live board','requisition':x['id'],'application_evidence':'Employer live posting and applyUrl','salary_text':x.get('salaryDescriptionPlain') or 'Salary Not Published'}
             if salary.get('currency')=='USD' and salary.get('interval')=='per-year':j.update(salary_min=salary.get('min'),salary_max=salary.get('max'),salary_currency='USD',salary_period='year',salary_type='base')
             out.append(j)
         return out
@@ -467,8 +534,11 @@ def smartrecruiters_listing(board, item, detail_url=None):
     if location.get('hybrid'):
         address = 'Hybrid · ' + address
     sections = (item.get('jobAd') or {}).get('sections') or {}
-    text = '\n'.join(clean((sections.get(key) or {}).get('text')) for key in
-                     ('jobDescription', 'qualifications', 'additionalInformation'))
+    text = posting_text((sections.get('jobDescription') or {}).get('text'))
+    for field, heading in (('qualifications', 'Qualifications'), ('additionalInformation', 'Additional information')):
+        section_text = posting_text((sections.get(field) or {}).get('text'))
+        if section_text:
+            text = '\n'.join(filter(None, (text, heading, section_text)))
     fallback_url = f'https://jobs.smartrecruiters.com/{board}/{posting}'
     link = item.get('applyUrl') or item.get('postingUrl') or fallback_url
     if identity(link) != identity(fallback_url):
@@ -605,7 +675,7 @@ def generic_posting(url,report,key):
     if expires and expires[:10]<now()[:10]:availability='Closed'
     apply_links=[up.urljoin(final,s) for s in parser.links if re.search(r'apply|application',s,re.I)]
     if availability!='Closed' and apply_links and not re.search(r'(no longer accepting|position has been filled|job (?:is )?(?:closed|expired))',clean(raw),re.I):availability='Open'
-    j={'title':x.get('title',''),'employer':employer,'url':final,'location':'; '.join(locations),'remote':x.get('jobLocationType')=='TELECOMMUTE','description':clean(x.get('description','')),'posted':x.get('datePosted',''),'availability':availability,'last_verified':now(),'source':'Live employer JobPosting structured data','application_evidence':'Unique JobPosting, employer domain relationship and application link' if availability=='Open' else 'Application availability requires review','salary_text':'Salary Not Published'}
+    j={'title':x.get('title',''),'employer':employer,'url':final,'location':'; '.join(locations),'remote':x.get('jobLocationType')=='TELECOMMUTE','description':posting_text(x.get('description')),'posted':x.get('datePosted',''),'availability':availability,'last_verified':now(),'source':'Live employer JobPosting structured data','application_evidence':'Unique JobPosting, employer domain relationship and application link' if availability=='Open' else 'Application availability requires review','salary_text':'Salary Not Published'}
     salary=x.get('baseSalary') or {};value=salary.get('value') or {}
     if salary.get('currency')=='USD' and value.get('unitText')=='YEAR':j.update(salary_min=value.get('minValue'),salary_max=value.get('maxValue') or value.get('value'),salary_currency='USD',salary_period='year',salary_type='base',salary_text=json.dumps(salary))
     return j
@@ -738,14 +808,8 @@ def run_pipeline(trigger='manual'):
                         if ident in known_identities:continue
                         j = assess(hydrate_board_listing(board, j), cfg)
                         matched = prototype.matching_searches(service(), j, searches)
-                        role_match = j['category'] != 'Other / Review'
-                        transferable_fit = len(j['duty_evidence']) >= 2
-                        location_match = j['location_eligibility'] in discovery_locations(cfg)
-                        if not matched:
-                            if role_match and not location_match:
-                                report['skipped_location'] = report.get('skipped_location', 0) + 1
-                            if not (role_match or transferable_fit) or not location_match or j['queue'] == 'Excluded':
-                                continue
+                        if not matched and not profile_candidate(j, cfg, report):
+                            continue
                         candidates[ident] = (j, matched)
                 report['log'].append(platform+'/'+board+': '+str(len(live))+' live postings')
             except Exception as e:
@@ -775,7 +839,7 @@ def run_pipeline(trigger='manual'):
                     continue
                 j = assess(j, cfg)
                 matched = prototype.matching_searches(service(), j, searches)
-                if not matched and (j['location_eligibility'] != 'Eligible' or j['queue'] == 'Excluded'):
+                if not matched and not profile_candidate(j, cfg, report):
                     continue
                 if ident in candidates:
                     report['duplicates'] += 1
@@ -787,7 +851,7 @@ def run_pipeline(trigger='manual'):
             finally:
                 time.sleep(cfg['request_delay_seconds'])
         ranked = sorted(candidates.values(), key=lambda item: (
-            item[0]['queue'] == 'Confirmed', bool(item[1]), len(item[0]['duty_evidence']), item[0]['score'],
+            item[0]['queue'] == 'Confirmed', bool(item[1]), item[0]['matched_duty_count'], item[0]['score'],
             item[0].get('posted') or '',
         ), reverse=True)
         limit = cfg['max_new_candidates']

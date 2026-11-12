@@ -10,6 +10,9 @@ const assert=require('node:assert/strict');
  browser=await chromium.launch({headless:true,...(process.platform==='win32'?{channel:'msedge'}:{})});const page=await browser.newPage({viewport:{width:390,height:844}});page.setDefaultTimeout(10000);let errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.goto('http://127.0.0.1:18084');await page.waitForSelector('article[data-id="1"]');
  const card=id=>page.locator(`article[data-id="${id}"]`),tab=key=>page.locator(`[data-bucket="${key}"]`);
+ await card(1).getByText('2 duties use profile skills',{exact:true}).waitFor();
+ await card(1).getByText('Experience matched to duties',{exact:true}).click();
+ await card(1).getByText('Reconcile sample accounts in Excel.',{exact:false}).first().waitFor();
  assert.equal(await card(4).count(),0,'Out-of-area job entered Review Inbox');
  await card(1).locator('.review-panel summary').click();await card(1).locator('[data-decision="Approved"]').click();await card(1).locator('.review-message').filter({hasText:'Check location'}).waitFor();
  for(const key of ['location','salary','application','history'])await card(1).locator(`[name="check_${key}"]`).check();
@@ -23,6 +26,6 @@ const assert=require('node:assert/strict');
  await tab('review').click();await card(3).locator('.review-panel summary').click();await card(3).locator('[data-decision="Dismissed"]').click();await page.locator('#notice').filter({hasText:'Dismissed — retained'}).waitFor();await tab('archive').click();await card(3).waitFor();
  await tab('all').click();await card(4).locator('.review-panel summary').click();assert.equal(await card(4).locator('[data-decision="Approved"]').isDisabled(),true);
  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth);assert.equal(overflow,false);assert.deepEqual(errors,[]);
- console.log(JSON.stringify({approvalChecklist:true,readyBucket:true,approvalPersistsAfterReload:true,appliedBucket:true,interviewBucket:true,holdNotesPersist:true,dismissRetainsHistory:true,outOfAreaBlocked:true,mobileOverflow:overflow,errors}));
+ console.log(JSON.stringify({dutyEvidence:true,approvalChecklist:true,readyBucket:true,approvalPersistsAfterReload:true,appliedBucket:true,interviewBucket:true,holdNotesPersist:true,dismissRetainsHistory:true,outOfAreaBlocked:true,mobileOverflow:overflow,errors}));
  }finally{if(browser)await browser.close();try{await fetch('http://127.0.0.1:18084/qa-stop',{method:'POST'});}catch{}setTimeout(()=>server.kill(),1500).unref();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -251,7 +251,13 @@ private struct WorkspaceView: View {
             }
             .tabItem { Label("For You", systemImage: "sparkles") }
             .tag(Tab.forYou)
-            NavigationStack { JobList(workspace: current).workspaceNotice(current) }
+            NavigationStack {
+                JobList(workspace: current, openEmployerSearch: {
+                    if current.isSample { editingServer = true }
+                    else { selectedTab = .search }
+                })
+                .workspaceNotice(current)
+            }
                 .tabItem { Label("Browse", systemImage: "magnifyingglass") }
                 .tag(Tab.browse)
             NavigationStack { JobList(workspace: current, trackingOnly: true).workspaceNotice(current) }

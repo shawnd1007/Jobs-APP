@@ -9,6 +9,22 @@ struct SearchScreen: View {
     var body: some View {
         List {
             if let dashboard = workspace.dashboard {
+                Section {
+                    Button("Run Employer Search", systemImage: "magnifyingglass") {
+                        Task { await workspace.startSearch() }
+                    }
+                    .disabled(!workspace.connected || dashboard.running || workspace.startingSearch || workspace.saving)
+                    if workspace.connected && (dashboard.running || workspace.startingSearch) {
+                        ProgressView("Checking employer sources…")
+                    } else if !workspace.connected {
+                        Text("Reconnect to your Mac to find new jobs.").foregroundStyle(.secondary)
+                    }
+                    if let error = workspace.searchError { Text(error).foregroundStyle(.red) }
+                } header: {
+                    Text("Find New Jobs")
+                } footer: {
+                    Text("The Mac checks configured employer sources and updates this workspace.")
+                }
                 if let searches = dashboard.savedSearches {
                     Section("Your matches") {
                         NavigationLink {
@@ -22,18 +38,6 @@ struct SearchScreen: View {
                             LabeledContent("Saved Searches", value: String(searches.count))
                         }
                     }
-                }
-                Section {
-                    Button("Run Employer Search", systemImage: "magnifyingglass") {
-                        Task { await workspace.startSearch() }
-                    }
-                    .disabled(!workspace.connected || dashboard.running || workspace.startingSearch || workspace.saving)
-                    if workspace.connected && (dashboard.running || workspace.startingSearch) {
-                        ProgressView("Checking employer sources…")
-                    }
-                    if let error = workspace.searchError { Text(error).foregroundStyle(.red) }
-                } footer: {
-                    Text("The Mac checks configured employer sources and updates this workspace.")
                 }
                 Section("Daily Search") {
                     LabeledContent("Schedule", value: dashboard.preferences.scheduleEnabled

@@ -10,11 +10,18 @@ app.SEED=Path(__file__).resolve().parent/'fixtures'/'seed.html'
 with tempfile.TemporaryDirectory(prefix='review-qa-',dir=app.DATA) as folder:
     original_data=app.DATA.resolve();target=Path(folder).resolve()
     if not target.is_relative_to(original_data):raise RuntimeError('QA folder outside workspace')
-    app.DATA=target;app.DB=target/'qa.sqlite3';app.init()
+    app.DATA=target;app.DB=target/'qa.sqlite3'
+    (target/'preferences.json').write_text(json.dumps({
+        'profile': 'Fictional QA profile used Excel and SQL for reporting.',
+        'preferred_skills': ['Excel', 'SQL'],
+    }), encoding='utf-8')
+    app.init()
     with app.connect() as c:
         for j in app.records():
             if j['id']<=4:
                 j.update(employer='QA Fixture '+str(j['id']),title='Financial Analyst QA '+str(j['id']),url='https://example.com/qa-'+str(j['id']),location='Remote - United States' if j['id']!=4 else 'Remote - Mexico',remote=True,availability='Open',queue='Review',score=80,description='Isolated test record; no employment claim.',explanation='Test salary and location review.',salary_text='Salary not yet verified',application_evidence='QA application evidence only.')
+                if j['id']==1:
+                    j['description']='Responsibilities:\nReconcile sample accounts in Excel.\nBuild SQL reports.'
             else:j['availability']='Closed'
             c.execute('UPDATE jobs SET listing=? WHERE id=?',(json.dumps(j),j['id']))
     class QAHandler(app.Handler):

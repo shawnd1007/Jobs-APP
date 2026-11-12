@@ -1,3 +1,4 @@
+"""Regression tests with fictional listings, profiles, and tracking records."""
 import json
 import tempfile
 import unittest
@@ -13,12 +14,14 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(len(app.records()),50);app.init();self.assertEqual(len(app.records()),50)
  def test_tracking_survives_closed_and_reopened(self):
   j=app.records()[0]
+  note='Fictional fixture application note'
+  applied_on='2030-01-02'
   with app.connect() as c:
-   c.execute("UPDATE tracking SET status='Applied',notes='Wife applied',application_date='2026-11-06' WHERE job_id=?",(j['id'],))
+   c.execute("UPDATE tracking SET status='Applied',notes=?,application_date=? WHERE job_id=?",(note,applied_on,j['id']))
    j['availability']='Closed';app.upsert(c,j)
-  current=app.records()[0];self.assertEqual(current['status'],'Applied');self.assertEqual(current['notes'],'Wife applied');self.assertEqual(current['availability'],'Closed')
+  current=app.records()[0];self.assertEqual(current['status'],'Applied');self.assertEqual(current['notes'],note);self.assertEqual(current['availability'],'Closed')
   with app.connect() as c:j['availability']='Open';app.upsert(c,j)
-  self.assertEqual(app.records()[0]['application_date'],'2026-11-06');self.assertEqual(len(app.records()),50)
+  self.assertEqual(app.records()[0]['application_date'],applied_on);self.assertEqual(len(app.records()),50)
  def test_tracking_parameters_deduplicate(self):
   j=app.records()[0];j['url']+='?utm_source=test#apply'
   with app.connect() as c:_,added=app.upsert(c,j)
@@ -81,6 +84,42 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(app.qualification_checks('degree or equivalent work experience'),
                    ['Posting mentions a degree and equivalent experience.'])
 
+ def test_greenhouse_description_keeps_qualifications_out_of_duties(self):
+  posting = {'id': 41, 'title': 'Operations Specialist', 'absolute_url': 'https://job-boards.greenhouse.io/example/jobs/41',
+             'content': ('&lt;h3&gt;Responsibilities&lt;/h3&gt;'
+                         '&lt;ul&gt;&lt;li&gt;Reconcile payments using Excel&lt;/li&gt;'
+                         '&lt;li&gt;Build reports using Python&lt;/li&gt;&lt;/ul&gt;'
+                         '&lt;h3&gt;Qualifications&lt;/h3&gt;&lt;p&gt;Build dashboards with SQL&lt;/p&gt;')}
+  cfg = app.config()
+  cfg.update(preferred_skills=['Excel', 'SQL', 'Python'], profile='Worked with Excel and SQL. Learning Python.')
+  with patch.object(app, 'fetch', return_value={'jobs': [posting]}):
+   job, = app.board_jobs('greenhouse', 'example')
+  app.assess(job, cfg)
+  self.assertEqual(job['matched_duty_count'], 1)
+  self.assertEqual(job['duty_evidence'], [{'skill': 'excel', 'duty': 'Reconcile payments using Excel'}])
+  self.assertEqual(set(job['matched_skills']), {'excel', 'sql', 'python'})
+
+ def test_lever_list_labels_distinguish_duties_from_requirements(self):
+  posting = {'id': 'test-41', 'text': 'Systems Specialist', 'applyUrl': 'https://jobs.lever.co/example/test-41/apply',
+             'descriptionPlain': 'Join our team.', 'additionalPlain': 'Support Azure customers in a future role.',
+             'lists': [{'text': 'What you’ll do', 'content': '<li>Maintain systems using Linux</li>'},
+                       {'text': 'What you bring', 'content': '<li>Manage deployments with Azure</li>'}]}
+  cfg = app.config()
+  cfg.update(preferred_skills=['Linux', 'Azure'], profile='Used Linux and Azure for systems operations.')
+  with patch.object(app, 'fetch', return_value=[posting]):
+   job, = app.board_jobs('lever', 'example')
+  app.assess(job, cfg)
+  self.assertEqual(job['duty_evidence'], [{'skill': 'linux', 'duty': 'Maintain systems using Linux'}])
+
+ def test_two_skills_in_one_duty_are_not_two_distinct_duties(self):
+  cfg = app.config()
+  cfg.update(preferred_skills=['Excel', 'SQL'], profile='Used Excel and SQL in finance operations.')
+  job = app.assess({'description': 'Build reports using Excel and SQL. Build reports using Excel and SQL.'}, cfg)
+  self.assertEqual(len(job['duty_evidence']), 2)
+  self.assertEqual(job['matched_duty_count'], 1)
+  job = app.assess({'description': 'Build reports using Excel and SQL. Reconcile payments using Excel.'}, cfg)
+  self.assertEqual(job['matched_duty_count'], 2)
+
  def test_history_import_previews_matches_and_preserves_manual_tracking(self):
   import csv
   from import_history import import_history
@@ -108,7 +147,7 @@ class PersistenceTests(unittest.TestCase):
   j={'title':'Financial Analyst','location':'Remote United States','remote':True,'description':'Must reside in California only','availability':'Open','salary_min':85000,'salary_max':100000,'salary_currency':'USD','salary_period':'year','salary_type':'base'}
   self.assertEqual(app.assess(j,app.config())['eligibility'],'Review')
  def test_below_floor_excluded(self):
-  j={'title':'Financial Analyst','location':'Jacksonville','description':'Excel financial','availability':'Open','salary_max':65000,'salary_currency':'USD','salary_period':'year','salary_type':'base'}
+  j={'title':'Financial Analyst','location':'Remote - United States','description':'Excel financial','availability':'Open','salary_max':65000,'salary_currency':'USD','salary_period':'year','salary_type':'base'}
   self.assertEqual(app.assess(j,app.config())['queue'],'Excluded')
  def test_original_unverified(self):self.assertTrue(all(j['availability']=='Needs Verification' for j in app.records()))
  def test_backup(self):
@@ -152,6 +191,33 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(report['deferred_candidates'], 1)
   self.assertIn('zebra', [job['employer'] for job in app.records()])
   self.assertNotIn('aardvark', [job['employer'] for job in app.records()])
+
+ def test_search_ranks_distinct_duties_and_filters_weak_direct_candidates(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(categories=['Financial Analyst'], preferred_skills=['Excel', 'SQL', 'Python'],
+             profile='Used Excel, SQL and Python in finance operations.', skill_groups=[],
+             target_locations=[], workplace_types=[], max_new_candidates=1, generic_urls_per_run=2,
+             additional_boards={'ashby': ['fictional']},
+             additional_employer_urls=['https://example.com/weak', 'https://example.com/transferable'])
+  board_job = dict(title='Financial Analyst', employer='Fictional Board', location='Remote - United States',
+                   description='Qualifications:\nExperience with Excel, SQL and Python.', availability='Open',
+                   url='https://jobs.ashbyhq.com/fictional/req-1/application')
+  def board(platform, slug):
+   return [board_job] if (platform, slug) == ('ashby', 'fictional') else []
+  def direct(url, *_):
+   description = ('Build dashboards using Excel and SQL.' if url.endswith('/weak')
+                  else 'Responsibilities:\nBuild SQL reports.\nReconcile payments in Excel.')
+   return dict(board_job, title='Operations Specialist', employer='Fictional Direct', url=url, description=description)
+  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=board), \
+       patch.object(app, 'generic_posting', side_effect=direct):
+   app.LOCK.acquire()
+   report = app.run_pipeline()
+  self.assertEqual(report['new_review'], 1)
+  self.assertEqual(report['deferred_candidates'], 1)
+  chosen, = (job for job in app.records() if job['employer'] == 'Fictional Direct')
+  self.assertTrue(chosen['url'].endswith('/transferable'))
+  self.assertEqual(chosen['matched_duty_count'], 2)
+  self.assertEqual(chosen['queue'], 'Review')
 
  def test_smartrecruiters_checks_saved_search_titles_before_general_postings(self):
   _, cfg = self.pipeline_fixture()
@@ -242,9 +308,13 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(len(app.records()), 50)
 
  def test_only_requested_locations_pass(self):
-  cases=[('London, UK',True,'Rejected'),('Remote - Colombia',True,'Rejected'),('Texas',True,'Rejected'),('Bangalore, India',False,'Rejected'),('Atlanta, GA',False,'Rejected'),('Duluth, MN',False,'Review'),('Jacksonville, NC',False,'Review'),('Jacksonville, FL',False,'Eligible'),('Buford, GA Hybrid',False,'Eligible'),('Suwanee, Georgia',False,'Eligible'),('Remote - United States',True,'Eligible'),('U.S. Remote',True,'Eligible'),('Remote',True,'Review'),('Remote USA Hybrid',True,'Review')]
+  cfg=dict(app.config(),target_locations=[],workplace_types=[],local_areas={
+      'Fictional East': {'cities': ['Cedar Point'], 'states': ['me', 'maine']},
+      'Fictional West': {'cities': ['Pine Harbor', 'Juniper Cove'], 'states': ['or', 'oregon']},
+  })
+  cases=[('London, UK',True,'Rejected'),('Remote - Colombia',True,'Rejected'),('Texas',True,'Rejected'),('Bangalore, India',False,'Rejected'),('Example City, NY',False,'Rejected'),('Cedar Point',False,'Review'),('Cedar Point, WA',False,'Review'),('Cedar Point, ME',False,'Eligible'),('Pine Harbor, OR Hybrid',False,'Eligible'),('Juniper Cove, Oregon',False,'Eligible'),('Remote - United States',True,'Eligible'),('U.S. Remote',True,'Eligible'),('Remote',True,'Review'),('Remote USA Hybrid',True,'Review')]
   for loc,remote,expected in cases:
-   with self.subTest(location=loc):self.assertEqual(app.location_eligibility({'location':loc,'remote':remote},app.config())[0],expected)
+   with self.subTest(location=loc):self.assertEqual(app.location_eligibility({'location':loc,'remote':remote},cfg)[0],expected)
  def test_remote_restricted_state_not_eligible(self):
   j={'location':'Remote - US','remote':True,'description':'You must reside in Virginia.'}
   self.assertNotEqual(app.location_eligibility(j,app.config())[0],'Eligible')
@@ -253,7 +323,7 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(app.location_eligibility(j,app.config())[0],'Eligible')
  def test_discovery_does_not_insert_foreign_remote_jobs(self):
   j,cfg=self.pipeline_fixture()
-  bad={'title':'Financial Analyst','employer':'Binance.US','url':'https://jobs.ashbyhq.com/binance.us/outside-location-test/application','location':'London, UK','remote':True,'description':'Financial reporting and Excel','availability':'Open'}
+  bad={'title':'Financial Analyst','employer':'Fictional Employer','url':'https://jobs.ashbyhq.com/fictional/outside-location-test/application','location':'London, UK','remote':True,'description':'Financial reporting and Excel','availability':'Open'}
   with patch.object(app,'config',return_value=cfg),patch.object(app,'board_jobs',return_value=[bad]):
    app.LOCK.acquire();report=app.run_pipeline()
   self.assertEqual(len(app.records()),1);self.assertEqual(report['skipped_location'],1)

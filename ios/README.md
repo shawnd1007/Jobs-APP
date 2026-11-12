@@ -22,7 +22,7 @@ Choose **Connect to your Mac** to use the real workspace. Employer searches, ré
 ## Find and track jobs
 
 - **For You** ranks open listings by role fit and then by match score. Top Matches requires eligible location and usable annual USD base pay. Needs Review contains other open candidates. Use **Save**, **Pass**, and **Undo** directly from a card.
-- **Browse** opens the full retained job list, including earlier runs. Search by combining terms across employer, title, location and skills. Use work-setting and open-listing filters directly in Browse. Swipe a row to save it, or open the listing to see how the score breaks down and share the employer link.
+- **Browse** opens the full retained job list, including earlier runs. **Filter listings** combines terms across employer, title, location and skills. **Find New Jobs** opens the employer search on a connected Mac. In the sample workspace, **Connect for Live Search** opens connection settings. Use work-setting and open-listing filters directly in Browse. Swipe a row to save it, or open the listing to see the match evidence and share the employer link.
 - **My Jobs** opens to Saved. The stage picker shows how many roles are in Saved, Applied, Interviews, Offers and Archived. **Follow-ups** separates due and overdue items from upcoming dates. Swipe a job to open its tracking form and change the stage, notes or follow-up date.
 - **Settings → Edit Search Profile** contains résumé import, target roles, skills, location and pay. Open a saved search and choose **Preview Profile Changes** to review the proposed values. **Use in Draft** fills the editor for that search, and **Save** applies the changes.
 - **Settings → Employer Boards** shows the employer sources and their health.
@@ -75,6 +75,19 @@ Open **Alerts → Saved Searches → New Saved Search**. Give the search a name,
 Use **Run Employer Search** to check configured sources now, or enable **Daily Employer Search** in Preferences to check while the Mac service runs. A new listing can match several searches. Each search receives one alert per new listing. Pausing a saved search stops future alerts for it. Editing and resuming apply to future discoveries.
 
 Open **Alerts → Match Alerts** to view the latest 200 matches and mark them read. You can enable iPhone notifications there. The Mac records matches during a search even when the app is closed. The app displays a local notification when it next connects and sees unread matches. Delivery while the app is closed would require push or another delivery channel.
+
+### Test filtering and discovery on a simulator
+
+Use a separate test simulator. From the repository root, start the fictional search fixture in one terminal with `python3 ios/Tests/serve_search_fixture.py`. The service listens on loopback port 18085 and starts with a disposable database and no external requests. Restart it before each test run so the test starts with the two original fictional listings.
+
+In Xcode, run the **JobsSearchQA** scheme on that simulator. From Terminal, substitute the test simulator’s ID.
+
+```sh
+xcodebuild -project "ios/Shawn's iPhone Job App.xcodeproj" -scheme JobsSearchQA \
+  -destination 'platform=iOS Simulator,id=TEST_SIMULATOR_ID' -parallel-testing-enabled NO test
+```
+
+The suite covers filtering and clearing a sample query, opening connection settings from the sample, filtering a connected list, and discovering a new fixture posting through **Find New Jobs**. Stop the fixture with Ctrl-C when done.
 
 ### macOS certificate trust
 
