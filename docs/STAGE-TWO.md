@@ -79,3 +79,9 @@ Jobs carries employer-published remote, hybrid and on-site values through search
 The selected salary policy now governs discovery, Top Matches and manual approval. A published lower bound below the target blocks approval when the entire range must meet it. If the selected policy needs a bound the employer has not published, pay stays in review. A single published annual USD amount can match a saved search. Preference changes preserve existing approvals, notes and drafts.
 
 The salary checkpoint passed 75 Python tests and both sequential browser suites on macOS. The iPhone client passed four UI tests on a separate iPhone 18 Pro simulator with fictional data, and Xcode built an unsigned device release. Hosted checks are tracked on draft PR #2. A signed physical-device test and provider execution remain open.
+
+## Discover openings from Recruitee employer feeds
+
+Browser Preferences and iPhone Search Profile accept hosted Recruitee career-site slugs. Jobs reads the public XML feed, preserves employer duties and checks the exact posting before sending a saved-search alert. A failed check can retry. A missing offer stays in review. A reused posting link keeps the original tracking and blocks approval until the original offer is available again.
+
+Verified on macOS with 77 Python tests, both sequential browser suites, four iPhone 18 Pro simulator tests and an unsigned device release build. A bounded public check read one feed and verified two exact posting pages. See the [employer board list](EMPLOYER-BOARDS.md) for the public sample and draft PR #2 for hosted checks.

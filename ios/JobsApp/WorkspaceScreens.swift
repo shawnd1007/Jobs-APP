@@ -426,6 +426,7 @@ private struct PreferencesEditor: View {
                 boardField("Lever", "lever")
                 boardField("SmartRecruiters", "smartrecruiters")
                 boardField("Personio", "personio")
+                boardField("Recruitee", "recruitee")
                 multiline("Employer posting URLs, one per line", $draft.employerURLs)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
             }

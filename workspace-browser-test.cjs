@@ -15,13 +15,16 @@ const {spawn}=require('node:child_process'),assert=require('node:assert/strict')
   await page.locator('[data-board="ashby"]').fill('deepgram');
   await page.locator('[data-board="smartrecruiters"]').fill('qa-fictional');
   await page.locator('[data-board="personio"]').fill('example-employer');
+  await page.locator('[data-board="recruitee"]').fill('fictional-accounts');
   await page.locator('#save-preferences').click();await page.locator('#preferences-message').filter({hasText:'Preferences saved'}).waitFor();
   await page.reload();await page.locator('article').first().waitFor();await page.locator('[data-workspace="preferences"]').click();
   assert.equal(await page.locator('[data-pref="salary_floor"]').inputValue(),'82000');
   assert.equal(await page.locator('[data-board="ashby"]').inputValue(),'deepgram');
   assert.equal(await page.locator('[data-board="smartrecruiters"]').inputValue(),'qa-fictional');
   assert.equal(await page.locator('[data-board="personio"]').inputValue(),'example-employer');
+  assert.equal(await page.locator('[data-board="recruitee"]').inputValue(),'fictional-accounts');
   await page.locator('[data-workspace="sources"]').click();
+  await page.getByRole('heading',{name:'recruitee/fictional-accounts',exact:true}).waitFor();
   const source=page.locator('.source-row').filter({has:page.locator('h3',{hasText:'ashby/deepgram'})});
   await source.locator('button').click();await source.locator('button',{hasText:'Resume'}).waitFor();
   await source.locator('button').click();await source.locator('button',{hasText:'Pause'}).waitFor();

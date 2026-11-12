@@ -50,7 +50,7 @@ In the connected workspace, open **My Jobs → Add Application**. A job title, e
 
 ## Search and AI
 
-The backend checks Greenhouse, Ashby, Lever, SmartRecruiters and employer-enabled Personio feeds. **Find New Jobs** shows the stage and current board, and reports when some sources could not finish. You can browse while the Mac searches and retry after an incomplete run. It can also extract structured job data from individual employer pages. Some pages need manual review. Job details show evidence from posting duties when they match skills described in the search profile. The link and the application form have separate checks. A saved-search alert waits until the employer posting is checked.
+The backend checks Greenhouse, Ashby, Lever, SmartRecruiters, Personio and Recruitee employer feeds. For a hosted Recruitee careers site, add its company slug in Search Profile under Employer Sources. **Find New Jobs** shows the stage and current board, and reports when some sources could not finish. You can browse while the Mac searches and retry after an incomplete run. It can also extract structured job data from individual employer pages. Some pages need manual review. Job details show evidence from posting duties when they match skills described in the search profile. The link and the application form have separate checks. A saved-search alert waits until the employer posting is checked.
 
 To request AI career advice, put your key in `secrets/openai.key` on the Mac, enable AI in **Preferences**, and request advice from a job’s details. The backend sends your profile and the posting to OpenAI when you confirm a request. The daily limit counts attempts. Saved advice can be viewed in the app alongside the employer evidence and your decision.
 
@@ -95,7 +95,7 @@ xcodebuild -project "ios/Shawn's iPhone Job App.xcodeproj" -scheme JobsSearchQA 
   -destination 'platform=iOS Simulator,id=TEST_SIMULATOR_ID' -parallel-testing-enabled NO test
 ```
 
-The suite covers filtering and clearing a sample query, opening connection settings from the sample, filtering a connected list, and discovering a new fixture posting through **Find New Jobs**. Stop the fixture with Ctrl-C when done.
+The suite covers filtering and clearing a sample query, opening connection settings from the sample, filtering a connected list, and discovering and verifying a new Recruitee fixture posting through **Find New Jobs**. Stop the fixture with Ctrl-C when done.
 
 ### macOS certificate trust
 

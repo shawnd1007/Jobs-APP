@@ -71,14 +71,19 @@ BOARD_HOSTS = {
     'jobs.ashbyhq.com': 'ashby', 'jobs.lever.co': 'lever',
     'jobs.smartrecruiters.com': 'smartrecruiters', 'careers.smartrecruiters.com': 'smartrecruiters',
 }
-BOARD_PLATFORMS = frozenset(BOARD_HOSTS.values()) | {'personio'}
-PERSONIO_SLUG = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
-PERSONIO_HOST = re.compile(r'([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.jobs\.personio\.(?:com|de)')
+BOARD_PLATFORMS = frozenset(BOARD_HOSTS.values()) | {'personio', 'recruitee'}
+CAREER_SITE_SLUG = re.compile(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?')
+PERSONIO_HOST = re.compile(r'(' + CAREER_SITE_SLUG.pattern + r')\.jobs\.personio\.(?:com|de)')
+RECRUITEE_HOST = re.compile(r'(' + CAREER_SITE_SLUG.pattern + r')\.recruitee\.com')
+RECRUITEE_POSTING = r'/o/([a-z0-9][a-z0-9-]{0,199})(?:/c/new)?'
+XML_FEED_PLATFORMS = {'personio': 'Personio', 'recruitee': 'Recruitee'}
 
 def identity(url):
     u=up.urlsplit(url); host=(u.hostname or '').lower(); path=u.path.rstrip('/'); parts=path.split('/')
     if (board := PERSONIO_HOST.fullmatch(host)) and (job := re.fullmatch(r'/job/([0-9]+)', path)):
         return f'personio:{board[1]}:{job[1]}'
+    if (board := RECRUITEE_HOST.fullmatch(host)) and (job := re.fullmatch(RECRUITEE_POSTING, path)):
+        return f'recruitee:{board[1]}:{job[1]}'
     if host in ('boards.greenhouse.io','job-boards.greenhouse.io') and len(parts)>=4:
         return 'greenhouse:'+parts[1].lower()+':'+parts[3]
     if host=='jobs.ashbyhq.com' and len(parts)>=3: return 'ashby:'+parts[1].lower()+':'+parts[2]
@@ -118,6 +123,7 @@ def stored_board_posting(ident):
         'lever': f'https://jobs.lever.co/{path}{posting_path}/apply',
         'smartrecruiters': f'https://jobs.smartrecruiters.com/{path}{posting_path}',
         'personio': f'https://{board}.jobs.personio.com/job/{posting_path}',
+        'recruitee': f'https://{board}.recruitee.com/o/{posting_path}',
     }
     return urls[platform], posting
 
@@ -407,6 +413,8 @@ UNAPPLIED={'Needs Verification','Not Applied','Planning to Apply'}
 def review_blockers(j, cfg=None):
     cfg=config() if cfg is None else cfg;geo=location_eligibility(j,cfg)[0];problems=[]
     if j.get('identity_review'):problems.append(IDENTITY_REVIEW)
+    if j.get('recruitee_offer_changed'):
+        problems.append('The employer reused this link for a different job.')
     if geo=='Rejected':problems.append('Location is outside your saved preferences.')
     pay_status, pay_reason = salary_assessment(j, cfg)
     if pay_status == 'Rejected':
@@ -540,6 +548,8 @@ def normalize_workplace_type(value):
 def work_arrangement(job, location=None, description=None):
     location = clean(job.get('location')).lower() if location is None else location
     description = clean(job.get('description')).lower() if description is None else description
+    if job.get('workplace_type') == 'multiple':
+        return 'unknown'
     declared = normalize_workplace_type(job.get('workplace_type'))
     signals = {normalize_workplace_type(match[1]) for match in PUBLISHED_WORK_IN_DESCRIPTION.finditer(description)}
     if re.search(r'\bhybrid\b', location):
@@ -845,34 +855,42 @@ def board_jobs(platform,board):
         return out
     if platform == 'smartrecruiters':
         return smartrecruiters_board(board)
-    if platform == 'personio':
-        return personio_board(board)
+    if platform in XML_FEED_PLATFORMS:
+        if not CAREER_SITE_SLUG.fullmatch(board):
+            raise ValueError('Invalid employer career-site slug')
+        if platform == 'personio':
+            return personio_positions(board, employer_xml_feed(f'https://{board}.jobs.personio.com/xml?language=en'))
+        return recruitee_offers(board, employer_xml_feed(f'https://{board}.recruitee.com/api/feeds/offers.xml'))
     raise ValueError('Unsupported board')
 
-def personio_board(board):
-    if not PERSONIO_SLUG.fullmatch(board):
-        raise ValueError('Invalid Personio career-site slug')
-    base = f'https://{board}.jobs.personio.com'
-    request = ur.Request(base + '/xml?language=en', headers={'User-Agent': 'PersonalJobDashboard/1.0'})
+
+def employer_xml_feed(url):
+    request = ur.Request(url, headers={'User-Agent': 'PersonalJobDashboard/1.0'})
     try:
         raw, final = read_response(request, opener=PERSONIO_OPENER, max_bytes=4_000_000)
     except urllib.error.HTTPError as error:
         if 300 <= error.code < 400:
-            raise ValueError('Personio feed redirected; use the employer career-site slug') from error
+            raise ValueError('Employer feed redirected; check the career-site slug') from error
         raise
-    if final != request.full_url:
-        raise ValueError('Personio feed redirected; use the employer career-site slug')
-    return personio_positions(board, raw)
+    if final != url:
+        raise ValueError('Employer feed redirected; check the career-site slug')
+    return raw
 
-def personio_positions(board, data):
+
+def parse_employer_xml(data, root_tag, entry_tag):
     if len(data) > 4_000_000:
-        raise ValueError('Personio feed exceeds the supported size')
+        raise ValueError('Employer feed exceeds the supported size')
     xml = data.decode('utf-8-sig')
     if re.search(r'<!\s*(?:DOCTYPE|ENTITY)\b', xml, re.I):
-        raise ValueError('Unexpected declarations in Personio feed')
+        raise ValueError('Unexpected declarations in employer feed')
     root = ET.fromstring(xml)
-    if root.tag != 'workzag-jobs' or len(root) > 2000 or any(node.tag != 'position' for node in root):
-        raise ValueError('Unexpected Personio feed structure')
+    if root.tag != root_tag or len(root) > 2000 or any(node.tag != entry_tag for node in root):
+        raise ValueError('Unexpected employer feed structure')
+    return root
+
+
+def personio_positions(board, data):
+    root = parse_employer_xml(data, 'workzag-jobs', 'position')
 
     jobs = []
     seen = set()
@@ -898,6 +916,48 @@ def personio_positions(board, data):
             salary_text='Salary Not Published',
         ))
     return jobs
+
+def recruitee_offers(board, data):
+    root = parse_employer_xml(data, 'offers', 'offer')
+    jobs = []
+    ids = set()
+    slugs = set()
+    host = f'{board}.recruitee.com'
+    for offer in root:
+        posting_id = offer.findtext('id', '').strip()
+        slug = offer.findtext('slug', '').strip()
+        title = offer.findtext('title', '').strip()
+        posting_path = f'/o/{slug}'
+        supplied = up.urlsplit(offer.findtext('careers_url', '').strip())
+        if (not re.fullmatch(r'[1-9][0-9]{0,19}', posting_id) or not title or posting_id in ids
+                or not re.fullmatch(RECRUITEE_POSTING, posting_path) or '/' in slug or slug in slugs
+                or supplied.scheme != 'https' or supplied.netloc != host
+                or supplied.path.rstrip('/') != posting_path):
+            raise ValueError('Recruitee feed contains a missing, repeated or unsupported posting link')
+        ids.add(posting_id)
+        slugs.add(slug)
+        description = posting_text(offer.findtext('description'))
+        requirements = posting_text(offer.findtext('requirements'))
+        if requirements:
+            description = '\n'.join(filter(None, (description, 'Qualifications', requirements)))
+        modes = [mode for field, mode in (('remote', 'remote'), ('hybrid', 'hybrid'), ('on_site', 'onsite'))
+                 if offer.findtext(field, '').strip().lower() == 'true']
+        workplace = 'multiple' if len(modes) > 1 else next(iter(modes), None)
+        pay = offer.find('salary')
+        salary_text = 'Salary Not Published'
+        if pay is not None and any(pay.findtext(field, '').strip() for field in ('min', 'max')):
+            salary_text = 'Employer compensation published; confirm base salary in the posting'
+        jobs.append(dict(
+            title=title, employer=offer.findtext('company_name', '').strip() or board,
+            url=f'https://{host}{posting_path}', requisition=slug, recruitee_offer_id=posting_id,
+            recruitee_offer_changed=False,
+            location=offer.findtext('location', '').strip(), workplace_type=workplace,
+            description=description, posted=offer.findtext('published_at', '').strip(),
+            availability='Open', last_verified=now(), source='Recruitee public employer feed',
+            application_evidence='Published in the employer XML feed', salary_text=salary_text,
+        ))
+    return jobs
+
 
 def rotating_postings(listings, run_id, limit):
     if len(listings) <= limit:
@@ -980,9 +1040,12 @@ def hydrate_board_listing(board, listing):
 
 def board_identity(url):
     u=up.urlsplit(url);parts=u.path.strip('/').split('/')
-    if board := PERSONIO_HOST.fullmatch((u.hostname or '').lower()):
+    host = (u.hostname or '').lower()
+    if board := PERSONIO_HOST.fullmatch(host):
         return 'personio', board[1]
-    platform = BOARD_HOSTS.get((u.hostname or '').lower())
+    if board := RECRUITEE_HOST.fullmatch(host):
+        return 'recruitee', board[1]
+    platform = BOARD_HOSTS.get(host)
     return (platform,parts[0].lower()) if platform and parts[0] else None
 POSTING_PATHS = {
     'greenhouse': r'/[^/]+/jobs/[0-9]+',
@@ -990,6 +1053,7 @@ POSTING_PATHS = {
     'lever': r'/[^/]+/[^/]+(?:/apply)?',
     'smartrecruiters': r'/[^/]+/[0-9]+(?:-[^/]+)?',
     'personio': r'/job/[0-9]+',
+    'recruitee': RECRUITEE_POSTING,
 }
 
 
@@ -1124,7 +1188,7 @@ def finalize(job, cfg, report, *, check_posting=False, previous=None):
     job = assess(job, cfg)
     wants_form = job['queue'] == 'Confirmed'
     if job.get('availability') == 'Closed' or not (
-        wants_form or check_posting or job.get('source') == 'Personio public employer feed'
+        wants_form or check_posting or (board_identity(job['url']) or ('', ''))[0] in XML_FEED_PLATFORMS
         or (previous and (previous.get('posting_verified') or previous.get('posting_check_failed')
                           or previous.get('pending_match_alert')))
     ):
@@ -1359,7 +1423,7 @@ def run_pipeline(trigger='manual'):
                     break
                 progress('Discovering employer sources', offset, total)
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
-                domains=['jobs.ashbyhq.com','job-boards.greenhouse.io','jobs.lever.co','myworkdayjobs.com','jobs.smartrecruiters.com']
+                domains=['jobs.ashbyhq.com','job-boards.greenhouse.io','jobs.lever.co','myworkdayjobs.com','jobs.smartrecruiters.com','recruitee.com']
                 regions=cfg.get('target_locations') or ['remote United States','Jacksonville Florida','Buford Suwanee Duluth Georgia']
                 query='"'+category+'" jobs '+regions[offset%len(regions)]+' site:'+domains[(start+offset)%len(domains)]
                 try:
@@ -1440,7 +1504,16 @@ def run_pipeline(trigger='manual'):
                         if time.monotonic() >= deadline:
                             break
                         ident=identity(old['url']);fresh=by_id.get(ident)
-                        if fresh:
+                        if (fresh and platform == 'recruitee' and old.get('recruitee_offer_id')
+                                and old['recruitee_offer_id'] != fresh['recruitee_offer_id']):
+                            old.pop('application_verified', None)
+                            old.pop('posting_verified', None)
+                            old.update(availability='Needs Verification', queue='Review', last_verified=now(),
+                                       recruitee_offer_changed=True,
+                                       application_evidence='Employer reused this link for a different Recruitee offer')
+                            upsert(c, old)
+                            c.commit()
+                        elif fresh:
                             fresh = hydrate_board_listing(board, fresh)
                             # Keep original human readable employer names; ATS slugs are identifiers.
                             fresh['employer']=old['employer'];fresh['history_confirmation']=old.get('history_confirmation',False)
@@ -1449,12 +1522,12 @@ def run_pipeline(trigger='manual'):
                             release_pending_alert(c, job_id, old, j, searches)
                             c.commit()
                             report['reverified'] += 1
-                        elif platform == 'personio':
+                        elif platform in XML_FEED_PLATFORMS:
                             if old['availability'] != 'Closed':
                                 old.pop('application_verified', None)
                                 old.pop('posting_verified', None)
                                 old.update(availability='Needs Verification', queue='Review',
-                                           last_verified=now(), application_evidence='Missing from Personio feed; check employer page')
+                                           last_verified=now(), application_evidence=f'Missing from {XML_FEED_PLATFORMS[platform]} feed; check employer page')
                                 upsert(c,old);c.commit()
                         else:
                             old.pop('posting_verified', None)

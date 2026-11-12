@@ -22,11 +22,11 @@ def serve():
         cfg.update(
             categories=['billing analyst'], preferred_skills=['Excel', 'SQL'],
             profile='Reconciled fictional accounts using Excel and SQL.',
-            additional_boards={'ashby': ['fictional-slow'], 'personio': ['fictional']}, target_locations=['United States'],
+            additional_boards={'ashby': ['fictional-slow'], 'recruitee': ['fictional']}, target_locations=['United States'],
             workplace_types=['remote'], request_delay_seconds=0, generic_urls_per_run=0,
         )
         (root / 'config.json').write_text(json.dumps(cfg), encoding='utf-8')
-        feed = (SOURCE / 'fixtures' / 'personio.xml').read_bytes()
+        feed = (SOURCE / 'fixtures' / 'recruitee.xml').read_bytes()
         slow_checks = 0
 
         def slow_board(request, timeout):
@@ -40,8 +40,8 @@ def serve():
         def fixture_response(request, timeout, payload=None):
             url = request.full_url
             payloads = {
-                'https://fictional.jobs.personio.com/xml?language=en': feed,
-                'https://fictional.jobs.personio.com/job/12345': b'<h1>Payment Operations Specialist</h1>',
+                'https://fictional.recruitee.com/api/feeds/offers.xml': feed,
+                'https://fictional.recruitee.com/o/payment-operations-specialist': b'<h1>Payment Operations Specialist</h1>',
             }
             response = MagicMock()
             response.__enter__.return_value = response
@@ -52,7 +52,8 @@ def serve():
              patch.object(app, 'safe_url', side_effect=lambda url: url), \
              patch.object(app, 'BOARD_SECONDS', 4), \
              patch.object(app.OPENER, 'open', side_effect=slow_board), \
-             patch.object(app.PERSONIO_OPENER, 'open', side_effect=fixture_response):
+             patch.object(app.PERSONIO_OPENER, 'open', side_effect=fixture_response), \
+             patch.object(app.POSTING_OPENER, 'open', side_effect=fixture_response):
             app.init()
             with app.connect() as connection:
                 for key, title in [('billing', 'Billing Analyst'), ('software', 'Software Engineer')]:

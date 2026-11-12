@@ -78,6 +78,91 @@ class PersistenceTests(unittest.TestCase):
   with app.connect() as c:_,added=app.upsert(c,j)
   self.assertFalse(added);self.assertEqual(len(app.records()),50)
 
+ def test_recruitee_feed_preserves_duties_and_checks_published_links(self):
+  feed = (Path(__file__).resolve().parent/'fixtures'/'recruitee.xml').read_bytes()
+  job, = app.recruitee_offers('fictional',feed)
+  self.assertEqual(job['recruitee_offer_id'],'12345')
+  self.assertIn('Responsibilities\nReconcile incoming payments in Excel.',job['description'])
+  self.assertIn('Qualifications\nExperience using fictional accounting software.',job['description'])
+  self.assertEqual(app.posting_reference(job['url']),app.posting_reference(job['url']+'/c/new?utm_source=example'))
+  self.assertNotEqual(app.identity(job['url']),app.identity(job['url'].replace('fictional.','other.')))
+  self.assertEqual(app.work_arrangement(job),'remote')
+  altered, = app.recruitee_offers('fictional',feed.replace(b'<hybrid>false',b'<hybrid>true')
+                                 .replace(b'<min/>',b'<min>90000</min>'))
+  self.assertEqual(app.work_arrangement(altered),'unknown')
+  self.assertEqual(app.annual_base_bounds(altered),(None,None))
+  self.assertIn('confirm base salary',altered['salary_text'])
+  for invalid in (
+   feed.replace(b'fictional.recruitee.com',b'other.recruitee.com'),
+   feed.replace(b'</offers>',feed[feed.index(b'<offer>'):feed.index(b'</offers>')]+b'</offers>'),
+   b'<offers><error/></offers>',
+  ):
+   with self.subTest(prefix=invalid[:35]), self.assertRaises(ValueError):
+    app.recruitee_offers('fictional',invalid)
+
+ def test_recruitee_retry_alerts_once_and_preserves_tracking_on_removal_or_reuse(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(categories=['Payment Operations Specialist'], target_locations=['United States'],
+             workplace_types=['remote'], preferred_skills=['Excel'], skill_groups=[],
+             salary_floor=85000, additional_boards={'recruitee':['fictional']})
+  criteria = dict(name='Fictional payments', title_terms=['Payment Operations'], skills=['Excel'],
+                  locations=['United States'], workplace_types=['remote'], salary_min=90000,
+                  salary_max=None, enabled=True)
+  self.assertEqual(app.prototype.change_saved_search(app,{'action':'save','criteria':criteria})[0],200)
+  feed = (Path(__file__).resolve().parent/'fixtures'/'recruitee.xml').read_bytes().replace(
+   b'<h2>Responsibilities', b'<p>Annual base salary: $95,000 to $105,000.</p><h2>Responsibilities')
+  current_feed = feed
+  feed_url = 'https://fictional.recruitee.com/api/feeds/offers.xml'
+  posting_url = 'https://fictional.recruitee.com/o/payment-operations-specialist'
+  heading = 'Different opening'
+
+  def public_response(request, **kwargs):
+   if request.full_url == feed_url:
+    if current_feed is None:
+     raise TimeoutError('Fictional board timeout')
+    return current_feed, feed_url
+   self.assertEqual(request.full_url,posting_url)
+   return f'<h1>{heading}</h1>'.encode(),posting_url
+
+  def run():
+   app.LOCK.acquire()
+   return app.run_pipeline()
+
+  def listing():
+   return next(j for j in app.records() if j['url']==posting_url)
+
+  with patch.object(app,'config',return_value=cfg), patch.object(app,'read_response',side_effect=public_response), \
+       patch.object(app,'fetch',return_value={'jobs':[]}):
+   run()
+   job_id = listing()['id']
+   self.assertEqual(listing()['availability'],'Needs Verification')
+   self.assertEqual(app.snapshot()['match_alerts'],[])
+   with app.connect() as c:
+    c.execute("UPDATE tracking SET notes='Keep this fictional note' WHERE job_id=?",(job_id,))
+   heading = 'Payment Operations Specialist'
+   run()
+   self.assertTrue(listing()['posting_verified'])
+   self.assertNotIn('application_verified',listing())
+   self.assertEqual([alert['job_id'] for alert in app.snapshot()['match_alerts']],[job_id])
+   current_feed = None
+   self.assertTrue(run()['failures'])
+   self.assertEqual(listing()['availability'],'Open')
+   current_feed = b'<offers/>'
+   run()
+   self.assertEqual(listing()['availability'],'Needs Verification')
+   self.assertNotIn('posting_verified',listing())
+   current_feed = feed.replace(b'<id>12345</id>',b'<id>54321</id>')
+   run()
+   self.assertTrue(listing()['recruitee_offer_changed'])
+   self.assertIn('reused',app.review_blockers(listing(),cfg)[0])
+   current_feed = feed
+   run()
+   self.assertEqual(listing()['id'],job_id)
+   self.assertEqual(listing()['notes'],'Keep this fictional note')
+   self.assertTrue(listing()['posting_verified'])
+   self.assertFalse(listing()['recruitee_offer_changed'])
+   self.assertEqual([alert['job_id'] for alert in app.snapshot()['match_alerts']],[job_id])
+
  def test_personio_feed_preserves_official_requisition_and_duties(self):
   feed = (Path(__file__).resolve().parent/'fixtures'/'personio.xml').read_bytes()
   with patch.object(app,'safe_url',side_effect=lambda url:url), patch.object(app.PERSONIO_OPENER,'open') as request:

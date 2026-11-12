@@ -35,7 +35,7 @@ It addresses a practical problem: collecting links is easy; knowing which links 
 
 The implemented capabilities are:
 
-- Employer-board retrieval from Greenhouse, Ashby, Lever, SmartRecruiters and Personio.
+- Employer-board retrieval from Greenhouse, Ashby, Lever, SmartRecruiters, Personio and Recruitee.
 - Limited discovery through public web search and best-effort extraction from other employer posting URLs.
 - Location, published base-salary and title checks.
 - Configurable skill-weight scoring with readable explanations.
@@ -154,6 +154,7 @@ An applicant tracking system, or ATS, hosts an employer's recruitment board. `bo
 | Lever | `https://jobs.lever.co/BOARD` | Public postings endpoint |
 | SmartRecruiters | `https://jobs.smartrecruiters.com/BOARD` | Public Posting API with pagination and per-requisition details |
 | Personio | `https://BOARD.jobs.personio.com` (also `.de` links) | Employer-enabled XML feed and exact requisition page check |
+| Recruitee | `https://BOARD.recruitee.com` | Public XML feed and exact hosted posting page check |
 
 The board slug is the employer identifier in the URL. Enter that slug in the matching Preferences field. A job-specific URL and a board URL are different: the former identifies one requisition; the latter identifies the feed to revisit.
 
@@ -164,6 +165,8 @@ These feeds do not require Firecrawl. They are the foundation of the current sea
 The SmartRecruiters adapter checks the complete public index, up to 3,000 postings per board, before treating a missing requisition as closed. Each run checks details for up to eight tracked postings and sixteen new postings per board. The new-posting budget prioritizes enabled saved searches with title criteria, then the main search profile. A share of the budget rotates through other postings. The run report shows how many board details were deferred. [SmartRecruiters Posting API](https://developers.smartrecruiters.com/docs/endpoints)
 
 Personio feeds use the employer’s career-site slug and the public English XML feed. Jobs checks the exact requisition page before reporting a result as open or sending a match alert. It checks the application form separately and leaves pay unknown when the feed does not supply verified base pay. A posting missing from the feed needs verification; it is not marked closed based on that absence alone. [Personio XML setup](https://support.personio.de/hc/en-us/articles/207576365-Integrate-jobs-from-Personio-into-your-website-via-XML) · [Personio posting links](https://developer.personio.de/docs/integration-of-open-positions)
+
+Recruitee uses the employer’s public formatted XML feed. Enter the company slug in Preferences or Search Profile. Jobs supports `BOARD.recruitee.com` posting links and checks the exact page before sending alerts. A missing offer goes into review. If the feed reports a different offer ID at a saved link, Jobs keeps the old tracking record and blocks approval. Multiple published work settings stay unclear when a specific setting is required. Feed compensation without evidence of annual USD base pay stays in review. [Recruitee XML feed documentation](https://support.recruitee.com/en/articles/8213076-faq-api)
 
 ### Public web discovery
 
@@ -570,7 +573,7 @@ A first-time visitor can explore fictional listings and practice application tra
 
 ## 20. Limits and next milestones
 
-Build 9 runs as a trusted-network prototype with one shared workspace. The signed iPhone alert path and system Files selection still need verification. Discovery covers five employer feed families, with limits around dynamic forms, Workday, salary tiers and remote hiring rules. The API returns the full dashboard snapshot.
+Build 9 runs as a trusted-network prototype with one shared workspace. The signed iPhone alert path and system Files selection still need verification. Discovery covers six employer feed families, with limits around dynamic forms, Workday, salary tiers and remote hiring rules. The API returns the full dashboard snapshot.
 
 The [roadmap](NEXT-STEPS.md) prioritizes daily reliability and the quality of verified, direct opportunities. Public service readiness requires authenticated accounts, tested data isolation and recovery, and validation of provider costs and customer value. These requirements come from the [approved product vision](PRODUCT-VISION.md).
 
