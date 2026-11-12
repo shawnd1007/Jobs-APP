@@ -1,5 +1,7 @@
 # Jobs for iPhone
 
+This guide covers the current native client. Read the [approved product vision](../docs/PRODUCT-VISION.md) for the intended service and [verification record](../docs/VERIFICATION.md) for tested capabilities.
+
 The iPhone app is the Jobs workspace. The Mac runs the Python service and keeps the shared SQLite database, so you can do the day-to-day workflow from Xcode’s iPhone simulator or from an iPhone on your private network.
 
 ## Try it without a server

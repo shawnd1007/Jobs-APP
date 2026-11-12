@@ -1,19 +1,20 @@
-# Package verification — November 10, 2026
+# Verification record
 
-These observations apply to the prepared source snapshot, not to a published GitHub release.
+The [approved vision](PRODUCT-VISION.md) describes the intended product. This record covers checks that were actually observed. See the [Build 9 checklist](STAGE-TWO.md) for the shipped changes and [roadmap](NEXT-STEPS.md) for open work.
 
-| Check | Observed outcome |
+## Build 9
+
+| Target | Observed result |
 | --- | --- |
-| Clean setup | Created ignored local configuration and an empty startup seed |
-| Empty startup | Zero personal jobs; daily schedule and AI disabled |
-| Windows unit suite | 34 tests passed using fictional fixtures and temporary databases |
-| Linux unit suite | Same 34 tests passed in Python 3.13 Alpine Docker, network disabled and source mounted read-only |
-| Approval browser suite | Passed checklist validation, reload persistence, applied/interview transitions, hold/dismiss, geographic guards and mobile overflow checks |
-| Workspace browser suite | Passed preference persistence, source pause/resume, compact review panels and all four mobile screens |
-| Browser errors | None observed in those suites |
-| Dependency install | Lockfile generation and `npm ci` succeeded using declared Playwright 1.62.1 |
-| Privacy exclusions | Local profile/config, original personal seed, data, keys, dependency folders and temporary screenshots are ignored |
+| Backend | 49 Python tests passed with fictional fixtures and temporary data. |
+| Browser | Both sequential browser suites passed on macOS. Hosted Linux also ran the unit and browser suites. |
+| GitHub | The pull request and push workflows passed for [commit `5ad2cbd`](https://github.com/shawnd1007/Jobs-APP/commit/5ad2cbdf4b9ad6488ecb80386afb9e9f715c19a8). [Pull request run](https://github.com/shawnd1007/Jobs-APP/actions/runs/43238381405) · [Push run](https://github.com/shawnd1007/Jobs-APP/actions/runs/43238367416) |
+| Xcode | An unsigned device release built on macOS. An isolated iPhone 17 simulator exercised sample browsing, tracking, a failed server change, offline reopening, and saving a follow-up after reconnecting. |
+| Résumé | The simulator supplied a fictional PDF directly to the import handler. Skill selection and experience saved to the profile, relevant duties appeared in the match, and repeating the same passage preserved one copy. |
 
-The committed screenshot uses fictional QA data. There are no real job leads or application records in the source snapshot. API responses are mocked for AI tests; no paid AI call was made. Browser checks ran on Windows using Edge. Actual macOS execution, Xcode compilation and hosted GitHub Actions have not been observed.
+Selecting a document through the system Files picker and receiving alerts on a signed physical iPhone still need end-to-end checks. macOS Docker remains unverified. Build 9 verification used mocked paid providers. Provider cost, product effectiveness, and account isolation need their own evidence before wider access.
 
-The workflow is prepared for Linux unit and browser checks after publication. No remote repository was created and no push was performed as part of package preparation. The local repository is initialized and staged for review; the initial commit remains for the owner to make with their chosen author identity.
+## Earlier observations
+
+- Build 8 checked 29 watched employer boards on the Mac and rechecked 153 listings with zero feed errors. That run produced zero new saved-search alerts. The [source guide](EMPLOYER-BOARDS.md) explains how to inspect the live board list and outcomes.
+- The November 10, 2026 source package passed 34 unit tests on Windows and Python 3.13 Alpine Docker, and passed both browser suites with Edge on Windows. Those counts describe that earlier snapshot.

@@ -1,6 +1,6 @@
 # Jobs: complete project guide
 
-Updated November 11, 2026. This guide explains the implemented personal prototype, its files, its behavior, how to run it, how to move it, and how to develop it responsibly. It distinguishes working features from future plans. Start here even if you have not used Git, Docker or Xcode before.
+This guide describes Build 9 of the single-workspace prototype. Start with the [approved product vision](PRODUCT-VISION.md) for product goals, the [README](../README.md) for quick start, the [verification record](VERIFICATION.md) for observed results, and the [roadmap](NEXT-STEPS.md) for open work.
 
 ## Contents
 
@@ -35,16 +35,16 @@ It addresses a practical problem: collecting links is easy; knowing which links 
 
 The implemented capabilities are:
 
-- Employer-board retrieval from Greenhouse, Ashby and Lever.
+- Employer-board retrieval from Greenhouse, Ashby, Lever and SmartRecruiters.
 - Limited discovery through public web search and best-effort extraction from other employer posting URLs.
 - Location, published base-salary and title checks.
 - Configurable skill-weight scoring with readable explanations.
 - Separate human review, application tracking and optional AI career advice.
 - Employer-source health and pause/resume controls.
 - Manual and daily searches, backups, audit records and cross-device save-conflict detection.
-- Responsive browser screens and a shared JSON API used by the iPhone app.
+- Responsive browser screens and a native SwiftUI iPhone app using the same API. The phone can read its last synced copy offline.
 
-It does not submit applications. Applying happens on the employer's website. It is a private-network prototype with a single shared workspace, not a hosted service with customer accounts.
+Users submit applications on the employer’s website. The current prototype serves one shared workspace on a trusted private network. The product vision calls for private customer accounts, truthful application preparation, and a paid, ad-free service.
 
 ## 2. How it grew
 
@@ -52,7 +52,7 @@ The starting point was a static HTML job directory. Its job cards were embedded 
 
 A Python service and SQLite database then added persistence, live employer checks, scheduled discovery and application tracking. A review workflow added human approval, holds and dismissal without deleting history. The November 10 prototype added editable preferences, configurable skill weights, employer health, fair source rotation, optional requested AI reviews and Mac handoff documentation.
 
-The GitHub preparation separates this personal operating environment from distributable source. The clean repository uses an empty startup seed and fictional regression fixtures. Your real directory, candidate profile, applications, notes and research belong in the separate private migration package.
+GitHub holds distributable source with an empty startup seed and fictional regression fixtures. Keep the real directory, candidate profile, applications, notes and research in the private workspace and its separate backups.
 
 The implementation uses AI-assisted development. Its portfolio value comes from understanding its design, testing changes, diagnosing failures and being able to explain what you built and why.
 
@@ -62,12 +62,12 @@ There are four main layers:
 
 | Layer | Technology | Job |
 | --- | --- | --- |
-| Interface | HTML and CSS | Defines the screens, forms, cards, spacing and mobile layout |
+| Clients | HTML/CSS and SwiftUI | Present the browser and native iPhone workflows |
 | Browser behavior | JavaScript | Loads the dashboard, filters cards, sends changes and displays feedback |
 | Backend | Python standard library | Retrieves sources, applies rules, calls optional AI and handles HTTP requests |
 | Persistent storage | SQLite and JSON files | Keeps listings, decisions, application history and preferences |
 
-Docker starts and connects these pieces. It does not contain a second application or a separate database server. The Python program runs inside the container, while its source files and data directory are mounted from the host.
+Docker Compose can run the Python backend with source and data mounted from the host. The backend can also run directly in Python. Use a single authoritative service per live database.
 
 ```mermaid
 flowchart TD
@@ -80,7 +80,7 @@ flowchart TD
     Native[iPhone app] -->|Same API| API
 ```
 
-The browser never talks directly to SQLite or receives an AI key. The backend owns those operations. Browsers using the same server see the same records. Separate backend installations do not automatically synchronize.
+Both clients use the Python API. The backend owns SQLite writes, source retrieval and paid provider credentials. Employer refreshes own listing facts. User actions own reviews, application history and profile choices. AI reviews store advice separately. Separate backend installations have independent data, and the iPhone offline copy is read-only.
 
 ## 4. What each screen does
 
@@ -117,7 +117,7 @@ Some settings remain file-based: local geography definitions, search caps and ve
 
 ### How it works
 
-This is an in-app explanation of discovery, matching and human decisions. It introduces the file map and explains the relationship to a future Mac/iPhone client.
+This is an in-app explanation of discovery, matching and human decisions. The browser and iPhone use the same backend records.
 
 ## 5. Follow one job through the system
 
@@ -245,7 +245,7 @@ The request uses the Responses API, a JSON schema, `store: false` and a bounded 
 
 Advice is cached against a fingerprint of the posting and preferences. Changed input marks saved advice stale. AI advice is stored separately and cannot change salary facts, employer verification, your approval or application status.
 
-AI is disabled by default. The server reads `secrets/openai.key` or its own `OPENAI_API_KEY` environment variable. A host environment variable is not automatically passed into the current Compose service; the mounted key file is the documented simple setup. Never put a key in frontend code or a future iOS app.
+AI is disabled by default. The server reads `secrets/openai.key` or its own `OPENAI_API_KEY` environment variable. A host environment variable is not automatically passed into the current Compose service; the mounted key file is the documented simple setup. Keep keys on the backend, outside both clients and source control.
 
 There is a daily attempt limit, currently ten by default. Requests reserve an attempt before making the network call, and uncertain failures still count. There is no automatic paid retry. The limit caps attempts, not dollar spending. Live paid execution was not performed during this prototype release; provider access and actual model behavior still need account-specific validation.
 
@@ -259,6 +259,8 @@ SQLite stores a database in `data/jobs.sqlite3`. JSON inside a listing row carri
 | --- | --- | --- |
 | `jobs` | Source identity, listing facts, creation/update timestamps | Discovery/import |
 | `tracking` | Status, application date, follow-up date, notes, version | Owner tracking actions |
+| `job_interests` | Saved or passed state and version | Owner interest actions |
+| `saved_searches`, `match_alerts` | Saved criteria and alerts for matching jobs | Owner search settings and the search pipeline |
 | `reviews` | Decision, checklist, note, reviewer, version | Owner review actions |
 | `runs` | Search start/finish/state/report | Search pipeline |
 | `events` | Audit details for tracking/review changes | Guarded save handlers |
@@ -278,7 +280,9 @@ Do not edit database bytes in a text editor. Use backups and application actions
 | File or directory | What to learn from it |
 | --- | --- |
 | `app.py` | Service startup, source adapters, matching, database access, HTTP routes and scheduler |
-| `prototype.py` | Preferences, source health, AI request/cache/budget behavior |
+| `prototype.py` | Preferences, source health, saved searches, match alerts and AI request/cache/budget behavior |
+| `ios/` | Native iPhone app, API client, local preview and offline reading |
+| `import_history.py` | Preview-first import of confirmed history against existing requisitions |
 | `site/index.html` | Screen structure and forms |
 | `site/dashboard.js` | Buckets, filters, card rendering and review/tracking actions |
 | `site/prototype.js` | Workspace navigation, preferences, source controls and AI panel |
@@ -299,8 +303,9 @@ Do not edit database bytes in a text editor. Use backups and application actions
 | `live-workflow-check.cjs` | Read-only smoke checks of a selected running server |
 | `export_project.py` | Private snapshot export in the personal operating folder |
 | `ARCHITECTURE.md`, `MAC-HANDOFF.md` | Earlier focused guides in the personal project |
-| `JOBS-COMPLETE-GUIDE.md` | This complete explanation |
-| `.github/workflows/checks.yml` | Proposed repeatable checks for pushes and pull requests in the prepared repository |
+| `docs/PRODUCT-VISION.md` | Approved product goals |
+| `SOURCE-MANIFEST.json` | Historical November 11 source package inventory |
+| `.github/workflows/checks.yml` | Linux unit and browser checks for pushes and pull requests |
 
 The current Python files contain compact older code alongside newer modular code. Readability refactoring is a useful next development task; it should preserve tested behavior rather than become a simultaneous rewrite of the application.
 
@@ -357,7 +362,7 @@ The container uses `python:3.13-alpine`, reads source/config mounts, writes the 
 
 ### A clean source checkout on the Mac
 
-In the prepared repository:
+In a [clean source checkout](GITHUB-SETUP.md):
 
 ```sh
 python3 setup_project.py
@@ -370,7 +375,7 @@ Python-only development is also possible:
 
 ```sh
 python3 setup_project.py
-python3 app.py
+JOBS_BIND_HOST=127.0.0.1 python3 app.py
 ```
 
 Do not run this against the same database as an active Docker backend. A separate checkout or `JOBS_DATA` directory is appropriate for experiments. The HTTP port is currently fixed in the Python program, so avoid starting two servers on the same port.
@@ -395,7 +400,7 @@ PYTHON=python3 npm run test:browser
 
 PowerShell uses `$env:PYTHON='python'` followed by `npm run test:browser`. Each isolated test starts the QA server, exercises temporary records, then shuts it down. The tests share QA port 18084 and must run sequentially. A read-only live check can be pointed at a selected service through `JOBS_URL`; it should never invent assumptions about fixed production job IDs.
 
-The prepared GitHub workflow runs unit and isolated browser checks. A workflow file is not evidence of a successful hosted GitHub run: that can only be established after publishing and observing Actions.
+GitHub Actions runs the unit and isolated browser checks on Linux. Use the [verification record](VERIFICATION.md) for observed results and verify new work against the exact pushed SHA.
 
 Use a small development loop: reproduce one problem, add a meaningful regression check, change one behavior, run the relevant checks, inspect the result and commit the change with an explanation. Keep sample records obviously fictional.
 
@@ -492,46 +497,9 @@ The source and package have been checked on Windows, and the backend runs in Lin
 
 ## 17. Git and GitHub
 
-Git tracks changes locally. GitHub hosts a remote copy of that Git history and adds collaboration tools. A repository is a project plus its history. A commit is a named snapshot. A branch is a line of work. A remote is a destination for sharing those commits.
+Use the private source repository for code, documentation, example settings and fictional fixtures. Keep personal configuration, data, keys, screenshots, generated archives and research in the private workspace. Follow the [existing feature-branch and draft PR workflow](GITHUB-SETUP.md) when working across machines or publishing. Review the staged diff and confirm hosted checks for the pushed SHA.
 
-The prepared source repository is separate from the live personal folder. Its tracked content is code, documentation, example settings, fictional fixtures and test/workflow configuration. Local `config.json`, `data`, `secrets`, screenshots, generated archives, personal research and dependency folders are excluded.
-
-### First publication
-
-Start with a private GitHub repository while you learn and review the project. This is a recommendation, not an action already performed. No repository is published by preparing the local package.
-
-After extracting the clean source archive on the Mac, initialize it if `.git` is absent:
-
-```sh
-git init -b main
-git status
-git add .
-git diff --cached --stat
-git diff --cached
-git commit -m "Prepare personal Jobs prototype"
-```
-
-Git may ask you to configure your author name/email. Use your chosen identity or GitHub no-reply address. Do not put an access token in those fields or source files. Staging is not publishing: it selects the next commit. A commit is still local until pushed.
-
-Create an empty repository in your GitHub account. Do not initialize a second README, license or ignore file there, because the local project already has its own starting files. Then use the repository URL from GitHub:
-
-```sh
-git remote add origin https://github.com/YOUR-ACCOUNT/YOUR-REPOSITORY.git
-git remote -v
-git push -u origin main
-```
-
-These commands follow [GitHub's official guidance for adding local code](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github). Authenticate through your chosen GitHub tool. A desktop client is also supported if you prefer reviewing changes visually.
-
-The prepared folder on Windows may already be initialized and staged. Inspect `git status` before repeating initialization or staging. An archive is a source snapshot and deliberately excludes `.git`, so its extracted copy needs initialization or a later clone from GitHub.
-
-### Your normal development rhythm
-
-Create a small branch, edit a focused behavior, run tests, inspect `git diff`, commit the result, and then push it. Use pull requests to summarize the problem, behavior change and validation—even if you are the only reviewer at first. Pull before starting work on a second machine so both machines build on the same history.
-
-Git does not replace database backup. It also does not erase a secret just because you add its filename to `.gitignore` later. If a real secret is ever committed, revoke/rotate it and assess the history separately. The prepared package has no real API key or private application database.
-
-No open-source license has been chosen for you. Decide reuse permissions before presenting the repository as an open-source release. A public repository and an explicit license are separate decisions.
+Keep database backups separately from Git. If a real secret is committed, revoke or rotate it and assess the history. No open-source license has been chosen.
 
 ## 18. The iPhone app
 
@@ -567,22 +535,9 @@ A first-time visitor can explore fictional listings and practice application tra
 
 ## 20. Limits and next milestones
 
-The app is a useful personal prototype. It does not yet offer login/accounts, multi-user authorization, durable distributed workers, universal employer coverage, reliable parsing of every salary tier/state policy, full resume ingestion, automatic submissions, remote push notifications or production web hosting.
+Build 9 runs as a trusted-network prototype with one shared workspace. The signed iPhone alert path and system Files selection still need verification. Discovery covers four employer feed families, with limits around dynamic forms, Workday, salary tiers and remote hiring rules. The API returns the full dashboard snapshot.
 
-Its matching is partly heuristic and geography-specific. Some labels and filters still reflect the original personal design. The dashboard returns the whole collection rather than using server pagination. The HTTP server is the Python standard-library implementation. These are reasonable things to explain and improve as the project matures.
-
-Suggested next milestones, in order:
-
-1. Establish the clean GitHub repository, record tested releases and verify the Mac setup.
-2. Learn the source flow and make a small tested change yourself.
-3. Add stronger extraction/location/salary examples and clearer unknown-state handling.
-4. Refactor compact backend sections into focused modules without changing behavior.
-5. Validate the paid AI integration with a configured account and a deliberately small usage budget.
-6. Improve employer coverage one source family at a time, with source-specific evidence and regression checks.
-7. Verify the native workflow on a signed physical iPhone build.
-8. Add authentication and deployment hardening before expanding access.
-
-These are plans, not features already shipped.
+The [roadmap](NEXT-STEPS.md) prioritizes daily reliability and the quality of verified, direct opportunities. Public service readiness requires authenticated accounts, tested data isolation and recovery, and validation of provider costs and customer value. These requirements come from the [approved product vision](PRODUCT-VISION.md).
 
 ## 21. Learning and presenting the project
 

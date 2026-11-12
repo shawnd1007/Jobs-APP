@@ -1,4 +1,6 @@
-# Stage Two · iPhone product pass
+# Stage Two · Build 9 checklist
+
+The [approved product vision](PRODUCT-VISION.md) describes the product we are building. This checklist records Build 9 of the private, local-first app. See the [verification record](VERIFICATION.md) for observed checks and the [roadmap](NEXT-STEPS.md) for prioritized work.
 
 The iPhone app opens with a clear path into the product. Choose **Explore sample jobs** to try it immediately, or **Connect to your Mac** to open your real workspace. The original [product audit](PRODUCT-AUDIT.md) and [job-board research](PERSONALIZED-JOB-BOARD.md) informed the design. The welcome screen offers an immediate way to try the app, with native navigation for moving between discovery and tracking. [Apple onboarding guidance](https://developer.apple.com/design/human-interface-guidelines/onboarding) · [Apple tab bar guidance](https://developer.apple.com/design/human-interface-guidelines/tab-bars)
 
@@ -15,7 +17,7 @@ The iPhone app opens with a clear path into the product. Choose **Explore sample
 
 The sample uses 16 fictional listings across several industries, with example applications in Applied and Interviews. A searchable skill catalog is available in the sample profile, connected profile, and saved searches. Sample skills and a pay preset update For You locally. Save, Pass, Undo and application edits work offline. Sample changes persist locally between launches. A confirmed reset in sample Settings clears them. The sample performs no employer searches, AI calls, notifications or writes to the Mac. Connected mode continues to use the existing versioned tracking and review endpoints. The live search, résumé matching and alert workflows require the Mac connection described in the [iPhone guide](../ios/README.md).
 
-## Verification
+## Earlier Stage Two checks
 
 - Xcode built the iPhone simulator app and an unsigned device release.
 - The iPhone 17 simulator on iOS 27.2 passed an isolated Xcode UI test covering first launch, Top Matches and Needs Review, Save and Pass with Undo, Browse navigation, My Jobs, marking a sample application Applied, and leaving the sample.

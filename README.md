@@ -1,15 +1,17 @@
 # Jobs App
 
-Jobs is a personal job-search workspace. It brings employer listings, a reusable search profile, and application tracking together in a browser and an iPhone app so you can find a role, see why it fits, and keep track of what to do next.
+Jobs is being built as a paid, secure, ad-free personal AI recruiter. It should understand a job seeker's experience and goals, find current openings on employer sites, explain the fit, help prepare a truthful application, and replace the application spreadsheet. Shawn is the first daily tester. Other job seekers are the intended customers. [Approved product vision](docs/PRODUCT-VISION.md)
 
-## What Jobs does
+Build 9 is a local-first, single-workspace prototype with a browser dashboard and a native iPhone app. The Python service owns the shared SQLite database and runs discovery. The iPhone connects to that service and can reopen its last synced copy offline. Run the service on a trusted network because the prototype has no sign-in.
+
+## What works in Build 9
 
 - **Find roles.** Pull openings from Greenhouse, Lever, Ashby, and SmartRecruiters employer boards. Browse the full collection or open **For You** to see ranked recommendations.
-- **Personalize matching.** Import a résumé on iPhone, choose the roles and skills you want to match, and set location and pay preferences. Job details explain the score and identify details to verify.
-- **Save searches.** Keep separate sets of criteria and review new matches in the alert inbox. The iPhone can notify you when it connects and finds unread matches.
+- **Personalize matching.** Import a résumé on iPhone, select supported skills and experience, and set role, location and pay preferences. Job details explain the score and identify details to verify.
+- **Save searches.** Keep separate sets of criteria and review new matches in the alert inbox. Local iPhone notification delivery still needs a signed-device check.
 - **Manage applications.** Save or pass on roles, apply on the employer’s site, and use **My Jobs** to track stages, notes, and follow-ups.
 - **Read offline.** Open the last synced workspace on iPhone to review real listings and application history when the Mac is unavailable.
-- **Request AI advice.** With OpenAI configured on the server, compare your profile with an individual posting to see relevant experience, gaps, and questions to verify.
+- **Request AI advice.** The optional OpenAI integration compares your profile with a posting. Build 9 checks use mocked providers. Paid execution and costs need separate validation.
 
 ## Try it
 
@@ -17,7 +19,7 @@ On iPhone, choose **Explore sample jobs** to try recommendations and application
 
 ## Run locally
 
-Install Python 3.13 and Docker Desktop, then run:
+Use Python 3.13 and Docker Compose from a [clean checkout](docs/GITHUB-SETUP.md).
 
 ```sh
 python3 setup_project.py
@@ -28,9 +30,14 @@ On Windows use `python` if that is your installed command. Open http://localhost
 
 This source copy starts with an empty workspace. Scheduled search, public web discovery and AI are initially off. Add an employer board in Preferences and request a search.
 
+For a native Python backend, run `JOBS_BIND_HOST=127.0.0.1 python3 app.py` after setup. On Windows PowerShell, set `$env:JOBS_BIND_HOST = '127.0.0.1'` before running `python app.py`. Stop the other backend first if port 8084 is already in use.
+
 ## Checks
 
+Use a separate source checkout with an empty local setup and fictional fixtures. Run the two browser checks sequentially through the package script.
+
 ```sh
+python3 setup_project.py
 python3 -m unittest -v test_app.py test_prototype.py
 npm ci
 npx playwright install chromium
@@ -39,8 +46,13 @@ PYTHON=python3 npm run test:browser
 
 Node is only a development/test dependency. The runtime backend uses the Python standard library. On Windows set `$env:PYTHON='python'` before the npm browser command.
 
-## Project scope
+## Project docs
 
-Jobs is a private-network prototype for one workspace. The Python server uses SQLite and serves the browser dashboard and iPhone app. Keep it on a trusted network because the API currently has no sign-in.
-
-Read the [project guide](docs/COMPLETE-GUIDE.md) for architecture and workflows, the [development guide](CONTRIBUTING.md) for contributing, and the [verification notes](docs/VERIFICATION.md) for test coverage and platform limits.
+| Where to start | What it covers |
+| --- | --- |
+| [Product vision](docs/PRODUCT-VISION.md) | The approved product and business goals |
+| [Project guide](docs/COMPLETE-GUIDE.md) | Current architecture, data ownership, setup, API, and recovery |
+| [iPhone guide](ios/README.md) | Xcode setup, offline reading, résumé import, and alerts |
+| [Build checklist](docs/STAGE-TWO.md) and [verification](docs/VERIFICATION.md) | What shipped in Build 9 and what was tested |
+| [Roadmap](docs/NEXT-STEPS.md) | The next work toward a dependable local app and a secure service |
+| [Contributing](CONTRIBUTING.md) and [GitHub workflow](docs/GITHUB-SETUP.md) | Safe tests, branch conventions, and publication |
