@@ -47,14 +47,41 @@ def connect():
     c.execute('PRAGMA foreign_keys=ON'); c.execute('PRAGMA journal_mode=WAL'); return c
 def clean(s): return html.unescape(re.sub('<[^>]+>', ' ', s or '')).strip()
 def norm(s): return re.sub(r'[^a-z0-9]+',' ',s.lower()).strip()
+BOARD_HOSTS = {
+    'boards.greenhouse.io': 'greenhouse', 'job-boards.greenhouse.io': 'greenhouse',
+    'jobs.ashbyhq.com': 'ashby', 'jobs.lever.co': 'lever',
+    'jobs.smartrecruiters.com': 'smartrecruiters', 'careers.smartrecruiters.com': 'smartrecruiters',
+}
+BOARD_PLATFORMS = frozenset(BOARD_HOSTS.values())
+
 def identity(url):
     u=up.urlsplit(url); host=(u.hostname or '').lower(); path=u.path.rstrip('/'); parts=path.split('/')
     if host in ('boards.greenhouse.io','job-boards.greenhouse.io') and len(parts)>=4:
         return 'greenhouse:'+parts[1].lower()+':'+parts[3]
     if host=='jobs.ashbyhq.com' and len(parts)>=3: return 'ashby:'+parts[1].lower()+':'+parts[2]
     if host=='jobs.lever.co' and len(parts)>=3: return 'lever:'+parts[1].lower()+':'+parts[2]
+    if BOARD_HOSTS.get(host) == 'smartrecruiters' and len(parts) >= 3:
+        posting = re.match(r'^(\d+)(?:-|$)', parts[2])
+        if posting:
+            return f'smartrecruiters:{parts[1].lower()}:{posting[1]}'
     query=up.urlencode([(k,v) for k,v in up.parse_qsl(u.query) if k in ('gh_jid','jobId','requisitionId')])
     return up.urlunsplit(('https',host,path,query,''))
+
+def stored_board_posting(ident):
+    platform, _, rest = ident.partition(':')
+    board, _, posting = rest.partition(':')
+    if platform not in BOARD_PLATFORMS or not board or not posting:
+        return None
+    path = up.quote(board, safe='') + '/'
+    posting_path = up.quote(posting, safe='')
+    urls = {
+        'greenhouse': f'https://job-boards.greenhouse.io/{path}jobs/{posting_path}',
+        'ashby': f'https://jobs.ashbyhq.com/{path}{posting_path}/application',
+        'lever': f'https://jobs.lever.co/{path}{posting_path}/apply',
+        'smartrecruiters': f'https://jobs.smartrecruiters.com/{path}{posting_path}',
+    }
+    return urls[platform], posting
+
 def safe_url(url):
     u=up.urlsplit(url)
     if u.scheme!='https' or not u.hostname or u.username or u.password: raise ValueError('Only public HTTPS employer URLs allowed')
@@ -85,7 +112,7 @@ def init():
         c.executescript('''CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, identity TEXT UNIQUE NOT NULL, fallback TEXT, listing TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS jobs_fallback ON jobs(fallback);
         CREATE TABLE IF NOT EXISTS tracking(job_id INTEGER PRIMARY KEY REFERENCES jobs(id),status TEXT NOT NULL DEFAULT 'Needs Verification',application_date TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',follow_up TEXT NOT NULL DEFAULT '',updated TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started TEXT NOT NULL,finished TEXT,state TEXT NOT NULL,report TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started TEXT NOT NULL,finished TEXT,state TEXT NOT NULL,report TEXT NOT NULL,trigger TEXT);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,job_id INTEGER,at TEXT NOT NULL,detail TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS usage(day TEXT PRIMARY KEY,requests INTEGER NOT NULL DEFAULT 0,credits REAL NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS job_interests(job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
@@ -93,7 +120,9 @@ def init():
         CREATE TABLE IF NOT EXISTS reviews(job_id INTEGER PRIMARY KEY REFERENCES jobs(id),decision TEXT NOT NULL DEFAULT 'Pending',note TEXT NOT NULL DEFAULT '',reviewer TEXT NOT NULL DEFAULT '',checks TEXT NOT NULL DEFAULT '{}',updated TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 0);
         PRAGMA user_version=1;''')
         if 'reserved' not in [r[1] for r in c.execute('PRAGMA table_info(usage)')]:c.execute('ALTER TABLE usage ADD COLUMN reserved INTEGER NOT NULL DEFAULT 0')
-        c.execute('PRAGMA user_version=3')
+        if 'trigger' not in [r[1] for r in c.execute('PRAGMA table_info(runs)')]:
+            c.execute('ALTER TABLE runs ADD COLUMN trigger TEXT')
+        c.execute('PRAGMA user_version=4')
         prototype.init(c)
         c.execute("UPDATE runs SET state='interrupted',finished=? WHERE state='running'",(now(),))
         if not c.execute('SELECT 1 FROM jobs LIMIT 1').fetchone():
@@ -105,15 +134,35 @@ def init():
                 location=clean(re.findall(r'<em>(.*?)</em>',a,re.S)[-1]); posted=re.search(r'Posted (\d{4}-\d\d-\d\d)',location)
                 job={'employer':field('company'),'title':title,'url':url,'salary_text':field('salary'),'location':location,'description':field('why'),'explanation':field('why')+' '+field('note'),'score':int(re.search(r'data-fit="(\d)',a)[1])*20,'category':'Imported','posted':posted[1] if posted else '', 'availability':'Needs Verification','eligibility':'Review','last_verified':'','source':'Original HTML, November 5, 2026','history_confirmation':True}
                 upsert(c,job)
-        for row in c.execute('SELECT id,listing FROM jobs').fetchall():
-            j=json.loads(row['listing']);eligible,reason,area=location_eligibility(j,config())
+        cfg = config()
+        for row in c.execute('SELECT id,identity,listing FROM jobs').fetchall():
+            j = json.loads(row['listing'])
+            stored = stored_board_posting(row['identity'])
+            if stored and identity(j['url']) != row['identity']:
+                # Older versions could replace a posting by title and retain the prior ID.
+                j.update(url=stored[0], requisition=stored[1], availability='Needs Verification',
+                         queue='Review', last_verified='', salary_text='Salary not yet verified',
+                         description='', posted='', application_evidence='Stored requisition requires a fresh employer check.')
+                for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type',
+                              'compensation_details','application_verified'):
+                    j.pop(field, None)
+            eligible,reason,area=location_eligibility(j,cfg)
             j.update(location_eligibility=eligible,location_reason=reason,area=area)
             if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
             c.execute('UPDATE jobs SET listing=? WHERE id=?',(json.dumps(j),row['id']))
 def upsert(c,j):
     ident=identity(j['url']); fallback='|'.join(norm(str(j.get(k,''))) for k in ('employer','title','location'))
     row=c.execute('SELECT * FROM jobs WHERE identity=?',(ident,)).fetchone()
-    if not row: row=c.execute('SELECT * FROM jobs WHERE fallback=?',(fallback,)).fetchone()
+    if not row:
+        alternatives = c.execute('SELECT * FROM jobs WHERE fallback=?', (fallback,)).fetchall()
+        if len(alternatives) == 1:
+            previous = alternatives[0]
+            old = json.loads(previous['listing'])
+            old_board = board_identity(old['url'])
+            new_board = board_identity(j['url'])
+            # Distinct recruiting-platform IDs represent distinct openings.
+            if not (old_board and new_board) and not (old.get('requisition') and j.get('requisition')):
+                row = previous
     stamp=now()
     if row:
         old=json.loads(row['listing'])
@@ -121,7 +170,9 @@ def upsert(c,j):
         for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified'):
             old.pop(field,None)
         old.update(j)
-        c.execute('UPDATE jobs SET listing=?,updated=? WHERE id=?',(json.dumps(old),stamp,row['id']))
+        canonical = ident if board_identity(j['url']) else row['identity']
+        c.execute('UPDATE jobs SET identity=?,fallback=?,listing=?,updated=? WHERE id=?',
+                  (canonical, fallback, json.dumps(old), stamp, row['id']))
         return row['id'],False
     cur=c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?)',(ident,fallback,json.dumps(j),stamp,stamp))
     c.execute('INSERT INTO tracking(job_id,updated) VALUES(?,?)',(cur.lastrowid,stamp))
@@ -134,8 +185,8 @@ def records():
         return result
 
 UNAPPLIED={'Needs Verification','Not Applied','Planning to Apply'}
-def review_blockers(j):
-    cfg=config();geo=location_eligibility(j,cfg)[0];problems=[]
+def review_blockers(j, cfg=None):
+    cfg=config() if cfg is None else cfg;geo=location_eligibility(j,cfg)[0];problems=[]
     if geo=='Rejected':problems.append('Location is outside your saved preferences.')
     salary=base_salary(j)
     if salary is not None and salary<cfg['salary_floor']:problems.append('Published maximum base salary is below your minimum.')
@@ -246,6 +297,45 @@ def discovery_locations(cfg):
     return ('Eligible',)
 
 
+def experience_evidence(description, profile, skills):
+    """Find explicit résumé terms in sentences that describe actual work."""
+    if not profile or not skills:
+        return []
+    profile = clean(profile).lower()
+    def mentioned(term, text):
+        return term in text and bool(re.search(r'(?<![\w+#])' + re.escape(term) + r'(?![\w+#])', text))
+
+    supported = [skill for skill in skills if len(skill) > 2 and mentioned(skill, profile)]
+    if not supported:
+        return []
+    lines = re.split(r'[\r\n•]+|(?<=[.!?])\s+', description)
+    evidence = {}
+    for line in lines:
+        line = ' '.join(line.split())
+        lower = line.lower()
+        if not re.search(r'\b(?:analy[sz]e|audit|build|coordinate|create|design|develop|handle|implement|investigate|lead|maintain|manage|monitor|own|prepare|process|reconcile|report|resolve|review|support|track|validate|verify|work)\b', lower):
+            continue
+        if re.search(r'\b(?:required|qualifications|years of experience|proficien(?:cy|t)|preferred|you (?:have|bring))\b', lower):
+            continue
+        for term in supported:
+            if mentioned(term, lower):
+                evidence.setdefault(term, line[:240])
+        if len(evidence) >= 8:
+            break
+    return [{'skill': skill, 'duty': duty} for skill, duty in list(evidence.items())[:8]]
+
+def qualification_checks(description):
+    checks = []
+    if re.search(r'\b(?:bachelor|master|doctoral|doctorate|degree)\b', description):
+        equivalent = re.search(r'\b(?:equivalent (?:work |professional )?experience|experience in lieu of)\b', description)
+        checks.append('Posting mentions a degree and equivalent experience.' if equivalent
+                      else 'Check the degree requirement and whether equivalent experience is accepted.')
+    if re.search(r'\b(?:certification|licensure|license|clearance) (?:is )?required\b', description):
+        checks.append('Check the employer’s required certification, license or clearance.')
+    if re.search(r'\b\d+\+?\s*(?:years|yrs) of (?:professional |relevant )?experience\b', description):
+        checks.append('Compare your experience with the employer’s stated years requirement.')
+    return checks
+
 def assess(j,cfg):
     title=j.get('title','').lower(); desc=clean(j.get('description','')); text=(title+' '+desc).lower()
     eligible,location_reason,area=location_eligibility(j,cfg)
@@ -269,7 +359,7 @@ def assess(j,cfg):
                              if skill.strip())
     # Keep literal skill boundaries so C, C++, and C# remain distinct.
     matched_skills = [skill for skill in selected
-                      if re.search(r'(?<![\w+#])' + re.escape(skill) + r'(?![\w+#])', text)]
+                      if skill in text and re.search(r'(?<![\w+#])' + re.escape(skill) + r'(?![\w+#])', text)]
     matched_groups = [group for group in cfg.get('skill_groups', [])
                       if any(term.strip() and words(term) in posting_words for term in group['terms'])]
     breakdown = {
@@ -282,11 +372,14 @@ def assess(j,cfg):
     if matched_skills:
         reasons.append("Selected skills: " + ", ".join(matched_skills))
     reasons.extend(group['label'] for group in matched_groups)
-    gaps = [] if desc.strip() else ['Employer description missing. Review the posting for duties and requirements.']
+    evidence = experience_evidence(desc, cfg.get('profile', ''), matched_skills)
+    gaps = qualification_checks(desc) if desc.strip() else [
+        'Employer description missing. Review the posting for duties and requirements.'
+    ]
     j.update(
         category=category, score=score, eligibility=eligible, score_breakdown=breakdown,
         matched_skills=matched_skills, matched_groups=[group['label'] for group in matched_groups],
-        match_gaps=gaps,
+        match_gaps=gaps, duty_evidence=evidence,
         explanation=(
             f"Profile fit {score}/100. Target role {breakdown['target_role']}/45, "
             f"selected skills {breakdown['selected_skills']}/30, "
@@ -327,32 +420,139 @@ def board_jobs(platform,board):
             if salary.get('currency')=='USD' and salary.get('interval')=='per-year':j.update(salary_min=salary.get('min'),salary_max=salary.get('max'),salary_currency='USD',salary_period='year',salary_type='base')
             out.append(j)
         return out
+    if platform == 'smartrecruiters':
+        return smartrecruiters_board(board)
     raise ValueError('Unsupported board')
+
+def rotating_postings(listings, run_id, limit):
+    if len(listings) <= limit:
+        return listings
+    ordered = sorted(listings, key=lambda job: (job['posted'], job['requisition']), reverse=True)
+    offset = (run_id - 1) * limit % len(ordered)
+    return (ordered[offset:] + ordered[:offset])[:limit]
+
+def smartrecruiters_board(board):
+    endpoint = 'https://api.smartrecruiters.com/v1/companies/' + up.quote(board, safe='') + '/postings'
+    listings = []
+    seen = set()
+    for offset in range(0, 3000, 100):
+        page = fetch(f'{endpoint}?destination=PUBLIC&limit=100&offset={offset}')
+        total = page.get('totalFound')
+        entries = page.get('content')
+        if type(total) is not int or total < 0 or not isinstance(entries, list):
+            raise ValueError('Invalid SmartRecruiters pagination response')
+        if len(entries) != min(100, max(0, total - offset)):
+            raise ValueError('Incomplete SmartRecruiters board response')
+        for item in entries:
+            posting = str(item.get('id', ''))
+            if not posting.isascii() or not posting.isdigit() or posting in seen:
+                raise ValueError('Invalid or repeated SmartRecruiters posting ID')
+            seen.add(posting)
+            listings.append(smartrecruiters_listing(board, item, f'{endpoint}/{posting}'))
+        if len(listings) == total:
+            return listings
+    raise ValueError('SmartRecruiters board exceeds the safe pagination limit')
+
+def smartrecruiters_listing(board, item, detail_url=None):
+    posting = str(item['id'])
+    location = item.get('location') or {}
+    country = location.get('country') or ''
+    if country.lower() == 'us':
+        country = 'United States'
+    parts = {}
+    for part in (location.get('city'), location.get('region'), country):
+        if part:
+            parts.setdefault(part.casefold(), part)
+    address = ', '.join(parts.values())
+    if location.get('hybrid'):
+        address = 'Hybrid · ' + address
+    sections = (item.get('jobAd') or {}).get('sections') or {}
+    text = '\n'.join(clean((sections.get(key) or {}).get('text')) for key in
+                     ('jobDescription', 'qualifications', 'additionalInformation'))
+    fallback_url = f'https://jobs.smartrecruiters.com/{board}/{posting}'
+    link = item.get('applyUrl') or item.get('postingUrl') or fallback_url
+    if identity(link) != identity(fallback_url):
+        raise ValueError('SmartRecruiters application URL does not match its posting ID')
+    result = {
+        'title': item['name'], 'employer': (item.get('company') or {}).get('name') or board,
+        'location': address, 'remote': location.get('remote') is True,
+        'description': text, 'posted': item.get('releasedDate') or '',
+        'url': link, 'requisition': posting,
+        'availability': 'Closed' if item.get('active') is False else 'Open',
+        'last_verified': now(), 'source': 'SmartRecruiters public employer board',
+        'application_evidence': 'Employer posting returned by the public Posting API',
+        'salary_text': 'Salary Not Published',
+    }
+    if detail_url:
+        result['detail_url'] = detail_url
+    return result
+
+def hydrate_board_listing(board, listing):
+    endpoint = listing.get('detail_url')
+    if not endpoint:
+        return listing
+    detail = fetch(endpoint)
+    if str(detail.get('id')) != listing['requisition']:
+        raise ValueError('SmartRecruiters detail does not match its posting ID')
+    return smartrecruiters_listing(board, {
+        'name': listing['title'], 'releasedDate': listing['posted'], **detail,
+    })
+
 def board_identity(url):
     u=up.urlsplit(url);parts=u.path.strip('/').split('/')
-    platform={'boards.greenhouse.io':'greenhouse','job-boards.greenhouse.io':'greenhouse','jobs.ashbyhq.com':'ashby','jobs.lever.co':'lever'}.get((u.hostname or '').lower())
+    platform = BOARD_HOSTS.get((u.hostname or '').lower())
     return (platform,parts[0].lower()) if platform and parts[0] else None
-def verify_application(j,report=None):
-    """A live board record alone is insufficient: check job-specific application evidence."""
-    url=j['url'];safe_url(url)
+def verify_application(j, report=None):
+    """Verify the specific requisition and look for evidence of an application form."""
+    url = j['url']
+    safe_url(url)
+    visible = False
     try:
-        with OPENER.open(ur.Request(url,headers={'User-Agent':'Mozilla/5.0 PersonalJobDashboard'}),timeout=25) as response:
-            raw=response.read(3000000).decode('utf-8',errors='replace');final=response.url
-    except Exception:
-        key=firecrawl_key()
-        if not key or not config()['firecrawl_enabled'] or report is None:raise
-        data=firecrawl('scrape',{'url':url,'formats':['html','markdown'],'maxAge':0,'waitFor':3000},report)
-        raw=data.get('html','')+'\n'+data.get('markdown','');final=data.get('metadata',{}).get('url',url)
-    if identity(final)!=identity(url):raise ValueError('Application redirected away from the requisition')
-    content=html.unescape(raw).lower()
-    if re.search(r'(no longer accepting applications|position has been filled|job is (?:closed|expired)|job not found)',clean(content)):raise ValueError('Application page says unavailable')
-    tokens=[t for t in norm(j['title']).split() if len(t)>3]
-    if tokens and sum(t in content for t in tokens)<max(1,len(tokens)//2):raise ValueError('Job title not confirmed on application page')
-    if not re.search(r'(<form|applicationform|application_form|apply for this job|submit application|ashby-application-form)',content):
-        raise ValueError('Application form not confirmed in accessible page content')
-    j['application_evidence']+='; direct requisition page and application-form evidence checked'
-    j['application_verified']=now()
+        request = ur.Request(url, headers={'User-Agent': 'Mozilla/5.0 PersonalJobDashboard'})
+        with OPENER.open(request, timeout=25) as response:
+            raw = response.read(3000000).decode('utf-8', errors='replace')
+            final = response.url
+    except OSError:
+        if report is None or not config()['firecrawl_enabled'] or not firecrawl_key():
+            raise
+    else:
+        visible = application_form_visible(j, raw, final)
+
+    if not visible:
+        if report is None or not config()['firecrawl_enabled'] or not firecrawl_key():
+            raise ValueError('Application form not confirmed in accessible page content')
+        data = firecrawl('scrape', {'url': url, 'formats': ['html', 'markdown'], 'maxAge': 0,
+                                   'waitFor': 3000}, report)
+        rendered = (data.get('html') or '') + '\n' + (data.get('markdown') or '')
+        final = (data.get('metadata') or {}).get('url') or url
+        if not application_form_visible(j, rendered, final):
+            raise ValueError('Application form not confirmed in rendered employer page')
+    j['application_evidence'] += '; direct requisition page and application-form evidence checked'
+    j['application_verified'] = now()
     return j
+
+def application_form_visible(j, raw, final):
+    if identity(final) != identity(j['url']):
+        raise ValueError('Application redirected away from the requisition')
+    page = re.sub(r'<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>', '', raw, flags=re.I | re.S)
+    visible_text = re.sub(r'\s+', ' ', clean(page)).lower()
+    if re.search(r'(no longer accepting applications|position has been filled|job is (?:closed|expired)|job not found)', visible_text):
+        raise ValueError('Application page says unavailable')
+    title_words = set(norm(j['title']).split())
+    page_words = set(norm(visible_text).split())
+    if title_words and len(title_words & page_words) < (len(title_words) + 1) // 2:
+        return False
+    for form in re.findall(r'<form\b[^>]*>.*?</form\s*>', page, flags=re.I | re.S):
+        controls = html.unescape(form).lower()
+        form_text = re.sub(r'\s+', ' ', clean(form)).lower()
+        if re.search(r'\b(?:submit (?:your )?application|apply for this job|send (?:your )?application)\b', form_text):
+            return True
+        if re.search(r'<(?:input|select|textarea)\b', controls) and re.search(
+            r'\b(?:resume|résumé|cover[_ -]?letter|candidate[_ -]?first[_ -]?name)\b', controls
+        ):
+            return True
+    return False
+
 def finalize(j,cfg,report):
     j=assess(j,cfg)
     if j['queue']=='Confirmed':
@@ -435,14 +635,17 @@ def firecrawl(endpoint,payload,report):
         with connect() as c:c.execute('UPDATE usage SET credits=credits+? WHERE day=?',(credits,day))
     report['firecrawl_requests']+=1
     return result.get('data',{})
-def run_pipeline():
+def run_pipeline(trigger='manual'):
     report={'new_qualified':0,'new_review':0,'reverified':0,'newly_closed':0,'duplicates':0,'failures':[],'top_new':[],'firecrawl_requests':0,'firecrawl_credits_reported':0,'log':[]}
     run_id=None
     try:
-        cfg=config();backup()
         with connect() as c:
+            cursor = c.execute('INSERT INTO runs(started,state,report,trigger) VALUES(?,?,?,?)',
+                               (now(), 'running', json.dumps(report), trigger))
+            run_id = cursor.lastrowid
             searches = prototype.saved_searches(c)
-            cur=c.execute('INSERT INTO runs(started,state,report) VALUES(?,?,?)',(now(),'running',json.dumps(report)));run_id=cur.lastrowid
+        cfg = config()
+        backup()
         existing=records(); boards=set()
         for j in existing:
             b=board_identity(j['url'])
@@ -450,7 +653,9 @@ def run_pipeline():
         for platform,names in cfg['additional_boards'].items():boards.update((platform,n.lower()) for n in names)
         with connect() as c:
             for row in c.execute('SELECT source FROM source_health'):
-                if re.fullmatch(r'(ashby|greenhouse|lever)/[a-z0-9._-]+',row['source']):boards.add(tuple(row['source'].split('/',1)))
+                platform, _, slug = row['source'].partition('/')
+                if platform in BOARD_PLATFORMS and re.fullmatch(r'[a-z0-9._-]+', slug):
+                    boards.add((platform, slug))
         discoveries=[]
         key=firecrawl_key()
         if cfg.get('public_web_search_enabled'):
@@ -483,7 +688,10 @@ def run_pipeline():
                         elif hit.get('url'): discoveries.append(hit['url'])
                 except Exception as e:report['failures'].append('Firecrawl discovery: '+type(e).__name__+': '+str(e)[:160])
         else:report['log'].append('Public board mode: Firecrawl is disabled or no key is configured.')
-        new_count=0;seen=set();successful=0
+        known_identities = {job['identity'] for job in existing}
+        candidates = {}
+        seen = set()
+        successful = 0
         for platform,board in sorted(boards):
             if platform+'/'+board in cfg.get('disabled_sources',[]):continue
             try:
@@ -491,10 +699,12 @@ def run_pipeline():
                 prototype.source_result(service(),platform+'/'+board,'ok',len(live))
                 current=[j for j in existing if board_identity(j['url'])==(platform,board)]
                 current.sort(key=lambda j:j.get('last_verified',''))
+                recheck_limit = min(cfg['max_rechecks'], 8) if platform == 'smartrecruiters' else cfg['max_rechecks']
                 with connect() as c:
-                    for old in current[:cfg['max_rechecks']]:
+                    for old in current[:recheck_limit]:
                         ident=identity(old['url']);fresh=by_id.get(ident)
                         if fresh:
+                            fresh = hydrate_board_listing(board, fresh)
                             # Keep original human readable employer names; ATS slugs are identifiers.
                             fresh['employer']=old['employer'];fresh['history_confirmation']=old.get('history_confirmation',False)
                             j=finalize(fresh,cfg,report);upsert(c,j);c.commit();report['reverified']+=1
@@ -502,31 +712,41 @@ def run_pipeline():
                             old['availability']='Closed';old['queue']='Review';old['last_verified']=now()
                             if old.get('application_evidence')!='Absent from employer live board':report['newly_closed']+=1
                             old['application_evidence']='Absent from employer live board';upsert(c,old);c.commit()
-                    for j in live:
+                    new_listings = live
+                    if platform == 'smartrecruiters':
+                        fresh = [j for j in live if identity(j['url']) not in known_identities]
+                        enabled_searches = [search for search in searches if search['enabled'] and search.get('title_terms')]
+                        search_targets = [j for j in fresh if any(
+                            prototype.search_title_matches(j['title'], search) and location_eligibility(j, {
+                                'target_locations': search['locations'], 'workplace_types': search['workplace_types'],
+                            })[0] != 'Rejected' for search in enabled_searches
+                        )]
+                        search_target_ids = {j['requisition'] for j in search_targets}
+                        remaining = [j for j in fresh if j['requisition'] not in search_target_ids]
+                        relevant = lambda j: any(phrase.lower() in j['title'].lower() for phrase in cfg['categories'])
+                        target = [j for j in remaining if relevant(j) and location_eligibility(j, cfg)[0] != 'Rejected']
+                        target_ids = {identity(j['url']) for j in target}
+                        other = [j for j in remaining if identity(j['url']) not in target_ids]
+                        new_listings = rotating_postings(search_targets, run_id, 12)
+                        new_listings += rotating_postings(target, run_id, 12 - len(new_listings))
+                        new_listings += rotating_postings(other, run_id, 16 - len(new_listings))
+                        report['deferred_source_details'] = report.get('deferred_source_details', 0) + len(fresh) - len(new_listings)
+                    for j in new_listings:
                         ident=identity(j['url'])
                         if ident in seen:report['duplicates']+=1;continue
                         seen.add(ident)
-                        if any(x['identity']==ident for x in existing):continue
-                        if new_count>=cfg['max_new_candidates']:continue
-                        j = assess(j, cfg)
+                        if ident in known_identities:continue
+                        j = assess(hydrate_board_listing(board, j), cfg)
                         matched = prototype.matching_searches(service(), j, searches)
                         role_match = j['category'] != 'Other / Review'
+                        transferable_fit = len(j['duty_evidence']) >= 2
                         location_match = j['location_eligibility'] in discovery_locations(cfg)
                         if not matched:
                             if role_match and not location_match:
                                 report['skipped_location'] = report.get('skipped_location', 0) + 1
-                            if not role_match or not location_match or j['queue'] == 'Excluded':
+                            if not (role_match or transferable_fit) or not location_match or j['queue'] == 'Excluded':
                                 continue
-                        if j['queue'] == 'Confirmed':
-                            j = finalize(j, cfg, report)
-                        job_id, added = upsert(c, j)
-                        if added:
-                            prototype.record_match_alerts(c, job_id, matched, now())
-                        c.commit()
-                        if added:
-                            new_count+=1;report['new_qualified' if j['queue']=='Confirmed' else 'new_review']+=1
-                            if j['queue']=='Confirmed':report['top_new'].append({k:j[k] for k in ('title','employer','url','score')})
-                        else:report['duplicates']+=1
+                        candidates[ident] = (j, matched)
                 report['log'].append(platform+'/'+board+': '+str(len(live))+' live postings')
             except Exception as e:
                 prototype.source_result(service(),platform+'/'+board,'error',error=type(e).__name__+': '+str(e))
@@ -543,46 +763,113 @@ def run_pipeline():
         extra.sort(key=lambda u:checked.get(u,''))
         for url in extra[:cfg.get('generic_urls_per_run',5)]:
             try:
-                j=finalize(generic_posting(url,report,key if cfg['firecrawl_enabled'] else ''),cfg,report)
-                prototype.source_result(service(),url,'ok',1);successful+=1
+                j = generic_posting(url, report, key if cfg['firecrawl_enabled'] else '')
+                prototype.source_result(service(), url, 'ok', 1)
+                successful += 1
+                ident = identity(j['url'])
+                if ident in known_identities:
+                    j = finalize(j, cfg, report)
+                    with connect() as c:
+                        upsert(c, j)
+                    report['reverified'] += 1
+                    continue
+                j = assess(j, cfg)
                 matched = prototype.matching_searches(service(), j, searches)
-                if not matched and (j.get('location_eligibility')!='Eligible' or j['queue']=='Excluded'):continue
-                if new_count>=cfg['max_new_candidates'] and not any(identity(url)==x['identity'] for x in existing):continue
-                with connect() as c:
-                    job_id, added = upsert(c, j)
-                    if added:
-                        prototype.record_match_alerts(c, job_id, matched, now())
-                if added:
-                    new_count+=1
-                    report['new_qualified' if j['queue']=='Confirmed' else 'new_review']+=1
-                    if j['queue']=='Confirmed':report['top_new'].append({k:j[k] for k in ('title','employer','url','score')})
-                else:report['duplicates']+=1
+                if not matched and (j['location_eligibility'] != 'Eligible' or j['queue'] == 'Excluded'):
+                    continue
+                if ident in candidates:
+                    report['duplicates'] += 1
+                else:
+                    candidates[ident] = (j, matched)
             except Exception as e:
                 prototype.source_result(service(),url,'manual review',error=type(e).__name__+': '+str(e))
                 report['log'].append('Employer URL needs manual review: '+url+' ('+type(e).__name__+': '+str(e)[:100]+')')
-            time.sleep(cfg['request_delay_seconds'])
+            finally:
+                time.sleep(cfg['request_delay_seconds'])
+        ranked = sorted(candidates.values(), key=lambda item: (
+            item[0]['queue'] == 'Confirmed', bool(item[1]), len(item[0]['duty_evidence']), item[0]['score'],
+            item[0].get('posted') or '',
+        ), reverse=True)
+        limit = cfg['max_new_candidates']
+        new_count = 0
+        report['deferred_candidates'] = 0
+        for index, (job, matched) in enumerate(ranked):
+            if new_count >= limit:
+                report['deferred_candidates'] = len(ranked) - index
+                break
+            if job['queue'] == 'Confirmed':
+                job = finalize(job, cfg, report)
+            with connect() as c:
+                job_id, added = upsert(c, job)
+                if added:
+                    prototype.record_match_alerts(c, job_id, matched, now())
+            if not added:
+                report['duplicates'] += 1
+            else:
+                new_count += 1
+                if job['queue'] == 'Confirmed':
+                    report['new_qualified'] += 1
+                    report['top_new'].append({key: job[key] for key in ('title', 'employer', 'url', 'score')})
+                else:
+                    report['new_review'] += 1
         report['unprocessed_employer_urls']=extra[cfg.get('generic_urls_per_run',5):][:50]
         report['top_new']=sorted(report['top_new'],key=lambda j:-j['score'])[:10]
-        report['manual_review']=sum(j.get('queue')!='Confirmed' for j in records())
-        report['state']='partial' if report['failures'] else 'success' if successful else 'failed'
+        report['manual_review'] = sum(
+            j.get('queue') in ('Review', 'Location Review') and j.get('availability') != 'Closed'
+            for j in records()
+        )
+        report['state'] = ('partial' if report['failures'] else 'success') if successful else 'failed'
     except Exception as e:
         logging.exception('Search failed');report['failures'].append(type(e).__name__+': '+str(e)[:180]);report['state']='failed'
     finally:
-        if run_id:
-            with connect() as c:c.execute('UPDATE runs SET finished=?,state=?,report=? WHERE id=?',(now(),report.get('state','failed'),json.dumps(report),run_id))
-        LOCK.release()
+        try:
+            if run_id:
+                with connect() as c:
+                    c.execute('UPDATE runs SET finished=?,state=?,report=? WHERE id=?',
+                              (now(), report.get('state', 'failed'), json.dumps(report), run_id))
+        finally:
+            LOCK.release()
     return report
-def start_run():
-    if not LOCK.acquire(False):return False
-    threading.Thread(target=run_pipeline,daemon=True).start();return True
+
+def start_run(trigger='manual'):
+    if not LOCK.acquire(False):
+        return False
+    try:
+        threading.Thread(target=run_pipeline, args=(trigger,), daemon=True).start()
+    except Exception:
+        LOCK.release()
+        raise
+    return True
+
+def scheduled_run_due(c, utc, hour):
+    if utc.hour < hour:
+        return False
+    start = utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = c.execute(
+        "SELECT state, finished FROM runs WHERE trigger='scheduled' AND started>=? ORDER BY id DESC LIMIT 3",
+        (start.isoformat(timespec='seconds'),),
+    ).fetchall()
+    if not rows:
+        return True
+    if len(rows) >= 3 or any(row['state'] in ('running', 'success', 'partial') for row in rows):
+        return False
+    finished = rows[0]['finished']
+    return bool(finished and utc - dt.datetime.fromisoformat(finished) >= dt.timedelta(minutes=30))
+
 def schedule():
     while True:
         try:
-            cfg=config();utc=dt.datetime.now(dt.timezone.utc)
-            with connect() as c:last=c.execute('SELECT started FROM runs ORDER BY id DESC LIMIT 1').fetchone()
-            if cfg['schedule_enabled'] and utc.hour>=cfg['schedule_hour_utc'] and (not last or last[0][:10]!=now()[:10]):start_run()
-        except Exception:logging.exception('Scheduler')
+            cfg = config()
+            if cfg['schedule_enabled'] and not LOCK.locked():
+                utc = dt.datetime.now(dt.timezone.utc)
+                with connect() as c:
+                    due = scheduled_run_due(c, utc, cfg['schedule_hour_utc'])
+                if due:
+                    start_run('scheduled')
+        except Exception:
+            logging.exception('Scheduler')
         time.sleep(30)
+
 def snapshot():
     cfg=config();jobs=records();stamp=dt.datetime.now(dt.timezone.utc)
     for j in jobs:
@@ -591,10 +878,10 @@ def snapshot():
         if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
         eligible,reason,area=location_eligibility(j,cfg)
         j.update(location_eligibility=eligible,location_reason=reason,area=area)
-        j['review_blockers']=review_blockers(j)
+        j['review_blockers']=review_blockers(j,cfg)
         if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
         if j.get('queue')=='Confirmed':
-            verified=j.get('last_verified')
+            verified=j.get('application_verified')
             if not verified or (stamp-dt.datetime.fromisoformat(verified)).total_seconds()>cfg['verification_valid_hours']*3600:j['queue']='Review';j['stale']=True
         j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
     with connect() as c:
@@ -603,7 +890,7 @@ def snapshot():
             job['interest'] = interests.get(job['id'])
         runs=[dict(r) for r in c.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 30')]
         for r in runs:r['report']=json.loads(r['report'])
-    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':LOCK.locked(),'firecrawl_configured':False,'schedule_hour_utc':cfg['schedule_hour_utc']})
+    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':LOCK.locked(),'firecrawl_configured':bool(cfg['firecrawl_enabled'] and firecrawl_key()),'schedule_hour_utc':cfg['schedule_hour_utc']})
 def save_interest(job_id, payload):
     state = payload.get('state')
     version = payload.get('version')

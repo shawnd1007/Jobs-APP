@@ -23,6 +23,84 @@ class PersistenceTests(unittest.TestCase):
   j=app.records()[0];j['url']+='?utm_source=test#apply'
   with app.connect() as c:_,added=app.upsert(c,j)
   self.assertFalse(added);self.assertEqual(len(app.records()),50)
+ def test_distinct_requisitions_do_not_share_application_history(self):
+  first = dict(title='Billing Analyst', employer='Fictional Employer',
+               location='Remote - United States',
+               url='https://jobs.ashbyhq.com/fictional/job-one/application', requisition='job-one')
+  second = dict(first, url='https://jobs.ashbyhq.com/fictional/job-two/application', requisition='job-two')
+  with app.connect() as c:
+   first_id, _ = app.upsert(c, first)
+   c.execute("UPDATE tracking SET status='Applied' WHERE job_id=?", (first_id,))
+   second_id, added = app.upsert(c, second)
+   same_id, repeated = app.upsert(c, dict(second, url=second['url']+'?utm_source=sample'))
+  self.assertTrue(added)
+  self.assertFalse(repeated)
+  self.assertNotEqual(first_id, second_id)
+  self.assertEqual(second_id, same_id)
+  jobs = {j['id']: j for j in app.records()}
+  self.assertEqual(jobs[first_id]['status'], 'Applied')
+  self.assertEqual(jobs[second_id]['status'], 'Needs Verification')
+
+ def test_legacy_requisition_mismatch_restores_link_without_moving_tracking(self):
+  first = dict(title='Billing Analyst', employer='Fictional Employer', location='Remote - United States',
+               url='https://jobs.lever.co/fictional/job-one/apply', requisition='job-one')
+  overwritten = dict(first, url='https://jobs.lever.co/fictional/job-two/apply', requisition='job-two',
+                     availability='Open', application_verified=app.now(), salary_max=99000)
+  with app.connect() as c:
+   first_id, _ = app.upsert(c, first)
+   c.execute('UPDATE jobs SET listing=? WHERE id=?', (json.dumps(overwritten), first_id))
+   c.execute("UPDATE tracking SET status='Applied',notes='Preserve this' WHERE job_id=?", (first_id,))
+  app.init()
+  repaired = next(job for job in app.records() if job['id'] == first_id)
+  self.assertEqual(repaired['url'], first['url'])
+  self.assertEqual(repaired['requisition'], 'job-one')
+  self.assertEqual(repaired['availability'], 'Needs Verification')
+  self.assertNotIn('application_verified', repaired)
+  self.assertNotIn('salary_max', repaired)
+  self.assertEqual((repaired['status'], repaired['notes']), ('Applied', 'Preserve this'))
+
+ def test_smartrecruiters_rejects_partial_pages_and_hydrates_exact_posting(self):
+  row = {'id': '123', 'name': 'Billing Analyst', 'location': {'country': 'us', 'remote': True}}
+  with patch.object(app, 'fetch', return_value={'totalFound': 101, 'content': [row]}):
+   with self.assertRaisesRegex(ValueError, 'Incomplete'):
+    app.board_jobs('smartrecruiters', 'fictional')
+  detail = {**row, 'applyUrl': 'https://jobs.smartrecruiters.com/Fictional/123-billing-analyst?oga=true',
+            'jobAd': {'sections': {'jobDescription': {'text': 'Reconcile invoices.'}}}}
+  with patch.object(app, 'fetch', side_effect=[{'totalFound': 1, 'content': [row]}, detail]):
+   summary, = app.board_jobs('smartrecruiters', 'fictional')
+   job = app.hydrate_board_listing('fictional', summary)
+  self.assertEqual(app.identity(summary['url']), app.identity(job['url']))
+  self.assertEqual(job['location'], 'United States')
+  self.assertIn('Reconcile invoices.', job['description'])
+  self.assertNotIn('detail_url', job)
+
+ def test_duty_match_requires_profile_evidence_and_keeps_qualifications_separate(self):
+  result = app.experience_evidence('Build Excel reports. SQL proficiency required.',
+                                   'Used Excel to create monthly reports.', ['excel', 'sql'])
+  self.assertEqual(result, [{'skill': 'excel', 'duty': 'Build Excel reports.'}])
+  self.assertEqual(app.qualification_checks('degree or equivalent work experience'),
+                   ['Posting mentions a degree and equivalent experience.'])
+
+ def test_history_import_previews_matches_and_preserves_manual_tracking(self):
+  import csv
+  from import_history import import_history
+  jobs = app.records()[:2]
+  with app.connect() as c:
+   c.execute("UPDATE tracking SET notes='Keep this' WHERE job_id=?", (jobs[1]['id'],))
+  path = app.DATA / 'fictional-history.csv'
+  with path.open('w', newline='') as file:
+   writer = csv.DictWriter(file, fieldnames=['url', 'status', 'application_date'])
+   writer.writeheader()
+   for job in jobs:
+    writer.writerow(dict(url=job['url'], status='Applied', application_date='2026-11-10'))
+  self.assertEqual([row['result'] for row in import_history(path)],
+                   ['ready to import', 'existing tracking preserved'])
+  self.assertEqual([row['result'] for row in import_history(path, apply=True)],
+                   ['imported', 'existing tracking preserved'])
+  records = {job['id']: job for job in app.records()}
+  self.assertEqual(records[jobs[0]['id']]['status'], 'Applied')
+  self.assertEqual(records[jobs[1]['id']]['notes'], 'Keep this')
+
  def test_unknown_salary_not_qualified(self):
   j={'title':'Financial Analyst','location':'Remote - United States','remote':True,'description':'Excel financial reconciliation','availability':'Open'}
   self.assertEqual(app.assess(j,app.config())['queue'],'Review')
@@ -55,10 +133,114 @@ class PersistenceTests(unittest.TestCase):
   with patch.object(app,'config',return_value=cfg),patch.object(app,'board_jobs',side_effect=TimeoutError('Test timeout')):
    app.LOCK.acquire();report=app.run_pipeline()
   self.assertTrue(report['failures']);self.assertEqual(app.records()[0]['availability'],'Needs Verification');self.assertEqual(app.records()[0]['status'],'Applied')
+ def test_new_listing_limit_applies_after_ranking_all_boards(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(categories=['financial analyst'], preferred_skills=['Excel', 'Reconciliation'],
+             skill_groups=[], target_locations=[], workplace_types=[], max_new_candidates=1,
+             additional_boards={'ashby': ['aardvark', 'zebra']})
+  def board(_platform, slug):
+   if slug not in ('aardvark', 'zebra'):
+    return []
+   return [dict(title='Financial Analyst', employer=slug, location='Remote - United States',
+                url=f'https://jobs.ashbyhq.com/{slug}/test/application',
+                description='Excel and reconciliation' if slug == 'zebra' else 'Office support',
+                availability='Open')]
+  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=board):
+   app.LOCK.acquire()
+   report = app.run_pipeline()
+  self.assertEqual(report['new_review'], 1)
+  self.assertEqual(report['deferred_candidates'], 1)
+  self.assertIn('zebra', [job['employer'] for job in app.records()])
+  self.assertNotIn('aardvark', [job['employer'] for job in app.records()])
+
+ def test_smartrecruiters_checks_saved_search_titles_before_general_postings(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(categories=['Financial Analyst'], additional_boards={'smartrecruiters': ['fictional']})
+  criteria = dict(name='Billing in Austin', title_terms=['Billing'], skills=['Reconciliation'],
+                  locations=['Austin, TX'], workplace_types=['onsite'], salary_min=85000,
+                  salary_max=None, enabled=True)
+  self.assertEqual(app.prototype.change_saved_search(app, {'action': 'save', 'criteria': criteria})[0], 200)
+  postings = [dict(title='Operations Assistant', employer='Fictional', location='Austin, TX',
+                   url=f'https://jobs.smartrecruiters.com/fictional/{number}', requisition=str(number),
+                   posted='2026-11-11', availability='Open') for number in range(1, 21)]
+  postings[0].update(title='Billing Specialist', description='Reconciliation duties.', posted='2026-11-01',
+                     salary_min=90000, salary_max=110000, salary_currency='USD', salary_period='year',
+                     salary_type='base')
+  def board(platform, slug):
+   return postings if (platform, slug) == ('smartrecruiters', 'fictional') else []
+  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=board):
+   app.LOCK.acquire()
+   report = app.run_pipeline()
+   self.assertEqual(app.snapshot()['unread_match_count'], 1)
+  self.assertEqual(report['new_review'], 1)
+  self.assertEqual(report['deferred_source_details'], 4)
+
  def test_overlapping_run_rejected(self):
   app.LOCK.acquire()
   try:self.assertFalse(app.start_run())
   finally:app.LOCK.release()
+ def test_dynamic_application_uses_rendered_evidence_only_when_needed(self):
+  url = 'https://jobs.ashbyhq.com/fictional/job-1/application'
+  job = {'url': url, 'title': 'Financial Analyst', 'application_evidence': ''}
+  cfg = app.config()
+  cfg['firecrawl_enabled'] = True
+  with patch.object(app, 'safe_url'), patch.object(app, 'config', return_value=cfg), \
+       patch.object(app, 'firecrawl_key', return_value='fictional-key'), \
+       patch.object(app.OPENER, 'open') as request, patch.object(app, 'firecrawl') as render:
+   response = request.return_value.__enter__.return_value
+   response.url = url
+   response.read.return_value = b'<title>Financial Analyst</title>'
+   render.return_value = {'html': '<title>Financial Analyst</title><form>Submit application</form>',
+                          'metadata': {'url': url}}
+   report = {}
+   self.assertTrue(app.verify_application(dict(job), report)['application_verified'])
+   render.assert_called_once()
+   render.reset_mock()
+   response.read.return_value = b'<title>Financial Analyst</title><p>Job is closed</p>'
+   with self.assertRaisesRegex(ValueError, 'unavailable'):
+    app.verify_application(dict(job), report)
+   render.assert_not_called()
+
+ def test_application_evidence_ignores_newsletters_and_hidden_text(self):
+  url = 'https://jobs.lever.co/fictional/financial-analyst'
+  job = {'url': url, 'title': 'Financial Analyst'}
+  listing = '<h1>Financial Analyst</h1><a href="/apply">Apply for this job</a>'
+  newsletter = '<form><input name="email"><button>Subscribe</button></form>'
+  self.assertFalse(app.application_form_visible(job, listing + newsletter, url))
+  self.assertFalse(app.application_form_visible(job, listing + '<script>"<form>Submit application</form>"</script>', url))
+  self.assertTrue(app.application_form_visible(job, listing + '<form><input name="resume" type="file"></form>', url))
+
+ def test_daily_search_ignores_manual_runs_and_bounds_failed_retries(self):
+  utc = app.dt.datetime(2026, 11, 12, 13, tzinfo=app.dt.timezone.utc)
+  with app.connect() as c:
+   insert = 'INSERT INTO runs(started,finished,state,report,trigger) VALUES(?,?,?,?,?)'
+   stamp = (utc - app.dt.timedelta(hours=1)).isoformat()
+   c.execute(insert, (stamp, stamp, 'success', '{}', 'manual'))
+   self.assertFalse(app.scheduled_run_due(c, utc, 14))
+   self.assertTrue(app.scheduled_run_due(c, utc, 12))
+   c.execute(insert, (stamp, utc.isoformat(), 'failed', '{}', 'scheduled'))
+   self.assertFalse(app.scheduled_run_due(c, utc, 12))
+   later = utc + app.dt.timedelta(minutes=30)
+   self.assertTrue(app.scheduled_run_due(c, later, 12))
+   c.execute(insert, (later.isoformat(), later.isoformat(), 'partial', '{}', 'scheduled'))
+   self.assertFalse(app.scheduled_run_due(c, later + app.dt.timedelta(hours=1), 12))
+   c.execute("UPDATE runs SET state='failed' WHERE trigger='scheduled'")
+   c.execute(insert, (later.isoformat(), later.isoformat(), 'interrupted', '{}', 'scheduled'))
+   self.assertFalse(app.scheduled_run_due(c, later + app.dt.timedelta(hours=1), 12))
+   self.assertTrue(app.scheduled_run_due(c, utc + app.dt.timedelta(days=1), 12))
+
+ def test_scheduled_backup_failure_is_reported_and_releases_run_lock(self):
+  with patch.object(app, 'backup', side_effect=OSError('Test backup failure')):
+   app.LOCK.acquire()
+   result = app.run_pipeline('scheduled')
+  self.assertFalse(app.LOCK.locked())
+  self.assertEqual(result['state'], 'failed')
+  with app.connect() as c:
+   run = c.execute('SELECT trigger,state,finished FROM runs').fetchone()
+  self.assertEqual((run['trigger'], run['state']), ('scheduled', 'failed'))
+  self.assertIsNotNone(run['finished'])
+  self.assertEqual(len(app.records()), 50)
+
  def test_only_requested_locations_pass(self):
   cases=[('London, UK',True,'Rejected'),('Remote - Colombia',True,'Rejected'),('Texas',True,'Rejected'),('Bangalore, India',False,'Rejected'),('Atlanta, GA',False,'Rejected'),('Duluth, MN',False,'Review'),('Jacksonville, NC',False,'Review'),('Jacksonville, FL',False,'Eligible'),('Buford, GA Hybrid',False,'Eligible'),('Suwanee, Georgia',False,'Eligible'),('Remote - United States',True,'Eligible'),('U.S. Remote',True,'Eligible'),('Remote',True,'Review'),('Remote USA Hybrid',True,'Review')]
   for loc,remote,expected in cases:

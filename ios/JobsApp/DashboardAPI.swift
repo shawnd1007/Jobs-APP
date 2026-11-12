@@ -8,7 +8,7 @@ struct Dashboard: Decodable {
     let runs: [SearchRun]
     let statuses: [String]
     let running: Bool
-    let preferences: Preferences
+    var preferences: Preferences
     let preferencesRevision: String
     let sources: [EmployerSource]
     let aiConfigured: Bool
@@ -21,8 +21,22 @@ struct Job: Decodable, Identifiable {
         let version: Int
         let updated: String
     }
+    struct ScoreBreakdown: Decodable {
+        let targetRole: Int
+        let selectedSkills: Int
+        let skillGroups: Int
+    }
+
+    struct DutyEvidence: Decodable {
+        let skill: String
+        let duty: String
+    }
+
+    var dutyEvidence: [DutyEvidence]? = nil
+    var scoreBreakdown: ScoreBreakdown? = nil
+    var applicationVerified: String? = nil
     var interest: Interest?
-    let matchedSkills: [String]?
+    var matchedSkills: [String]?
     let matchedGroups: [String]?
     let matchGaps: [String]?
     let salaryMin: Double?
@@ -42,7 +56,7 @@ struct Job: Decodable, Identifiable {
     let salaryMax: Double?
     let availability: String?
     let description: String?
-    let explanation: String?
+    var explanation: String?
     let applicationEvidence: String?
     let source: String?
     let posted: String?
@@ -50,7 +64,7 @@ struct Job: Decodable, Identifiable {
     let created: String
     let updated: String
     let url: String?
-    let score: Int
+    var score: Int
     let matchLabel: String
     let queue: String?
     let reviewDecision: String
@@ -71,9 +85,22 @@ struct Job: Decodable, Identifiable {
         return salaryText
     }
 
+    var publishedAnnualBaseMax: Double? {
+        guard salaryCurrency == "USD", salaryPeriod == "year", salaryType == "base" else { return nil }
+        return salaryMax
+    }
+
+    var workSetting: String? {
+        if ["Remote", "Hybrid", "On-site"].contains(area ?? "") { return area }
+        let text = location?.lowercased() ?? ""
+        if text.contains("hybrid") { return "Hybrid" }
+        if text.contains("remote") { return "Remote" }
+        if locationEligibility == "Eligible", !text.isEmpty { return "On-site" }
+        return nil
+    }
+
     var concisePay: String {
-        guard salaryCurrency == "USD", salaryPeriod == "year", salaryType == "base",
-              let maximum = salaryMax else {
+        guard let maximum = publishedAnnualBaseMax else {
             let text = publishedPay
             if text.localizedCaseInsensitiveContains("tier") { return "Published pay varies by tier" }
             return text.count > 110 ? "See employer pay details" : text
@@ -179,13 +206,26 @@ struct SearchRun: Decodable, Identifiable {
     let started: String
     let finished: String?
     let state: String
+    let trigger: String?
     let report: Report
+
+    var originLabel: String {
+        if trigger == "scheduled" { return "Scheduled" }
+        if trigger == "manual" { return "Manual" }
+        return "Search"
+    }
 
     struct Report: Decodable {
         let newQualified: Int?
         let newReview: Int?
         let reverified: Int?
         let newlyClosed: Int?
+        let manualReview: Int?
+        let duplicates: Int?
+        let deferredCandidates: Int?
+        let deferredSourceDetails: Int?
+        let firecrawlRequests: Int?
+        let firecrawlCreditsReported: Double?
         let failures: [String]?
         let log: [String]?
         let topNew: [Lead]?
@@ -215,6 +255,12 @@ struct SavedAdvice: Decodable {
 }
 
 enum DashboardAPI {
+    struct Snapshot {
+        let dashboard: Dashboard
+        let data: Data
+        let syncedAt: Date
+    }
+
     struct ServerError: LocalizedError {
         let status: Int
         let message: String
@@ -242,11 +288,35 @@ enum DashboardAPI {
         return parts.url
     }
 
-    static func dashboard(at address: String) async throws -> Dashboard {
+    static func serverAddress(_ input: String) -> String? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suppliedScheme = trimmed.contains("://")
+        guard let url = webURL(suppliedScheme ? trimmed : "http://" + trimmed),
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              parts.query == nil, parts.fragment == nil else { return nil }
+        if !suppliedScheme && parts.port == nil { parts.port = 8084 }
+        guard parts.port.map({ (1...65_535).contains($0) }) ?? true else { return nil }
+        parts.scheme = parts.scheme?.lowercased()
+        parts.host = parts.host?.lowercased()
+        if parts.percentEncodedPath.hasSuffix("/") { parts.percentEncodedPath.removeLast() }
+        return parts.string
+    }
+
+    static func load(at address: String) async throws -> Snapshot {
         let data = try await request("/api/v1/dashboard", at: address)
+        return try snapshot(from: data, syncedAt: .now)
+    }
+
+    fileprivate static func snapshot(from data: Data, syncedAt: Date) throws -> Snapshot {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(Dashboard.self, from: data)
+        return try Snapshot(dashboard: decoder.decode(Dashboard.self, from: data), data: data, syncedAt: syncedAt)
+    }
+
+    static func connectionMessage(for error: Error) -> String {
+        if error is DecodingError { return "This address didn’t return a compatible Jobs workspace." }
+        if error is URLError { return "Check that your Mac is awake, the Jobs server is running, and this device can reach it." }
+        return error.localizedDescription
     }
 
     @MainActor
@@ -289,6 +359,40 @@ enum DashboardAPI {
     }
 
     private static let session = URLSession(configuration: .ephemeral, delegate: NoRedirects(), delegateQueue: nil)
+}
+
+enum OfflineWorkspace {
+    private struct Stored: Codable {
+        let address: String
+        let syncedAt: Date
+        let data: Data
+    }
+
+    static func load(for address: String) -> DashboardAPI.Snapshot? {
+        guard let url = try? storageURL(), let data = try? Data(contentsOf: url),
+              let stored = try? JSONDecoder().decode(Stored.self, from: data), stored.address == address else { return nil }
+        return try? DashboardAPI.snapshot(from: stored.data, syncedAt: stored.syncedAt)
+    }
+
+    static func save(_ snapshot: DashboardAPI.Snapshot, for address: String) throws {
+        let stored = Stored(address: address, syncedAt: snapshot.syncedAt, data: snapshot.data)
+        try JSONEncoder().encode(stored).write(to: storageURL(), options: [.atomic, .completeFileProtection])
+    }
+
+    static func remove() throws {
+        let url = try storageURL()
+        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+    }
+
+    private static func storageURL() throws -> URL {
+        var folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                appropriateFor: nil, create: true).appendingPathComponent("OfflineWorkspace")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try folder.setResourceValues(values)
+        return folder.appendingPathComponent("snapshot.json")
+    }
 }
 
 struct SavedSearch: Decodable, Identifiable {

@@ -139,19 +139,22 @@ The key design is **separate ownership of facts, decisions and history**. A craw
 
 ### Direct public ATS feeds
 
-An applicant tracking system, or ATS, hosts an employer's recruitment board. The three implemented adapters are in `board_jobs()`:
+An applicant tracking system, or ATS, hosts an employer's recruitment board. `board_jobs()` supports these feeds.
 
 | Platform | Board URL pattern | Direct adapter |
 | --- | --- | --- |
 | Ashby | `https://jobs.ashbyhq.com/BOARD` | Public job-board endpoint, including available compensation fields |
 | Greenhouse | `https://job-boards.greenhouse.io/BOARD` | Public board jobs endpoint with descriptions |
 | Lever | `https://jobs.lever.co/BOARD` | Public postings endpoint |
+| SmartRecruiters | `https://jobs.smartrecruiters.com/BOARD` | Public Posting API with pagination and per-requisition details |
 
 The board slug is the employer identifier in the URL. Enter that slug in the matching Preferences field. A job-specific URL and a board URL are different: the former identifies one requisition; the latter identifies the feed to revisit.
 
 Board names are normalized to lowercase. Existing jobs, configured additions and stored source history contribute watched boards. This lets a successfully fetched board remain watched even if it initially has no matching jobs.
 
 These feeds do not require Firecrawl. They are the foundation of the current search pipeline. Public availability does not imply exhaustive coverage or permission to bypass site controls.
+
+The SmartRecruiters adapter checks the complete public index, up to 3,000 postings per board, before treating a missing requisition as closed. Each run checks details for up to eight tracked postings and sixteen new postings per board. The new-posting budget prioritizes enabled saved searches with title criteria, then the main search profile. A share of the budget rotates through other postings. The run report shows how many board details were deferred. [SmartRecruiters Posting API](https://developers.smartrecruiters.com/docs/endpoints)
 
 ### Public web discovery
 
@@ -169,13 +172,21 @@ Generic URLs are attempted least-recently-checked first. Repeated failures canno
 
 `run_pipeline()` backs up the database, loads preferences and history, discovers sources, fetches boards, refreshes existing requisitions, evaluates new candidates, attempts bounded generic URLs and saves a report. Manual and scheduled runs share this pipeline and a process lock.
 
-Limits bound new candidates, rechecks, generic pages, public searches and optional provider usage. It does not pad the result list to a target count. The configured target and preferred salary ceiling are informational.
+The pipeline collects candidates from the checked sources before applying the new-listing limit. It prioritizes roles that pass the initial pay, location, and fit checks, then saved-search matches, fit score, and posting date. The report shows how many candidates fell beyond the limit. Limits also bound rechecks, generic pages, public searches and optional provider usage. It does not pad the result list to a target count. The configured target and preferred salary ceiling are informational.
+
+### Scheduling on the Mac
+
+Run the Jobs backend on the Mac and enable **Run a daily employer search** in browser Preferences, or set the daily search in the iPhone Search Profile. Set the hour in UTC. The service checks every 30 seconds and catches up when it next runs after the chosen hour on the same UTC day. Manual runs use the same pipeline without consuming the scheduled slot. A successful or partial scheduled run closes that day’s slot. A failed or interrupted scheduled run can retry after 30 minutes, up to three scheduled attempts per day.
+
+For optional Firecrawl discovery, store the key in `secrets/firecrawl.key` on the backend and enable `firecrawl_enabled` in local `config.json`. Configure the daily request and credit limits in that file. The browser’s daily reports show reported credits when Firecrawl was used. Employer feeds work with the key absent. Start the Mac service from the normal entry point in [Running and stopping the app](#12-running-and-stopping-the-app). The Mac and service need to be available when a search runs.
 
 ### Failure versus closure
 
 A timeout or HTTP failure is not proof that a job closed. Existing records remain. A successful complete feed that omits an old requisition can mark that listing closed. Neither event erases application history.
 
-Runs can be running, success, partial, failed or interrupted. Partial means useful work completed with reported source failures. Success is not a claim that every website or application form was fully verified. A restarted service marks unfinished runs interrupted.
+On startup, older records whose stored ATS ID and listing link disagree recover the URL from the stored ID. The listing requires a fresh employer check, and its application history stays attached to that ID.
+
+Runs can be running, success, partial, failed or interrupted. Partial means useful work completed with reported source failures. Success is not a claim that every website or application form was fully verified. A restarted service marks unfinished runs interrupted. Run history shows whether a search was manual or scheduled. Older runs keep a generic search label.
 
 ## 7. How matching and verification work
 
@@ -206,11 +217,13 @@ The profile fit score uses the same scale across job families.
 
 Job details explain each component. A posting with thin or missing text offers less evidence. Keyword matches can indicate which duties to read first. The candidate can check which tasks they have performed, what outcomes they can describe, and which tools or requirements they still need to verify. The app checks location and pay separately when deciding whether to qualify a listing. AI advice can compare the posting with the candidate's written experience and identify questions to resolve.
 
+When the profile describes a selected skill and the employer mentions it in a duty, job details quote the posting. Two distinct skill-to-duty matches can surface a role with an adjacent title for review. Degree equivalency, years of experience and required credentials appear as separate checks when the posting supplies that language.
+
 The automatic Confirmed queue requires an open listing, eligible location, qualifying salary policy, a recognized role phrase and a score of at least 55. `finalize()` then checks application-page evidence; failures return it to review. Dashboard recalculation does not promote a previously unconfirmed record into verified status simply because its score changed.
 
 ### Verification and freshness
 
-The exact application page is checked for expected title text, closure signals and application-form evidence. A feed record alone is insufficient for a Confirmed result. Confirmed results expire to review after the configured freshness interval, currently 30 hours by default.
+The exact application page is checked for expected title text, closure signals and candidate form evidence such as a résumé field or an application submit control. A feed record alone is insufficient for a Confirmed result. When enabled and within budget, Firecrawl can render a requisition whose static response omits the application form. Explicit closure signals and redirects away from the requisition still block confirmation. Confirmed results expire to review after the configured freshness interval, currently 30 hours after the form check by default.
 
 Approval and automatic verification remain separate. A reviewer can explain missing evidence and attest to checks without rewriting employer compensation or pretending the crawler verified it. Known closed, out-of-area or below-maximum-floor records cannot be approved. The human review workflow has not yet been generalized to every possible configurable pay-policy edge case.
 
@@ -320,7 +333,11 @@ The browser cannot edit every configuration field. Its accepted preference keys 
 
 ## 12. Running and stopping the app
 
-### The existing personal installation
+### The personal Mac installation
+
+The `com.jobsapp.local-backend` LaunchAgent starts the private-network backend at sign-in and restarts it if the process exits. The Mac must be awake and signed in for searches and live iPhone access. If the Mac’s Wi-Fi address changes, update the agent’s bind address and the iPhone’s server setting.
+
+### The original Windows installation
 
 The existing source folder is `E:\Jobs`. Use its existing service for ordinary use. You do not need to create a GitHub account or open Xcode just to use the application.
 
@@ -441,6 +458,17 @@ That private archive contains real applications and profile information. It is n
 
 To restore: stop the authoritative service; preserve its current data directory; put a chosen consistent snapshot at `data/jobs.sqlite3`; handle old WAL/SHM files only while stopped; restore matching preferences/configuration; restart and verify counts and selected notes. Keep the preserved directory until the restored service is confirmed. Do not overwrite a live database or replace it with the original HTML directory.
 
+### Import confirmed application history
+
+Export the relevant tracker sheet as UTF-8 CSV. Each row needs an exact employer posting URL or both the employer name and requisition ID, plus a status from the dashboard. Use `YYYY-MM-DD` for dates. This example uses fictional data.
+
+```csv
+url,employer,requisition,status,application_date,follow_up,notes
+https://jobs.lever.co/example/job-1,Example,job-1,Applied,2026-10-29,2026-11-19,Confirmation saved
+```
+
+Run `python3 import_history.py path/to/history.csv` to preview the row results. Run the same command with `--apply` to back up the database and import the eligible rows. The importer preserves existing tracking and leaves unmatched, ambiguous or repeated rows for manual review. Keep the CSV private.
+
 ## 16. Moving to the Mac
 
 You have two useful options, and neither requires Xcode.
@@ -511,6 +539,8 @@ The SwiftUI app under `ios/` connects to the shared Python backend. **For You** 
 
 The Search Profile supports résumé import with a device-local preview, suggested and custom skills, work locations and annual base pay. Saved searches use their own criteria. The backend records new matches, and the iPhone can show a local notification after it reconnects and sees unread matches.
 
+After a successful connection, the iPhone keeps a protected offline copy of the most recently synced workspace unless you turn it off in Settings. Offline mode supports reading saved jobs, tracking details and reports. Saves and new searches require the Mac. A form stays open with its draft if a network interruption prevents a confirmed save. When changing the server address, the app validates the new workspace before switching.
+
 A first-time visitor can explore fictional listings and practice application tracking in an on-device sample session. See the [iPhone setup guide](../ios/README.md) for the simulator, device signing and private-network setup, and the [Stage Two notes](STAGE-TWO.md) for the design and verification record.
 
 ## 19. Troubleshooting
@@ -526,7 +556,7 @@ A first-time visitor can explore fictional listings and practice application tra
 | Generic employer page needs review | The page may be dynamic or lack a unique supported JobPosting; inspect it manually |
 | A search is partial | Open its report and source-health screen; useful source work may still have completed |
 | Daily run time seems different after daylight saving | Schedule uses UTC, not a local timezone rule |
-| Daily search did not run again | The latest run date affects scheduling; a manual or failed run can satisfy that date check |
+| Daily search did not run again | Check that the Mac was awake and inspect the latest scheduled run. Successful and partial runs close that UTC day’s slot. Failed runs have bounded retries. |
 | Save reports a conflict | Another device changed the version; refresh and reconcile your edits |
 | AI button is disabled | Check server key availability and the AI preference; no key belongs in frontend code |
 | AI request fails or is incomplete | Check account/model access and provider usage; avoid blind retries because attempts may be billable |
@@ -539,7 +569,7 @@ A first-time visitor can explore fictional listings and practice application tra
 
 The app is a useful personal prototype. It does not yet offer login/accounts, multi-user authorization, durable distributed workers, universal employer coverage, reliable parsing of every salary tier/state policy, full resume ingestion, automatic submissions, remote push notifications or production web hosting.
 
-Its matching is partly heuristic and geography-specific. Some labels and filters still reflect the original personal design. The dashboard returns the whole collection rather than using server pagination. The scheduler uses a latest-run-date rule instead of a separate successful scheduled-run ledger. The HTTP server is the Python standard-library implementation. These are reasonable things to explain and improve as the project matures.
+Its matching is partly heuristic and geography-specific. Some labels and filters still reflect the original personal design. The dashboard returns the whole collection rather than using server pagination. The HTTP server is the Python standard-library implementation. These are reasonable things to explain and improve as the project matures.
 
 Suggested next milestones, in order:
 

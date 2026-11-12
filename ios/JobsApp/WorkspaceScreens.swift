@@ -27,8 +27,8 @@ struct SearchScreen: View {
                     Button("Run Employer Search", systemImage: "magnifyingglass") {
                         Task { await workspace.startSearch() }
                     }
-                    .disabled(dashboard.running || workspace.startingSearch || workspace.saving)
-                    if dashboard.running || workspace.startingSearch {
+                    .disabled(!workspace.connected || dashboard.running || workspace.startingSearch || workspace.saving)
+                    if workspace.connected && (dashboard.running || workspace.startingSearch) {
                         ProgressView("Checking employer sources…")
                     }
                     if let error = workspace.searchError { Text(error).foregroundStyle(.red) }
@@ -46,7 +46,7 @@ struct SearchScreen: View {
                             SearchReport(run: workspace.dashboard?.runs.first { $0.id == run.id } ?? run)
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
-                                Text(displayTimestamp(run.started)).font(.headline)
+                                Text("\(run.originLabel) · \(displayTimestamp(run.started))").font(.headline)
                                 Text("\(run.state.capitalized) · \(run.report.newQualified ?? 0) qualified · \(run.report.newReview ?? 0) for review")
                                     .font(.subheadline).foregroundStyle(.secondary)
                             }
@@ -69,6 +69,7 @@ private struct SearchReport: View {
         List {
             Section("Results") {
                 LabeledContent("Status", value: run.state.capitalized)
+                LabeledContent("Run", value: run.originLabel)
                 LabeledContent("Started", value: displayTimestamp(run.started))
                 if let finished = run.finished, !finished.isEmpty {
                     LabeledContent("Finished", value: displayTimestamp(finished))
@@ -77,6 +78,24 @@ private struct SearchReport: View {
                 LabeledContent("New for Review", value: String(run.report.newReview ?? 0))
                 LabeledContent("Rechecked", value: String(run.report.reverified ?? 0))
                 LabeledContent("Newly Closed", value: String(run.report.newlyClosed ?? 0))
+                if let review = run.report.manualReview {
+                    LabeledContent("Open Listings Needing Review", value: review.formatted())
+                }
+                if let duplicates = run.report.duplicates {
+                    LabeledContent("Duplicates Skipped", value: duplicates.formatted())
+                }
+                if let deferred = run.report.deferredCandidates, deferred > 0 {
+                    LabeledContent("Beyond This Run’s Limit", value: deferred.formatted())
+                }
+                if let deferred = run.report.deferredSourceDetails, deferred > 0 {
+                    LabeledContent("Board Details Deferred", value: deferred.formatted())
+                }
+                if let requests = run.report.firecrawlRequests, requests > 0 {
+                    LabeledContent("Firecrawl Requests", value: requests.formatted())
+                    if let credits = run.report.firecrawlCreditsReported {
+                        LabeledContent("Firecrawl Credits Reported", value: credits.formatted())
+                    }
+                }
             }
             if let leads = run.report.topNew, !leads.isEmpty {
                 Section("Top New Jobs") {
@@ -157,7 +176,9 @@ struct EmployerBoards: View {
 
 struct PreferencesScreen: View {
     let workspace: Workspace
+    @Binding var keepOfflineCopy: Bool
     let editServer: () -> Void
+    let openSample: () -> Void
     @State private var editingPreferences = false
 
     var body: some View {
@@ -185,6 +206,13 @@ struct PreferencesScreen: View {
             Section("Connection") {
                 Button("Server Settings", systemImage: "desktopcomputer", action: editServer)
                 Text(workspace.address).font(.footnote).foregroundStyle(.secondary)
+                Toggle("Keep a Copy for Offline Reading", isOn: $keepOfflineCopy)
+                Text("Jobs and tracking details are stored on this iPhone for the last connected workspace. Saving changes requires a connection.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if let error = workspace.cacheError { Text(error).font(.footnote).foregroundStyle(.secondary) }
+            }
+            Section("Offline Demo") {
+                Button("Explore sample jobs", systemImage: "eye", action: openSample)
             }
         }
         .scrollContentBackground(.hidden)
@@ -206,7 +234,6 @@ private struct PreferenceUpdate<Value: Encodable>: Encodable {
 
 private struct PreferencesDraft {
     var preferences: Preferences
-    var customSkills: String
     var locations: String
     var categories: String
     var exclusions: String
@@ -220,7 +247,6 @@ private struct PreferencesDraft {
     init(_ dashboard: Dashboard) {
         let values = dashboard.preferences
         preferences = values
-        customSkills = (values.preferredSkills ?? []).filter { !PreferencesEditor.skillChoices.contains($0) }.joined(separator: "\n")
         locations = (values.targetLocations ?? []).joined(separator: "\n")
         categories = values.categories.joined(separator: "\n")
         exclusions = values.excludedTitleTerms.joined(separator: "\n")
@@ -241,10 +267,12 @@ private struct PreferencesDraft {
         guard let limit = Int(aiLimit), (1...100).contains(limit) else {
             throw Validation("Enter a daily AI attempt limit from 1 to 100.")
         }
+        guard (1...12_000).contains(preferences.profile.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.count) else {
+            throw Validation("Enter a candidate profile between 1 and 12,000 characters.")
+        }
         var result = preferences
         result.salaryFloor = salary
         result.aiDailyLimit = limit
-        result.preferredSkills = (preferences.preferredSkills ?? []).filter { PreferencesEditor.skillChoices.contains($0) } + lines(customSkills)
         result.targetLocations = lines(locations)
         result.categories = lines(categories)
         result.excludedTitleTerms = lines(exclusions)
@@ -284,6 +312,8 @@ private struct PreferencesEditor: View {
     @State private var resume: ResumePreview?
     @State private var savedResume: ResumePreview?
     @State private var importingResume = false
+    @State private var pickedResumeURL: URL?
+    @State private var readingResume = false
     @State private var importError: String?
 
     init(workspace: Workspace, dashboard: Dashboard) {
@@ -296,6 +326,8 @@ private struct PreferencesEditor: View {
             Section("Résumé") {
                 Button(savedResume == nil ? "Import Résumé" : "Replace Résumé",
                        systemImage: "doc.badge.plus") { importingResume = true }
+                    .disabled(readingResume)
+                if readingResume { ProgressView("Reading résumé…") }
                 if let savedResume {
                     Button(savedResume.name, systemImage: "doc.text") { resume = savedResume }
                     Button("Remove Résumé", role: .destructive) {
@@ -306,7 +338,7 @@ private struct PreferencesEditor: View {
                         } catch { importError = error.localizedDescription }
                     }
                 }
-                Text("Choose a text-based PDF or plain text file. Review suggested skills before adding them to matching.")
+                Text("Your file preview stays on this iPhone. Choose the skills and experience you want to save to your Mac’s search profile.")
                     .font(.footnote).foregroundStyle(.secondary)
                 if let importError { Text(importError).foregroundStyle(.red) }
             }
@@ -320,13 +352,10 @@ private struct PreferencesEditor: View {
                 multiline("Skill groups: Name | Weight | term, term", $draft.skills)
             }
             Section("Skills to Use") {
-                ForEach(Self.skillChoices, id: \.self) { skill in
-                    Toggle(skill, isOn: Binding(
-                        get: { (draft.preferences.preferredSkills ?? []).contains(skill) },
-                        set: { setSkill(skill, enabled: $0) }
-                    ))
-                }
-                multiline("Other skills, one per line", $draft.customSkills)
+                SkillPickerLink(selection: Binding(
+                    get: { draft.preferences.preferredSkills ?? [] },
+                    set: { draft.preferences.preferredSkills = $0 }
+                ))
             }
             Section("Locations and Work Setting") {
                 multiline("Cities or regions, one per line (e.g. Austin, TX or United States)", $draft.locations)
@@ -356,6 +385,7 @@ private struct PreferencesEditor: View {
                 boardField("Ashby", "ashby")
                 boardField("Greenhouse", "greenhouse")
                 boardField("Lever", "lever")
+                boardField("SmartRecruiters", "smartrecruiters")
                 multiline("Employer posting URLs, one per line", $draft.employerURLs)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
             }
@@ -383,33 +413,51 @@ private struct PreferencesEditor: View {
         }
         .task { savedResume = try? ResumePreview.load() }
         .fileImporter(isPresented: $importingResume, allowedContentTypes: [.pdf, .plainText]) { result in
-            do {
-                let imported = try ResumePreview.read(result.get())
-                try imported.save()
-                savedResume = imported
-                resume = imported
+            switch result {
+            case .success(let url):
                 importError = nil
-            } catch {
+                pickedResumeURL = url
+            case .failure(let error as CocoaError) where error.code == .userCancelled:
+                break
+            case .failure(let error):
                 importError = error.localizedDescription
             }
         }
+        .task(id: pickedResumeURL) {
+            if let url = pickedResumeURL { await importResume(url) }
+        }
         .sheet(item: $resume) { preview in
-            ResumeReview(preview: preview) { skills in
+            ResumeReview(preview: preview, currentProfile: draft.preferences.profile) { skills, profile in
                 for skill in skills { setSkill(skill, enabled: true) }
+                draft.preferences.profile = profile
             }
         }
     }
 
-    fileprivate static let skillChoices = [
-        "Accounting", "Business Analysis", "Customer Success", "Data Analysis", "Excel",
-        "Financial Modeling", "JavaScript", "Leadership", "Power BI", "Project Management",
-        "Python", "Salesforce", "SQL", "Technical Support"
-    ]
+    private func importResume(_ url: URL) async {
+        readingResume = true
+        defer {
+            readingResume = false
+            pickedResumeURL = nil
+        }
+        do {
+            let imported = try await Task.detached(priority: .userInitiated) { try ResumePreview.read(url) }.value
+            try Task.checkCancellation()
+            try imported.save()
+            savedResume = imported
+            resume = imported
+        } catch is CancellationError {
+            return
+        } catch {
+            importError = error.localizedDescription
+        }
+    }
 
     private func setSkill(_ skill: String, enabled: Bool) {
-        var skills = Set(draft.preferences.preferredSkills ?? [])
-        if enabled { skills.insert(skill) } else { skills.remove(skill) }
-        draft.preferences.preferredSkills = skills.sorted()
+        var skills = draft.preferences.preferredSkills ?? []
+        skills.removeAll { $0.caseInsensitiveCompare(skill) == .orderedSame }
+        if enabled && skills.count < 150 { skills.append(skill) }
+        draft.preferences.preferredSkills = skills
     }
 
     private func workplace(_ title: String, _ key: String) -> some View {
@@ -483,9 +531,9 @@ private struct ResumePreview: Identifiable, Codable {
             throw ImportError("No selectable text was found. Export a text-based PDF or a plain text résumé.")
         }
         let searchable = text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-        let skills = PreferencesEditor.skillChoices.filter { skill in
+        let skills = SkillCatalog.all.filter { skill in
             let phrase = NSRegularExpression.escapedPattern(for: skill)
-            return searchable.range(of: #"(?<![\p{L}\p{N}])"# + phrase + #"(?![\p{L}\p{N}])"#,
+            return searchable.range(of: #"(?<![\p{L}\p{N}+#])"# + phrase + #"(?![\p{L}\p{N}+#])"#,
                                     options: [.regularExpression, .caseInsensitive]) != nil
         }
         return Self(name: url.lastPathComponent, text: String(text.prefix(16_000)), skills: skills)
@@ -500,8 +548,17 @@ private struct ResumePreview: Identifiable, Codable {
 private struct ResumeReview: View {
     @Environment(\.dismiss) private var dismiss
     let preview: ResumePreview
-    let add: ([String]) -> Void
+    let currentProfile: String
+    let add: ([String], String) -> Void
     @State private var selected: Set<String> = []
+    @State private var experience = ""
+
+    private var combinedProfile: String {
+        let addition = experience.trimmingCharacters(in: .whitespacesAndNewlines)
+        let current = currentProfile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !addition.isEmpty, !current.contains(addition) else { return currentProfile }
+        return [current, addition].filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
 
     var body: some View {
         NavigationStack {
@@ -511,13 +568,32 @@ private struct ResumeReview: View {
                         Text("No skills from the built-in list were found. You can add custom skills in Preferences.")
                     }
                     ForEach(preview.skills, id: \.self) { skill in
-                        Toggle(skill, isOn: Binding(
-                            get: { selected.contains(skill) },
-                            set: { enabled in
-                                if enabled { selected.insert(skill) } else { selected.remove(skill) }
+                        Button {
+                            if selected.remove(skill) == nil { selected.insert(skill) }
+                        } label: {
+                            HStack {
+                                Text(skill)
+                                Spacer()
+                                Image(systemName: selected.contains(skill) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selected.contains(skill) ? JobsTheme.accent : .secondary)
+                                    .accessibilityHidden(true)
                             }
-                        ))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selected.contains(skill) ? .isSelected : [])
                     }
+                }
+                Section {
+                    TextField("Experience to add", text: $experience, axis: .vertical)
+                        .lineLimit(3...8)
+                    if combinedProfile.unicodeScalars.count > 12_000 {
+                        Text("Shorten the experience to fit your 12,000-character profile.").foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("Experience for Matching")
+                } footer: {
+                    Text("Copy a relevant passage from the preview or describe work you’ve done. This text is added to your profile draft. Save the profile to use it for matching.")
                 }
                 Section(preview.name) {
                     Text(preview.text).textSelection(.enabled)
@@ -530,11 +606,11 @@ private struct ResumeReview: View {
                     Button("Done") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Add Skills") {
-                        add(preview.skills.filter { selected.contains($0) })
+                    Button("Use in Profile") {
+                        add(preview.skills.filter { selected.contains($0) }, combinedProfile)
                         dismiss()
                     }
-                    .disabled(selected.isEmpty)
+                    .disabled((selected.isEmpty && combinedProfile == currentProfile) || combinedProfile.unicodeScalars.count > 12_000)
                 }
             }
         }
@@ -681,7 +757,10 @@ private struct SavedSearchEditor: View {
             Section("Search") {
                 TextField("Name", text: $criteria.name)
                 TextField("Required title phrases, one per line (optional)", text: $titleTerms, axis: .vertical).lineLimit(2...6)
-                TextField("Skills, one per line", text: $skills, axis: .vertical).lineLimit(2...6)
+                SkillPickerLink(selection: Binding(
+                    get: { skills.components(separatedBy: .newlines).filter { !$0.isEmpty } },
+                    set: { skills = $0.joined(separator: "\n") }
+                ), limit: 30)
                 TextField("Locations, one per line", text: $locations, axis: .vertical).lineLimit(2...6)
                 mode("Remote", "remote")
                 mode("Hybrid", "hybrid")
@@ -863,5 +942,165 @@ final class NotificationsDelegate: NSObject, UIApplicationDelegate, UNUserNotifi
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         [.banner, .list, .sound]
+    }
+}
+
+enum SkillCatalog {
+    static let groups: [(name: String, skills: [String])] = [
+        ("Finance and accounting", "Accounting|Accounts Payable|Accounts Receivable|Audit|Billing Operations|Bookkeeping|Budgeting|Cash Applications|Cash Flow Forecasting|Collections|Cost Accounting|Credit Analysis|Expense Management|Financial Modeling|Financial Reporting|Financial Planning and Analysis|General Ledger|Internal Controls|Invoicing|Month-End Close|NetSuite|Payroll|QuickBooks|Reconciliation|Revenue Operations|Revenue Recognition|SOX Compliance|Tax Preparation|Variance Analysis"),
+        ("Data and analytics", "A/B Testing|Data Analysis|Data Engineering|Data Governance|Data Modeling|Data Quality|Data Visualization|dbt|Excel|Forecasting|Google Analytics|Google Sheets|Looker|Machine Learning|Power BI|Power Query|Python|R|Reporting|SAS|Snowflake|SQL|Statistics|Tableau"),
+        ("Software and IT", "Accessibility|Android|Angular|API Integration|AWS|Azure|Bash|C|C#|C++|CI/CD|Cloud Computing|Cybersecurity|Docker|Git|Go|HTML|iOS|Java|JavaScript|Kotlin|Kubernetes|Linux|Network Administration|Node.js|PHP|PostgreSQL|React|Ruby|Rust|Software Testing|Swift|SwiftUI|Technical Support|Terraform|TypeScript|Windows Administration"),
+        ("Sales and customer service", "Account Management|Business Development|Client Onboarding|CRM|Customer Service|Customer Success|Dispute Resolution|Escalation Management|HubSpot|Lead Generation|Negotiation|Point of Sale|Prospecting|Sales Operations|Salesforce|Solution Selling|Stripe|Zendesk|Zuora"),
+        ("Operations and management", "Agile|Business Analysis|Change Management|Contract Management|Cross-Functional Collaboration|Inventory Management|Jira|Leadership|Lean|Logistics|Operations Management|Process Improvement|Procurement|Project Management|Quality Assurance|Risk Management|Scrum|Six Sigma|Supply Chain Management|Vendor Management|Workflow Documentation"),
+        ("Design and marketing", "Adobe Illustrator|Adobe Photoshop|Brand Strategy|Content Strategy|Copywriting|Email Marketing|Figma|Graphic Design|Market Research|Paid Search|Product Design|SEO|Social Media Marketing|Typography|UI Design|User Research|UX Design|Video Editing|WordPress"),
+        ("Healthcare and science", "Clinical Documentation|Clinical Research|Data Collection|Electronic Health Records|HIPAA Compliance|Laboratory Safety|Medical Billing|Medical Coding|Microscopy|Patient Scheduling|Phlebotomy|Public Health|Quality Control|Research Methods|Sample Preparation|Sterile Technique"),
+        ("Education and people", "Career Coaching|Conflict Resolution|Curriculum Development|Employee Relations|Facilitation|Human Resources|Instructional Design|Interviewing|Learning Management Systems|Onboarding|Performance Management|Recruiting|Teaching|Training and Development|Workforce Planning"),
+        ("Product and delivery", "Acceptance Criteria|Backlog Management|Competitive Analysis|Customer Discovery|Feature Prioritization|Go-to-Market Strategy|Kanban|Product Analytics|Product Management|Product Roadmaps|Release Management|Requirements Gathering|Service Design|Stakeholder Management|Technical Writing|User Stories|Usability Testing"),
+        ("Manufacturing and engineering", "AutoCAD|CAD|Calibration|CNC Machining|Control Systems|Design for Manufacturing|Failure Analysis|GD&T|Industrial Engineering|Lean Manufacturing|Material Handling|MATLAB|Mechanical Design|PLC Programming|Root Cause Analysis|SolidWorks|Statistical Process Control|Troubleshooting"),
+        ("Legal and public service", "Case Management|Compliance Monitoring|Contract Drafting|Document Review|E-Discovery|Grant Administration|Legal Research|Legislative Research|Paralegal Support|Policy Analysis|Program Evaluation|Public Administration|Records Management|Regulatory Reporting|Technical Compliance"),
+        ("Hospitality and retail", "Cash Handling|Catering|Event Planning|Food Preparation|Food Safety|Front Desk Operations|Guest Relations|Housekeeping|Loss Prevention|Merchandising|Reservations|Retail Operations|Shift Scheduling|Visual Merchandising|Wine Service"),
+        ("Media and communications", "Broadcast Production|Community Management|Editing|Internal Communications|Interview Production|Journalism|Media Relations|Motion Graphics|Photography|Podcast Production|Presentation Design|Proofreading|Public Relations|Speechwriting|Storyboarding|Translation"),
+        ("Transportation and facilities", "Building Automation|Commercial Driving|Dispatching|Fleet Management|Freight Forwarding|Hazardous Materials Handling|Janitorial Services|Landscape Maintenance|Route Planning|Shipping and Receiving|Warehouse Operations|Work Order Management"),
+        ("Research and sustainability", "Environmental Compliance|Environmental Impact Assessment|Field Research|GIS|Grant Writing|Literature Review|Monitoring and Evaluation|Qualitative Research|Quantitative Research|Sampling|Scientific Writing|Sustainability Reporting|Survey Design"),
+        ("Trades and field work", "Blueprint Reading|Carpentry|Construction Management|Electrical Troubleshooting|Equipment Maintenance|Forklift Operation|HVAC|OSHA Compliance|Plumbing|Preventive Maintenance|Safety Inspections|Site Supervision|Technical Drawing|Welding")
+    ].map { (name: $0.0, skills: $0.1.components(separatedBy: "|").sorted()) }
+
+    static var all: [String] { groups.flatMap(\.skills) }
+}
+
+struct SkillPickerLink: View {
+    @Binding var selection: [String]
+    var limit = 150
+
+    var body: some View {
+        NavigationLink {
+            SkillPicker(selection: $selection, limit: limit)
+        } label: {
+            LabeledContent("Choose skills", value: "\(selection.count) selected")
+        }
+    }
+}
+
+private struct SkillPicker: View {
+    @Binding var selection: [String]
+    let limit: Int
+    @State private var query = ""
+    @State private var category: String?
+    @State private var custom = ""
+    @State private var showingCustom = false
+
+    private var term: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        List {
+            if selection.count >= limit {
+                Text("You’ve selected the maximum of \(limit) skills. Remove one to add another.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            if term.isEmpty && category == nil {
+                if !selection.isEmpty {
+                    Section("Selected") { ForEach(selection, id: \.self) { skillRow($0) } }
+                }
+                Section("Browse categories") {
+                    ForEach(SkillCatalog.groups, id: \.name) { group in
+                        Button { category = group.name } label: {
+                            LabeledContent(group.name, value: String(group.skills.count))
+                        }
+                    }
+                }
+            } else {
+                if category != nil {
+                    Button("All categories", systemImage: "arrow.uturn.backward") { self.category = nil }
+                }
+                let matches = (category == nil ? SkillCatalog.all
+                    : SkillCatalog.groups.first { $0.name == category }?.skills ?? [])
+                    .filter { term.isEmpty || $0.localizedCaseInsensitiveContains(term) }
+                if matches.isEmpty {
+                    ContentUnavailableView.search(text: term)
+                } else {
+                    Section(category ?? "Search results") {
+                        ForEach(matches, id: \.self) { skillRow($0) }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Skills")
+        .searchable(text: $query, prompt: "Search skills")
+        .toolbar {
+            Button("Add custom skill", systemImage: "plus") {
+                custom = term
+                showingCustom = true
+            }
+            .disabled(selection.count >= limit)
+        }
+        .alert("Add custom skill", isPresented: $showingCustom) {
+            TextField("Skill name", text: $custom)
+            Button("Cancel", role: .cancel) {}
+            Button("Add") {
+                let name = String(custom.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+                if !name.isEmpty && !contains(name) && selection.count < limit { selection.append(name) }
+            }
+        }
+    }
+
+    private func contains(_ skill: String) -> Bool {
+        selection.contains { $0.caseInsensitiveCompare(skill) == .orderedSame }
+    }
+
+    private func skillRow(_ skill: String) -> some View {
+        let selected = contains(skill)
+        return Button {
+            if selected {
+                selection.removeAll { $0.caseInsensitiveCompare(skill) == .orderedSame }
+            } else if selection.count < limit {
+                selection.append(skill)
+            }
+        } label: {
+            HStack {
+                Text(skill).foregroundStyle(.primary)
+                Spacer()
+                if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(JobsTheme.accent) }
+            }
+            .contentShape(Rectangle())
+        }
+        .disabled(!selected && selection.count >= limit)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+struct SampleProfileEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    let workspace: Workspace
+    @State private var skills: [String]
+    @State private var salaryFloor: Int
+
+    init(workspace: Workspace) {
+        self.workspace = workspace
+        _skills = State(initialValue: workspace.dashboard?.preferences.preferredSkills ?? [])
+        _salaryFloor = State(initialValue: workspace.dashboard?.preferences.salaryFloor ?? 0)
+    }
+
+    var body: some View {
+        SaveForm(title: "Sample Search Profile", workspace: workspace) {
+            Section {
+                SkillPickerLink(selection: $skills)
+                Picker("Annual base pay", selection: $salaryFloor) {
+                    Text("Any salary").tag(0)
+                    ForEach([50_000, 70_000, 90_000, 110_000, 130_000], id: \.self) { floor in
+                        Text(floor, format: .currency(code: "USD").precision(.fractionLength(0))).tag(floor)
+                    }
+                }
+            } header: {
+                Text("What you want to match")
+            } footer: {
+                Text("For You uses your selected skills and pay target. Browse shows every fictional listing.")
+            }
+        } save: {
+            try workspace.updateSampleProfile(skills: skills, salaryFloor: salaryFloor)
+            dismiss()
+        } reload: {
+            skills = workspace.dashboard?.preferences.preferredSkills ?? []
+            salaryFloor = workspace.dashboard?.preferences.salaryFloor ?? 0
+        }
     }
 }

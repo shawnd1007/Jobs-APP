@@ -27,12 +27,55 @@ function render(){
  $('buckets').innerHTML=Object.entries(bucketInfo).map(([key,[label]])=>`<button type="button" data-bucket="${key}" class="bucket ${activeBucket===key?'selected':''}" aria-pressed="${activeBucket===key}"><strong>${counts[key]}</strong><span>${esc(label)}</span></button>`).join('');
  $('buckets').querySelectorAll('button').forEach(b=>b.onclick=()=>selectBucket(b.dataset.bucket));
  $('bucket-title').textContent=bucketInfo[activeBucket][0];$('bucket-description').textContent=bucketInfo[activeBucket][1];
- $('summary').innerHTML=`<span class="tag">${jobs.length} historical jobs</span> <span class="tag">${jobs.filter(j=>j.queue==='Confirmed').length} employer-verified openings</span> <span class="tag">${counts.ready} approved and not applied</span>`;
+ const today=new Date().toISOString().slice(0,10);
+ const lastCompleted=state.runs.find(run=>run.finished && run.state!=='interrupted');
+ const applicationStatuses=['Applied','Assessment Received','Interview Scheduled','Interview Completed','Offer Received','Rejected','Withdrawn'];
+ const metrics=[
+  [jobs.length,'tracked jobs'],
+  [jobs.filter(j=>j.queue==='Confirmed' && j.availability==='Open').length,'verified openings'],
+  [jobs.filter(j=>j.created?.startsWith(today) && j.availability==='Open').length,'new openings today (UTC)'],
+  [jobs.filter(j=>j.availability==='Open' && unapplied.includes(j.status)).length,'open and not applied'],
+  [jobs.filter(j=>j.application_date || applicationStatuses.includes(j.status)).length,'applications recorded'],
+  [jobs.filter(j=>j.status.startsWith('Interview')).length,'interviews'],
+  [jobs.filter(j=>j.status==='Offer Received').length,'offers'],
+  [jobs.filter(j=>j.status==='Rejected').length,'rejections'],
+  [lastCompleted?.report.newly_closed??0,'closed in last run'],
+ ];
+ $('summary').innerHTML=metrics.map(([count,label])=>`<span class="tag">${count} ${label}</span>`).join(' ');
  $('system').textContent=`Daily search: ${state.preferences.schedule_enabled?state.schedule_hour_utc+':00 UTC':'paused'}. ${state.firecrawl_configured?'Firecrawl configured':'Public board mode'}. Last fully successful run: ${date(state.runs.find(r=>r.state==='success')?.finished)}. ${state.running?'Search running…':''}`;
  $('run').disabled=state.running;
  fillSelect('status',state.statuses,'All application statuses');fillSelect('company',[...new Set(jobs.map(j=>j.employer))].sort(),'All companies');fillSelect('category',[...new Set(jobs.map(j=>j.category||'Imported'))].sort(),'All categories');
- $('reports').innerHTML=state.runs.map(r=>`<details><summary>${esc(date(r.started))} — ${esc(r.state)}: ${r.report.new_qualified||0} qualified new, ${r.report.new_review||0} review leads</summary><pre>${esc(JSON.stringify(r.report,null,2))}</pre>${(r.report.top_new||[]).map(j=>`<p><a href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">${esc(j.employer+' — '+j.title)}</a></p>`).join('')}</details>`).join('')||'No search reports yet.';
+ $('reports').innerHTML=state.runs.map(renderSearchReport).join('')||'No search reports yet.';
  filter();
+}
+function renderSearchReport(run){
+ const report=run.report;
+ const origin=run.trigger==='scheduled'?'Scheduled':run.trigger==='manual'?'Manual':'Search';
+ const metrics=[
+  ['New qualified',report.new_qualified],
+  ['New for review',report.new_review],
+  ['Rechecked',report.reverified],
+  ['Newly closed',report.newly_closed],
+  ['Open listings needing review',report.manual_review],
+  ['Duplicates skipped',report.duplicates],
+  ['Beyond this run’s limit',report.deferred_candidates || null],
+  ['Board details deferred',report.deferred_source_details || null],
+  ['Source failures',report.failures?.length],
+  ['Firecrawl credits reported',report.firecrawl_requests || report.firecrawl_credits_reported ? report.firecrawl_credits_reported : null],
+ ];
+ const counts=metrics.filter(([,value])=>value!=null)
+  .map(([label,value])=>`<span class="tag">${esc(label)} · ${esc(value)}</span>`).join(' ');
+ const links=(report.top_new??[]).map(job=>`<li><a href="${esc(job.url)}" target="_blank" rel="noopener noreferrer">${esc(job.employer+' — '+job.title)}</a></li>`).join('');
+ const details=(label,items)=>items?.length
+  ? `<details><summary>${esc(label)}</summary><ul>${items.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></details>`
+  : '';
+ return `<details><summary>${esc(origin)} · ${esc(date(run.started))} · ${esc(run.state)}</summary>
+  <div class="badges">${counts}</div>
+  ${links?`<p><strong>Top new jobs</strong></p><ul>${links}</ul>`:''}
+  ${details('Source failures',report.failures)}
+  ${details('Deferred employer pages',report.unprocessed_employer_urls)}
+  ${details('Activity',report.log)}
+ </details>`;
 }
 function reviewReasons(j){
  const reasons=[];
@@ -49,12 +92,22 @@ function reviewPanel(j){
  ].map(([key,label])=>`<label class="check"><input type="checkbox" name="check_${key}" ${checks[key]?'checked':''}><span>${esc(label)}</span></label>`).join('')}<label>Reviewed by (optional)<input name="reviewer" maxlength="120" value="${esc(j.review_reviewer)}" placeholder="Your name"></label><label>Review notes <span class="hint">Explain any missing pay, location or application information you confirmed.</span><textarea name="review_note" placeholder="What I checked, remaining questions, or why this should be held or dismissed…">${esc(j.review_note)}</textarea></label>${blocked.length?`<p class="blocked">Approval blocked: ${esc(blocked.join(' '))}</p>`:''}<div class="decision-buttons"><button class="btn approve" data-decision="Approved" ${blocked.length?'disabled':''}>Approve for application</button><button class="btn secondary" data-decision="Hold">Hold / need information</button><button class="btn dismiss" data-decision="Dismissed">Dismiss</button>${j.review_decision!=='Pending'?'<button class="btn secondary" data-decision="Pending">Send back to review</button>':''}</div><p class="hint">Approval moves an unapplied job to Ready to Apply. It does not submit an application.</p>${j.review_updated?`<p class="hint">Last review: ${esc(date(j.review_updated))}${j.review_reviewer?' · '+esc(j.review_reviewer):''}</p>`:''}<div class="review-message" role="status"></div></details>`;
 }
 function trackingPanel(j){return `<details class="tracking-panel"><summary>Application tracking · ${esc(j.status)}</summary><label>Application status<select name="status">${state.statuses.map(s=>`<option ${s===j.status?'selected':''}>${esc(s)}</option>`).join('')}</select></label><label>Application date<input name="application_date" type="date" value="${esc(j.application_date)}"></label><label>Follow-up date<input name="follow_up" type="date" value="${esc(j.follow_up)}"></label><label>Application notes<textarea name="notes">${esc(j.notes)}</textarea></label><button class="btn save">Save tracking</button><div class="saved" role="status"></div></details>`;}
+function listingBadges(job){
+ const today=new Date().toISOString().slice(0,10);
+ const labels=[];
+ if(job.created?.startsWith(today))labels.push('New Today');
+ if(job.queue==='Confirmed' && job.application_verified?.startsWith(today))labels.push('Verified Today');
+ if(!job.salary_text || /salary not published/i.test(job.salary_text))labels.push('Salary Not Published');
+ if(/salary not yet verified/i.test(job.salary_text??''))labels.push('Pay Needs Verification');
+ if(job.availability==='Needs Verification')labels.push('Needs Verification');
+ return labels.map(label=>`<span class="tag">${label}</span>`).join('');
+}
 function filter(){
  const text=$('search').value.toLowerCase(),queue=$('queue').value;
- let list=state.jobs.filter(j=>(!followupOnly||(j.follow_up&&j.follow_up<=new Date().toLocaleDateString('en-CA')&&!['Rejected','Withdrawn','Position Closed'].includes(j.status)))&&(activeBucket==='all'||bucket(j)===activeBucket)&&(!text||[j.employer,j.title,j.description,j.notes,j.review_note].join(' ').toLowerCase().includes(text))&&(!$('status').value||j.status===$('status').value)&&(!$('company').value||j.employer===$('company').value)&&(!$('category').value||(j.category||'Imported')===$('category').value)&&(!$('area').value||j.area===$('area').value)&&(!$('score').value||j.score>=+$('score').value)&&(!$('salary').value||(j.salary_max||0)>=+$('salary').value)&&(!$('posted').value||(j.posted||'').slice(0,10)>=$('posted').value)&&(!$('verified').value||(j.last_verified||'').slice(0,10)>=$('verified').value)&&(queue==='all'||j.queue===queue));
+ let list=state.jobs.filter(j=>(!followupOnly||(j.follow_up&&j.follow_up<=new Date().toLocaleDateString('en-CA')&&!['Rejected','Withdrawn','Position Closed'].includes(j.status)))&&(activeBucket==='all'||bucket(j)===activeBucket)&&(!text||[j.employer,j.title,j.description,j.notes,j.review_note].join(' ').toLowerCase().includes(text))&&(!$('status').value||j.status===$('status').value)&&(!$('company').value||j.employer===$('company').value)&&(!$('category').value||(j.category||'Imported')===$('category').value)&&(!$('area').value||j.area===$('area').value)&&(!$('score').value||j.score>=+$('score').value)&&(!$('salary').value||(j.salary_max||0)>=+$('salary').value)&&(!$('posted').value||(j.posted||'').slice(0,10)>=$('posted').value)&&(!$('verified').value||(j.application_verified||'').slice(0,10)>=$('verified').value)&&(queue==='all'||j.queue===queue));
  const sort=$('sort').value;list.sort((a,b)=>sort==='score'?b.score-a.score:sort==='salary'?(b.salary_max||0)-(a.salary_max||0):sort==='status'?a.status.localeCompare(b.status):String(b[sort]||'').localeCompare(String(a[sort]||''))||b.id-a.id);
  $('count').textContent=`${list.length} jobs in this view · ${state.jobs.length} retained in history. Human approval and employer verification are separate.`;
- $('jobs').innerHTML=list.map(j=>`<article data-id="${j.id}"><div class="top"><span class="tag">${esc(j.match_label)} · ${j.score}/100</span><em>#${j.id}</em></div><div class="company">${esc(j.employer)}</div><h2>${esc(j.title)}</h2><div class="salary">${esc(j.salary_text||'Salary Not Published')}</div><em>${esc(j.location)}</em><div class="note">${esc(j.location_reason)}</div><div class="badges"><span class="tag decision-${esc(j.review_decision.toLowerCase())}">${esc(j.review_decision==='Approved'?'Approved by you':j.review_decision==='Pending'?'Awaiting review':j.review_decision)}</span><span class="tag">${esc(j.status)}</span><span class="tag">${j.queue==='Confirmed'?'Employer verified':'Automatic checks incomplete'}</span>${j.availability==='Closed'?'<span class="tag">Closed</span>':''}</div><div class="why">${esc(j.explanation)}</div><details><summary>Employer description & verification</summary><p class="why">${esc(j.description)}</p><p class="note">${esc(j.application_evidence||'Not independently verified')}<br>Source: ${esc(j.source)}<br>Verified: ${esc(date(j.last_verified))}<br>Posted: ${esc(j.posted||'Unknown')}<br>Tracking updated: ${esc(date(j.tracking_updated))}</p></details><div class="actions"><a class="btn employer-link" href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">Open employer posting ↗</a>${unapplied.includes(j.status)?`<button class="btn secondary mark-applied">${bucket(j)==='ready'?'Mark as applied':'Already applied'}</button>`:''}</div>${aiPanel(j)}${reviewPanel(j)}${trackingPanel(j)}</article>`).join('')||`<div class="empty"><h2>No jobs in this bucket yet</h2><p>${activeBucket==='ready'?'Approve a job in Review Inbox to move it here.':activeBucket==='applied'?'Mark a job as applied to move it here.':'Try another bucket or clear your filters.'}</p></div>`;
+ $('jobs').innerHTML=list.map(j=>`<article data-id="${j.id}"><div class="top"><span class="tag">${esc(j.match_label)} · ${j.score}/100</span><em>#${j.id}</em></div><div class="company">${esc(j.employer)}</div><h2>${esc(j.title)}</h2><div class="salary">${esc(j.salary_text||'Salary Not Published')}</div><em>${esc(j.location)}</em><div class="note">${esc(j.location_reason)}</div><div class="badges"><span class="tag decision-${esc(j.review_decision.toLowerCase())}">${esc(j.review_decision==='Approved'?'Approved by you':j.review_decision==='Pending'?'Awaiting review':j.review_decision)}</span><span class="tag">${esc(j.status)}</span><span class="tag">${j.queue==='Confirmed'?'Employer verified':'Automatic checks incomplete'}</span>${j.availability==='Closed'?'<span class="tag">Closed</span>':''}${listingBadges(j)}</div><div class="why">${esc(j.explanation)}</div>${j.duty_evidence?.length?`<details><summary>Experience matched to duties</summary><ul>${j.duty_evidence.map(item=>`<li><strong>${esc(item.skill)}</strong> · ${esc(item.duty)}</li>`).join('')}</ul></details>`:''}<details><summary>Employer description & verification</summary><p class="why">${esc(j.description)}</p><p class="note">${esc(j.application_evidence||'Not independently verified')}<br>Source: ${esc(j.source)}<br>Employer source checked: ${esc(date(j.last_verified))}<br>Application form verified: ${esc(date(j.application_verified))}<br>Posted: ${esc(j.posted||'Unknown')}<br>Tracking updated: ${esc(date(j.tracking_updated))}</p></details><div class="actions"><a class="btn employer-link" href="${esc(j.url)}" target="_blank" rel="noopener noreferrer">Open employer posting ↗</a>${unapplied.includes(j.status)?`<button class="btn secondary mark-applied">${bucket(j)==='ready'?'Mark as applied':'Already applied'}</button>`:''}</div>${aiPanel(j)}${reviewPanel(j)}${trackingPanel(j)}</article>`).join('')||`<div class="empty"><h2>No jobs in this bucket yet</h2><p>${activeBucket==='ready'?'Approve a job in Review Inbox to move it here.':activeBucket==='applied'?'Mark a job as applied to move it here.':'Try another bucket or clear your filters.'}</p></div>`;
  bindCards();bindAI();
 }
 async function post(url,payload){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json','X-Jobs-Client':'dashboard'},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw Error(data.error||'Could not save');return data;}

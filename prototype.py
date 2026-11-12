@@ -90,7 +90,7 @@ def save_preferences(a, payload):
         if not isinstance(modes, list) or any(mode not in ('remote', 'hybrid', 'onsite') for mode in modes):
             raise ValueError('Invalid workplace type')
         boards = updated['additional_boards']
-        if not isinstance(boards, dict) or set(boards) - {'ashby', 'greenhouse', 'lever'}: raise ValueError('Unsupported board platform')
+        if not isinstance(boards, dict) or set(boards) - a.BOARD_PLATFORMS: raise ValueError('Unsupported board platform')
         for names in boards.values():
             if not isinstance(names, list) or len(names) > 150 or any(not isinstance(n, str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,100}', n) for n in names):
                 raise ValueError('Use employer board slugs, for example deepgram')
@@ -222,6 +222,12 @@ def saved_searches(c):
             for row in c.execute('SELECT * FROM saved_searches ORDER BY id')]
 
 
+def search_title_matches(title, search):
+    terms = search.get('title_terms', [])
+    return not terms or any(re.search(r'(?<!\w)' + re.escape(term) + r'(?!\w)', title, re.I)
+                            for term in terms)
+
+
 def matching_searches(a, job, searches):
     if job.get('availability') != 'Open':
         return []
@@ -231,11 +237,9 @@ def matching_searches(a, job, searches):
     for search in searches:
         if not search['enabled']:
             continue
-        title_terms = search.get('title_terms', [])
-        if title_terms and not any(re.search(r'(?<!\w)' + re.escape(term.lower()) + r'(?!\w)', title)
-                                   for term in title_terms):
+        if not search_title_matches(title, search):
             continue
-        if not any(re.search(r'(?<!\w)' + re.escape(skill.lower()) + r'(?!\w)', text)
+        if not any(re.search(r'(?<![\w+#])' + re.escape(skill.lower()) + r'(?![\w+#])', text)
                    for skill in search['skills']):
             continue
         geography = {'target_locations': search['locations'], 'workplace_types': search['workplace_types']}
