@@ -17,6 +17,7 @@ import urllib.parse as up
 import urllib.request as ur
 import xml.etree.ElementTree as ET
 import prototype
+import recruiter
 import sys
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -118,7 +119,7 @@ def upsert(c,j):
     if row:
         old=json.loads(row['listing'])
         # A fresh employer response owns these facts, including their absence.
-        for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified'):
+        for field in ('salary_min','salary_max','salary_currency','salary_period','salary_type','compensation_details','application_verified','verification_provenance'):
             old.pop(field,None)
         old.update(j)
         c.execute('UPDATE jobs SET listing=?,updated=? WHERE id=?',(json.dumps(old),stamp,row['id']))
@@ -305,13 +306,13 @@ def board_jobs(platform,board):
         data=fetch('https://boards-api.greenhouse.io/v1/boards/'+up.quote(board,safe='')+'/jobs?content=true')
         out=[]
         for x in data.get('jobs',[]):
-            out.append({'title':x['title'],'employer':board,'url':x['absolute_url'],'location':x.get('location',{}).get('name',''),'description':clean(x.get('content','')),'posted':x.get('updated_at',''),'remote': 'remote' in x.get('location',{}).get('name','').lower(),'availability':'Open','last_verified':now(),'source':'Greenhouse public live board','requisition':str(x['id']),'application_evidence':'Listed in employer live board with absolute application URL','salary_text':'Salary not yet verified'})
+            out.append({'title':x['title'],'employer':board,'url':x['absolute_url'],'location':x.get('location',{}).get('name',''),'description':clean(x.get('content','')),'posted':x.get('updated_at',''),'remote': 'remote' in x.get('location',{}).get('name','').lower(),'availability':'Open','last_verified':now(),'source_board':['greenhouse',board.lower()],'source':'Greenhouse public live board','requisition':str(x['id']),'application_evidence':'Listed in employer live board with absolute application URL','salary_text':'Salary not yet verified'})
         return out
     if platform=='ashby':
         data=fetch('https://api.ashbyhq.com/posting-api/job-board/'+up.quote(board,safe='')+'?includeCompensation=true');out=[]
         for x in data.get('jobs',[]):
             if x.get('isListed') is False: continue
-            j={'title':x['title'],'employer':board,'url':x.get('applyUrl') or x['jobUrl'],'location':x.get('location',''),'description':x.get('descriptionPlain',''),'posted':x.get('publishedAt',''),'remote':x.get('isRemote',False),'availability':'Open','last_verified':now(),'source':'Ashby public live board','requisition':x['id'],'application_evidence':'Listed employer job and application URL','salary_text':'Salary Not Published'}
+            j={'title':x['title'],'employer':board,'url':x.get('applyUrl') or x['jobUrl'],'location':x.get('location',''),'description':x.get('descriptionPlain',''),'posted':x.get('publishedAt',''),'remote':x.get('isRemote',False),'availability':'Open','last_verified':now(),'source_board':['ashby',board.lower()],'source':'Ashby public live board','requisition':x['id'],'application_evidence':'Listed employer job and application URL','salary_text':'Salary Not Published'}
             comp=x.get('compensation') or {}; tiers=comp.get('compensationTiers') or []
             components=[z for tier in tiers for z in tier.get('components',[]) if z.get('compensationType')=='Salary' and z.get('currencyCode')=='USD' and z.get('interval')=='1 YEAR']
             if len(components)==1:
@@ -323,7 +324,7 @@ def board_jobs(platform,board):
         data=fetch('https://api.lever.co/v0/postings/'+up.quote(board,safe='')+'?mode=json');out=[]
         for x in data:
             loc=x.get('categories',{}).get('location',''); salary=x.get('salaryRange') or {}
-            j={'title':x['text'],'employer':board,'url':x['applyUrl'],'location':loc,'description':x.get('descriptionPlain','')+' '+clean(' '.join(z.get('content','') for z in x.get('lists',[]))),'posted':dt.datetime.fromtimestamp(x['createdAt']/1000,dt.timezone.utc).isoformat() if x.get('createdAt') else '', 'remote':x.get('workplaceType')=='remote','availability':'Open','last_verified':now(),'source':'Lever public live board','requisition':x['id'],'application_evidence':'Employer live posting and applyUrl','salary_text':x.get('salaryDescriptionPlain') or 'Salary Not Published'}
+            j={'title':x['text'],'employer':board,'url':x['applyUrl'],'location':loc,'description':x.get('descriptionPlain','')+' '+clean(' '.join(z.get('content','') for z in x.get('lists',[]))),'posted':dt.datetime.fromtimestamp(x['createdAt']/1000,dt.timezone.utc).isoformat() if x.get('createdAt') else '', 'remote':x.get('workplaceType')=='remote','availability':'Open','last_verified':now(),'source_board':['lever',board.lower()],'source':'Lever public live board','requisition':x['id'],'application_evidence':'Employer live posting and applyUrl','salary_text':x.get('salaryDescriptionPlain') or 'Salary Not Published'}
             if salary.get('currency')=='USD' and salary.get('interval')=='per-year':j.update(salary_min=salary.get('min'),salary_max=salary.get('max'),salary_currency='USD',salary_period='year',salary_type='base')
             out.append(j)
         return out
@@ -334,7 +335,19 @@ def board_identity(url):
     return (platform,parts[0].lower()) if platform and parts[0] else None
 def verify_application(j,report=None):
     """A live board record alone is insufficient: check job-specific application evidence."""
+    j.pop('application_verified', None)
+    j.pop('verification_provenance', None)
     url=j['url'];safe_url(url)
+    board = board_identity(url)
+    if j.get('source_board') and tuple(j['source_board']) != board:
+        raise ValueError('Application provider board does not match the employer source')
+    if not board:
+        raise ValueError('Official application provider relationship is unresolved')
+    # Do not verify a plausible-looking but different requisition URL.
+    parts = up.urlsplit(url).path.strip('/').split('/')
+    url_req = parts[2] if board[0]=='greenhouse' and len(parts)>2 and parts[1]=='jobs' else (parts[1] if len(parts)>1 else '')
+    if not j.get('requisition') or str(j['requisition']) != url_req:
+        raise ValueError('Application URL does not match source requisition')
     try:
         with OPENER.open(ur.Request(url,headers={'User-Agent':'Mozilla/5.0 PersonalJobDashboard'}),timeout=25) as response:
             raw=response.read(3000000).decode('utf-8',errors='replace');final=response.url
@@ -346,12 +359,15 @@ def verify_application(j,report=None):
     if identity(final)!=identity(url):raise ValueError('Application redirected away from the requisition')
     content=html.unescape(raw).lower()
     if re.search(r'(no longer accepting applications|position has been filled|job is (?:closed|expired)|job not found)',clean(content)):raise ValueError('Application page says unavailable')
+    if norm(j['title']) not in norm(clean(content)):
+        raise ValueError('Exact role title not confirmed on application page')
     tokens=[t for t in norm(j['title']).split() if len(t)>3]
     if tokens and sum(t in content for t in tokens)<max(1,len(tokens)//2):raise ValueError('Job title not confirmed on application page')
     if not re.search(r'(<form|applicationform|application_form|apply for this job|submit application|ashby-application-form)',content):
         raise ValueError('Application form not confirmed in accessible page content')
     j['application_evidence']+='; direct requisition page and application-form evidence checked'
     j['application_verified']=now()
+    j['verification_provenance']={'source_url':url,'final_url':final,'board':list(board),'requisition':str(j['requisition']),'scope':'same requisition URL, exact title and form; location from live feed'}
     return j
 def finalize(j,cfg,report):
     j=assess(j,cfg)
@@ -588,7 +604,8 @@ def snapshot():
     for j in jobs:
         previous_queue=j.get('queue');previous_application=j.get('application_verified')
         assess(j,cfg)
-        if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
+        j['recruiter'] = recruiter.explain(j, cfg)
+        if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application or j['recruiter']['link_status']!='verified'):j['queue']='Review'
         eligible,reason,area=location_eligibility(j,cfg)
         j.update(location_eligibility=eligible,location_reason=reason,area=area)
         j['review_blockers']=review_blockers(j)

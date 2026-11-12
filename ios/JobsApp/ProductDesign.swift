@@ -181,7 +181,7 @@ enum SampleWorkspace {
         let timestamp = Date.now.addingTimeInterval(Double(-id) * 86_400).ISO8601Format()
         let gaps = eligible ? [] : ["Published pay and hiring region need review"]
         return Job(
-            interest: nil, matchedSkills: skills, matchedGroups: nil, matchGaps: gaps,
+            recruiter: nil, interest: nil, matchedSkills: skills, matchedGroups: nil, matchGaps: gaps,
             salaryMin: pay?.lowerBound, salaryCurrency: eligible ? "USD" : nil,
             salaryPeriod: eligible ? "year" : nil, salaryType: eligible ? "base" : nil, stale: false,
             id: id, title: title, employer: employer, location: location,

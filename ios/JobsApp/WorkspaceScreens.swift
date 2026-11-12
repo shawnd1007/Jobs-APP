@@ -302,6 +302,7 @@ private struct PreferencesEditor: View {
                         do {
                             try ResumePreview.remove()
                             self.savedResume = nil
+                            draft.preferences.resumeEvidence = [:]
                             importError = nil
                         } catch { importError = error.localizedDescription }
                     }
@@ -313,6 +314,23 @@ private struct PreferencesEditor: View {
             Section("Candidate Profile") {
                 TextField("Experience and preferences", text: $draft.preferences.profile, axis: .vertical)
                     .lineLimit(4...10)
+            }
+            Section("Reviewed Résumé Evidence") {
+                Text("Only excerpts you approve are sent to this workspace when you save. These are user-reviewed statements, not independently verified credentials. No AI inferences are generated.")
+                    .font(.footnote)
+                ForEach((draft.preferences.resumeEvidence ?? [:]).keys.sorted(), id: \.self) { skill in
+                    TextField(skill, text: Binding(
+                        get: { draft.preferences.resumeEvidence?[skill] ?? "" },
+                        set: { value in
+                            var evidence = draft.preferences.resumeEvidence ?? [:]
+                            if value.isEmpty { evidence.removeValue(forKey: skill) }
+                            else { evidence[skill] = value }
+                            draft.preferences.resumeEvidence = evidence
+                        }), axis: .vertical)
+                    Button("Remove evidence for \(skill)", role: .destructive) {
+                        draft.preferences.resumeEvidence?.removeValue(forKey: skill)
+                    }
+                }
             }
             Section("Role and Skill Matching") {
                 multiline("Role phrases, one per line", $draft.categories)
@@ -395,7 +413,14 @@ private struct PreferencesEditor: View {
         }
         .sheet(item: $resume) { preview in
             ResumeReview(preview: preview) { skills in
-                for skill in skills { setSkill(skill, enabled: true) }
+                for skill in skills {
+                    setSkill(skill, enabled: true)
+                    guard let excerpt = preview.text.components(separatedBy: .newlines)
+                        .first(where: { $0.localizedCaseInsensitiveContains(skill) }) else { continue }
+                    var evidence = draft.preferences.resumeEvidence ?? [:]
+                    evidence[skill] = String(excerpt.prefix(1000))
+                    draft.preferences.resumeEvidence = evidence
+                }
             }
         }
     }
@@ -506,7 +531,8 @@ private struct ResumeReview: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Suggested Skills") {
+                Section("Literal Résumé Mentions — Review Before Saving") {
+                    Text("Keyword matching only. A mention may describe a goal rather than experience. Approve only statements that reflect your actual background.")
                     if preview.skills.isEmpty {
                         Text("No skills from the built-in list were found. You can add custom skills in Preferences.")
                     }

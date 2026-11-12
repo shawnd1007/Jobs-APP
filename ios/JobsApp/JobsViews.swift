@@ -490,7 +490,7 @@ struct JobDetail: View {
                         }
                         if let url = job.postingURL {
                             Link(destination: url) {
-                                Label("Open employer posting", systemImage: "arrow.up.right.square")
+                                Label(job.recruiter?.linkStatus == "verified" ? "Open checked employer application" : "Open posting — check details", systemImage: "arrow.up.right.square")
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.borderedProminent)
@@ -508,6 +508,22 @@ struct JobDetail: View {
                         if let source = job.source, !source.isEmpty { LabeledContent("Source", value: source) }
                         if let verified = job.lastVerified, !verified.isEmpty {
                             LabeledContent("Last Verified", value: displayTimestamp(verified))
+                        }
+                    }
+                    if let evidence = job.recruiter {
+                        Section("Your Evidence and Preparation") {
+                            LabeledContent("Application link", value: evidence.linkStatus.capitalized)
+                            Text(evidence.adviceMethod).font(.footnote)
+                            ForEach(evidence.hardRequirements, id: \.self) { Text($0) }
+                            ForEach(evidence.preferences, id: \.self) { Text($0).foregroundStyle(.secondary) }
+                            ForEach(evidence.unknowns, id: \.self) { Text($0) }
+                            if !evidence.selectedWithoutEvidence.isEmpty {
+                                Text("Selected skills without résumé evidence: " + evidence.selectedWithoutEvidence.joined(separator: ", "))
+                            }
+                            ForEach(evidence.preparation, id: \.self) { Text($0).textSelection(.enabled) }
+                            if evidence.preparation.isEmpty {
+                                Text("No reviewed résumé excerpts overlap this posting yet. Review your profile before preparing an application.")
+                            }
                         }
                     }
                     Section("Your Workflow") {

@@ -21,6 +21,17 @@ struct Job: Decodable, Identifiable {
         let version: Int
         let updated: String
     }
+    struct Recruiter: Decodable {
+        let resumeMatches: [String]
+        let selectedWithoutEvidence: [String]
+        let preparation: [String]
+        let unknowns: [String]
+        let hardRequirements: [String]
+        let preferences: [String]
+        let linkStatus: String
+        let adviceMethod: String
+    }
+    let recruiter: Recruiter?
     var interest: Interest?
     let matchedSkills: [String]?
     let matchedGroups: [String]?
@@ -137,6 +148,7 @@ enum JobBucket: String, CaseIterable, Identifiable {
 }
 
 struct Preferences: Codable {
+    var resumeEvidence: [String: String]?
     var preferredSkills: [String]?
     var targetLocations: [String]?
     var workplaceTypes: [String]?

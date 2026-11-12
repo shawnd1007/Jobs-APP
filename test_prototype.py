@@ -24,6 +24,23 @@ class PrototypeTests(unittest.TestCase):
         app.SEED = self.oldseed
         self.tmp.cleanup()
 
+    def test_resume_evidence_persists_and_can_be_removed(self):
+        state = app.snapshot()
+        evidence = {'SQL': 'Used SQL at Fictional Example Company'}
+        payload = dict(revision=state['preferences_revision'], preferences={
+            'resume_evidence': evidence, 'preferred_skills': ['SQL']})
+        self.assertEqual(prototype.save_preferences(app, payload)[0], 200)
+        self.assertEqual(app.config()['resume_evidence'], evidence)
+        job = app.records()[0]
+        job['description'] = 'SQL reconciliation'
+        with app.connect() as c: app.upsert(c, job)
+        self.assertTrue(next(j for j in app.snapshot()['jobs'] if j['id']==job['id'])['recruiter']['preparation'])
+        state = app.snapshot()
+        self.assertEqual(prototype.save_preferences(app, dict(revision=state['preferences_revision'],
+            preferences={'resume_evidence': {}}))[0], 200)
+        self.assertFalse(next(j for j in app.snapshot()['jobs'] if j['id']==job['id'])['recruiter']['preparation'])
+        self.assertNotIn('recruiter', app.records()[0])
+
     def test_removed_salary_and_form_evidence_do_not_survive_refresh(self):
         j = app.records()[0]
         j.update(salary_min=75000, salary_max=95000, salary_type='base', salary_currency='USD', salary_period='year', application_verified=app.now())

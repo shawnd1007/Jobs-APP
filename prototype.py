@@ -17,13 +17,14 @@ PREFERENCE_KEYS = ('profile', 'categories', 'salary_floor', 'salary_policy',
                    'excluded_title_terms', 'skill_groups', 'additional_boards',
                    'additional_employer_urls', 'disabled_sources', 'ai_enabled',
                    'ai_model', 'ai_daily_limit', 'schedule_enabled', 'schedule_hour_utc',
-                   'target_locations', 'workplace_types', 'preferred_skills')
+                   'target_locations', 'workplace_types', 'preferred_skills', 'resume_evidence')
 
 
 def settings(base, data):
     path = data / 'preferences.json'
     if path.exists():
         base.update(json.loads(path.read_text(encoding='utf-8')))
+    base.setdefault('resume_evidence', {})
     base.setdefault('preferred_skills', [])
     base.setdefault('target_locations', [])
     base.setdefault('workplace_types', [])
@@ -89,6 +90,12 @@ def save_preferences(a, payload):
         modes = updated['workplace_types']
         if not isinstance(modes, list) or any(mode not in ('remote', 'hybrid', 'onsite') for mode in modes):
             raise ValueError('Invalid workplace type')
+        evidence = updated.get('resume_evidence', {})
+        if (not isinstance(evidence, dict) or len(evidence) > 150 or
+                any(not isinstance(k, str) or not 1 <= len(k) <= 100 or
+                    not isinstance(v, str) or not 1 <= len(v) <= 1000
+                    for k, v in evidence.items())):
+            raise ValueError('Invalid résumé evidence')
         boards = updated['additional_boards']
         if not isinstance(boards, dict) or set(boards) - {'ashby', 'greenhouse', 'lever'}: raise ValueError('Unsupported board platform')
         for names in boards.values():

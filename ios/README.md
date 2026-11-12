@@ -54,7 +54,7 @@ To request AI career advice, put your key in `secrets/openai.key` on the Mac, en
 
 ## Personalize matching
 
-In **Settings → Edit Search Profile**, import a text-based PDF or UTF-8 text résumé from Files. The app keeps a removable preview on this device and suggests skills from its starter list. Select the suggestions you want to use, or add your own terms in **Skills to Use**. Save to apply your selections to matching. The Mac receives the skill selections and preferences, while the résumé preview stays on the device.
+In **Settings → Edit Search Profile**, import a text-based PDF or UTF-8 text résumé from Files. The app keeps a removable preview on this device and suggests skills from its starter list. Select the suggestions you want to use, or add your own terms in **Skills to Use**. Save to apply your selections to matching. The full résumé preview stays on the device. When you approve skills and save the profile, the Mac receives those selections and the reviewed résumé excerpts shown in the profile editor. Remove or correct excerpts there before saving.
 
 Enter city or region phrases and choose Remote, Hybrid, or On-site. For example, use `Austin, TX` to match that published office location, or `United States` with Remote for US-remote listings. Ambiguous remote hiring restrictions require review. Pick a salary preset or enter a custom annual USD base-pay target. Choose whether the published range only needs to reach your target or whether its minimum must meet it. Existing workspaces keep their original geography rules until you set locations or work arrangements.
 
