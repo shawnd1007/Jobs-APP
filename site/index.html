@@ -43,6 +43,22 @@ article[hidden]{display:none!important}@media(max-width:420px){main{padding:14px
     </div>
   </form>
 </dialog>
+<dialog id="prep-dialog" aria-labelledby="prep-heading">
+  <h2 id="prep-heading">Application Prep</h2>
+  <p id="prep-role"></p>
+  <p id="prep-message" role="status"></p>
+  <button id="prep-reload" class="btn secondary" type="button" hidden>Reload Saved Draft</button>
+  <div id="prep-body" hidden>
+    <div id="prep-evidence"></div>
+    <label>Your draft<textarea id="prep-draft" maxlength="8000"></textarea></label>
+    <p class="hint">Edit the excerpts and add your own examples before using this draft.</p>
+    <p id="prep-saved" role="status"></p>
+  </div>
+  <div class="form-actions">
+    <button id="prep-close" class="btn secondary" type="button">Close</button>
+    <button id="prep-save" class="btn" type="button" disabled>Save Draft</button>
+  </div>
+</dialog>
 <nav id="buckets" aria-label="Job workflow buckets"></nav><section class="bucket-heading"><h2 id="bucket-title">Review Inbox</h2><p id="bucket-description"></p></section><div class="quick-views"><button data-preset="all">All roles</button><button data-preset="technical">Support</button><button data-preset="implementation">Implementation</button><button data-preset="followup">Follow-ups due</button></div><div class="controls">
 <input id="search" placeholder="Search company, title, description or notes" aria-label="Search">
 <select id="queue" aria-label="Automatic verification"><option value="all">All automatic checks</option><option value="Confirmed">Employer verified</option><option value="Review">Verification / salary review</option><option value="Location Review">Location needs confirmation</option><option value="Excluded">Excluded by requirements</option></select>

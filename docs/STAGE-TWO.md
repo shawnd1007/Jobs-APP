@@ -57,3 +57,8 @@ The connected iPhone app and browser can add an application with a title, employ
 ## Direct posting checks for alerts
 
 Jobs checks the requisition and page title before sending a saved-search alert. A timeout or mismatch leaves the listing in review. A later successful check uses the current search criteria, preserves the same tracking record and sends each matching alert once. The browser and iPhone distinguish checked and unverified posting links. Application form evidence stays separate.
+
+
+## Application Prep
+
+The web and connected iPhone job details include a worksheet that pairs employer duties with examples from the saved Search Profile. Users can add their own excerpts to a draft, edit them and save it per job. Skills without a usable work example appear with questions to check. Draft writes use a version so retries and edits on two devices preserve the owner’s text. The worksheet works without a paid AI provider.

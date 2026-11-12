@@ -9,6 +9,7 @@ struct Dashboard: Decodable {
     let statuses: [String]
     let running: Bool
     var externalApplicationTracking: Bool? = nil
+    var applicationPrepAvailable: Bool? = nil
     var preferences: Preferences
     let preferencesRevision: String
     let sources: [EmployerSource]
@@ -295,6 +296,29 @@ struct SavedAdvice: Decodable {
     }
 }
 
+struct ApplicationPrep: Decodable {
+    struct Example: Decodable {
+        let skill: String
+        let duty: String
+        let profileExcerpt: String
+    }
+
+    let draft: String
+    let version: Int
+    let updated: String?
+    let examples: [Example]
+    let skillsToDocument: [String]
+    let qualificationChecks: [String]
+    let hasProfile: Bool
+    let hasDescription: Bool
+}
+
+struct SavedApplicationDraft: Decodable {
+    let draft: String
+    let version: Int
+    let updated: String
+}
+
 enum DashboardAPI {
     struct Snapshot {
         let dashboard: Dashboard
@@ -353,6 +377,24 @@ enum DashboardAPI {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(SearchStatus.self, from: data)
+    }
+
+    static func applicationPrep(jobID: Int, at address: String) async throws -> ApplicationPrep {
+        let data = try await request("/api/jobs/\(jobID)/application-prep", at: address)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ApplicationPrep.self, from: data)
+    }
+
+    static func saveApplicationDraft(jobID: Int, draft: String, version: Int,
+                                     at address: String) async throws -> SavedApplicationDraft {
+        struct Change: Encodable {
+            let draft: String
+            let version: Int
+        }
+        let body = try JSONEncoder().encode(Change(draft: draft, version: version))
+        let data = try await request("/api/jobs/\(jobID)/application-prep", at: address, body: body)
+        return try JSONDecoder().decode(SavedApplicationDraft.self, from: data)
     }
 
     fileprivate static func snapshot(from data: Data, syncedAt: Date) throws -> Snapshot {

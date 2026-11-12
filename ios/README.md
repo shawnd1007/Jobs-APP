@@ -54,6 +54,8 @@ The backend checks Greenhouse, Ashby, Lever, SmartRecruiters and employer-enable
 
 To request AI career advice, put your key in `secrets/openai.key` on the Mac, enable AI in **Preferences**, and request advice from a job’s details. The backend sends your profile and the posting to OpenAI when you confirm a request. The daily limit counts attempts. Saved advice can be viewed in the app alongside the employer evidence and your decision.
 
+Open **Application Prep** from an employer listing to compare the employer’s duties with examples from your saved Search Profile. Add excerpts to the draft, edit them and save for that role. Reopen the draft from the connected iPhone app or web dashboard. Your application tracking notes are separate.
+
 ## Where to edit in Xcode
 
 - `JobsApp.swift` starts the app, holds shared workspace state and shows the tab bar and connection settings.

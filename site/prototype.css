@@ -13,3 +13,20 @@
 #application-dialog::backdrop { background: rgb(18 45 58 / 55%); }
 #application-form input, #application-form select { min-width: 0; width: 100%; }
 #application-message { color: #8b302b; }
+
+
+#prep-dialog {
+  width: min(42rem, calc(100% - 2rem));
+  max-height: calc(100% - 2rem);
+  overflow: auto;
+  padding: 1.25rem;
+  border: 1px solid #a8beca;
+  border-radius: 12px;
+  color: inherit;
+}
+#prep-dialog::backdrop { background: rgb(18 45 58 / 55%); }
+#prep-evidence section { margin: 1rem 0; }
+#prep-evidence .prep-example { border-top: 1px solid #e0e9ee; padding: .75rem 0; }
+#prep-evidence h3, #prep-evidence h4 { margin: 0 0 .4rem; }
+#prep-evidence blockquote { margin: .35rem 0 .7rem; padding-left: .7rem; border-left: 2px solid #87aaad; }
+#prep-draft { min-height: 10rem; }

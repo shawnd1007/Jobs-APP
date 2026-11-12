@@ -228,7 +228,7 @@ The profile fit score uses the same scale across job families.
 
 Job details explain each component. A posting with thin or missing text offers less evidence. Keyword matches can indicate which duties to read first. The candidate can check which tasks they have performed, what outcomes they can describe, and which tools or requirements they still need to verify. The app checks location and pay separately when deciding whether to qualify a listing. AI advice can compare the posting with the candidate's written experience and identify questions to resolve.
 
-The app preserves employer headings and bullet boundaries when reading a posting. The duty evidence quotes recognizable work that uses a selected skill also mentioned in the saved profile. Recognized qualifications, company information and benefits stay outside this duty count. Two skills mentioned in one duty count as one duty. Explicitly aspirational or negated profile phrases such as “learning SQL” do not supply duty evidence for that skill. The parser is heuristic and can miss duties in unusual formats.
+The app preserves employer headings and bullet boundaries when reading a posting. The duty evidence quotes recognizable work that uses a selected skill supported by an example in the saved profile. Recognized qualifications, company information and benefits stay outside this duty count. Two skills mentioned in one duty count as one duty. Jobs looks for an affirmative work action in the profile. A skill list, an aspiration such as “learning SQL” or a sentence that denies the skill does not supply duty evidence. The parser is heuristic and can miss duties in unusual formats.
 
 Discovery gives more weight to distinct duties within the same automatic qualification and saved-search priority. Two distinct duties backed by different selected profile skills can surface an adjacent title for review. Employer feeds and individual employer pages use this rule. The iPhone **For You** list ranks by duty evidence before title and keyword score. The score scale, pay and location checks, application verification and saved-search criteria still have their own rules. Degree equivalency, years of experience and required credentials appear as separate checks when the posting supplies that language.
 
@@ -243,6 +243,12 @@ Direct posting evidence and application form evidence have separate timestamps. 
 Each run attempts up to 20 direct checks, with at most eight for retained listings. A rate limit defers further direct requests to the affected host in that run. The report records attempted and deferred checks. When a fresh feed still contains the same URL and title, retained direct evidence can be reused until it expires.
 
 Approval and automatic verification remain separate. A reviewer can explain missing evidence and attest to checks without rewriting employer compensation or pretending the crawler verified it. Known closed, out-of-area or below-maximum-floor records cannot be approved. The human review workflow has not yet been generalized to every possible configurable pay-policy edge case.
+
+### Application Prep
+
+Open **Application Prep** on an employer listing in the web dashboard or the connected iPhone app. The worksheet pairs an employer duty with a short excerpt from the current Search Profile. Add an excerpt to your draft, then edit it in your own words. The worksheet lists selected skills that appear in a duty but lack a usable profile example. Employer qualification language also surfaces questions to check.
+
+The evidence rules are conservative and can miss real experience phrased differently. Read the excerpt and the original posting before using it. Each job has its own editable draft in the shared local database. Tracking notes, review decisions and AI advice remain separate. A failed save keeps your edits in the open form, and a competing edit asks you to reload the saved version before replacing it. Application Prep works without paid AI.
 
 ## 8. Where AI fits
 
@@ -275,6 +281,7 @@ SQLite stores a database in `data/jobs.sqlite3`. JSON inside a listing row carri
 | Table | Purpose | Writer |
 | --- | --- | --- |
 | `jobs` | Source identity, listing facts, creation/update timestamps | Discovery/import |
+| `application_drafts` | Owner-authored prep text, version and updated time | Application Prep editor |
 | `tracking` | Status, application date, follow-up date, notes, version | Owner tracking actions |
 | `job_interests` | Saved or passed state and version | Owner interest actions |
 | `saved_searches`, `match_alerts` | Saved criteria and alerts for matching jobs | Owner search settings and the search pipeline |
@@ -434,6 +441,8 @@ An API is the backend's request/response contract. The browser and the iPhone ap
 | `POST /api/preferences` | Revision plus changed preferences | Save confirmation or validation/conflict error |
 | `POST /api/jobs/{id}/review` | Decision, review version, tracking version, checklist, note and optional reviewer | Saved decision or blockers/conflict |
 | `POST /api/applications` | Owner-entered job title, employer, application status and optional link, location, dates and notes | New tracking record or duplicate conflict |
+| `GET /api/jobs/{id}/application-prep` | Job ID | Current evidence and saved draft |
+| `POST /api/jobs/{id}/application-prep` | Draft and version | Updated draft or conflict |
 | `POST /api/jobs/{id}/tracking` | Tracking version, status, dates and notes | Save confirmation or conflict |
 | `POST /api/jobs/{id}/ai-review` | Empty object | Saved/cached advice outcome or configuration/budget/provider error |
 

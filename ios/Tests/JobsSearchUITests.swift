@@ -115,4 +115,39 @@ final class JobsSearchUITests: XCTestCase {
         applied.tap()
         XCTAssertTrue(listing.waitForExistence(timeout: 8))
     }
+    @MainActor
+    func testApplicationPrepUsesProfileExcerptAndReopensDraft() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18085"]
+        app.launch()
+
+        XCTAssertTrue(app.tabBars.buttons["Browse"].waitForExistence(timeout: 15))
+        app.tabBars.buttons["Browse"].tap()
+        let posting = app.staticTexts["Billing Analyst"]
+        XCTAssertTrue(posting.waitForExistence(timeout: 8))
+        posting.tap()
+        let open = app.buttons["openApplicationPrep"]
+        XCTAssertTrue(open.waitForExistence(timeout: 8))
+        open.tap()
+        let excerpt = "Reconciled fictional accounts using Excel and SQL."
+        XCTAssertTrue(app.staticTexts[excerpt].waitForExistence(timeout: 8))
+        app.buttons["Add Excel excerpt"].tap()
+        app.buttons["Save Draft"].tap()
+        let saved = app.descendants(matching: .any).matching(identifier: "applicationDraftSaved").firstMatch
+        for _ in 0..<3 {
+            if saved.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(saved.waitForExistence(timeout: 8))
+        app.buttons["Close"].tap()
+        open.tap()
+        let draft = app.textViews["applicationPrepDraft"]
+        for _ in 0..<3 {
+            if draft.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(draft.waitForExistence(timeout: 8))
+        XCTAssertEqual(draft.value as? String, excerpt)
+    }
 }

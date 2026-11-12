@@ -155,7 +155,7 @@ function filter(){
  let list=state.jobs.filter(j=>(!followupOnly||(j.follow_up&&j.follow_up<=new Date().toLocaleDateString('en-CA')&&!['Rejected','Withdrawn','Position Closed'].includes(j.status)))&&(activeBucket==='all'||bucket(j)===activeBucket)&&(!text||[j.employer,j.title,j.description,j.notes,j.review_note].join(' ').toLowerCase().includes(text))&&(!$('status').value||j.status===$('status').value)&&(!$('company').value||j.employer===$('company').value)&&(!$('category').value||(j.category||'Imported')===$('category').value)&&(!$('area').value||j.area===$('area').value)&&(!$('score').value||j.score>=+$('score').value)&&(!$('salary').value||(j.salary_max||0)>=+$('salary').value)&&(!$('posted').value||(j.posted||'').slice(0,10)>=$('posted').value)&&(!$('verified').value||(j.application_verified||'').slice(0,10)>=$('verified').value)&&(queue==='all'||j.queue===queue));
  const sort=$('sort').value;list.sort((a,b)=>sort==='score'?b.score-a.score:sort==='salary'?(b.salary_max||0)-(a.salary_max||0):sort==='status'?a.status.localeCompare(b.status):String(b[sort]||'').localeCompare(String(a[sort]||''))||b.id-a.id);
  $('count').textContent=`${list.length} jobs in this view · ${state.jobs.length} retained in history. Human approval and employer verification are separate.`;
- $('jobs').innerHTML=list.map(j=>j.external_application?externalCard(j):`<article data-id="${j.id}"><div class="top"><span class="tag">${esc(j.match_label)} · ${j.score}/100</span><em>#${j.id}</em></div><div class="company">${esc(j.employer)}</div><h2>${esc(j.title)}</h2><div class="salary">${esc(j.salary_text||'Salary Not Published')}</div><em>${esc(j.location)}</em><div class="note">${esc(j.location_reason)}</div><div class="badges"><span class="tag decision-${esc(j.review_decision.toLowerCase())}">${esc(j.review_decision==='Approved'?'Approved by you':j.review_decision==='Pending'?'Awaiting review':j.review_decision)}</span><span class="tag">${esc(j.status)}</span><span class="tag">${j.queue==='Confirmed'?'Employer verified':'Automatic checks incomplete'}</span>${j.availability==='Closed'?'<span class="tag">Closed</span>':''}${listingBadges(j)}</div><div class="why">${esc(j.explanation)}</div>${j.duty_evidence?.length?`<details><summary>Experience matched to duties</summary><ul>${j.duty_evidence.map(item=>`<li><strong>${esc(item.skill)}</strong> · ${esc(item.duty)}</li>`).join('')}</ul></details>`:''}<details><summary>Employer description & verification</summary><p class="why">${esc(j.description)}</p><p class="note">${esc(j.application_evidence||'Not independently verified')}<br>Source: ${esc(j.source)}<br>Employer source checked: ${esc(date(j.last_verified))}<br>Direct posting checked: ${esc(date(j.posting_verified))}<br>Application form verified: ${esc(date(j.application_verified))}<br>Posted: ${esc(j.posted||'Unknown')}<br>Tracking updated: ${esc(date(j.tracking_updated))}</p></details><div class="actions">${employerPostingLink(j)}${unapplied.includes(j.status)?`<button class="btn secondary mark-applied">${bucket(j)==='ready'?'Mark as applied':'Already applied'}</button>`:''}</div>${aiPanel(j)}${reviewPanel(j)}${trackingPanel(j)}</article>`).join('')||`<div class="empty"><h2>No jobs in this bucket yet</h2><p>${activeBucket==='ready'?'Approve a job in Review Inbox to move it here.':activeBucket==='applied'?'Mark a job as applied to move it here.':'Try another bucket or clear your filters.'}</p></div>`;
+ $('jobs').innerHTML=list.map(j=>j.external_application?externalCard(j):`<article data-id="${j.id}"><div class="top"><span class="tag">${esc(j.match_label)} · ${j.score}/100</span><em>#${j.id}</em></div><div class="company">${esc(j.employer)}</div><h2>${esc(j.title)}</h2><div class="salary">${esc(j.salary_text||'Salary Not Published')}</div><em>${esc(j.location)}</em><div class="note">${esc(j.location_reason)}</div><div class="badges"><span class="tag decision-${esc(j.review_decision.toLowerCase())}">${esc(j.review_decision==='Approved'?'Approved by you':j.review_decision==='Pending'?'Awaiting review':j.review_decision)}</span><span class="tag">${esc(j.status)}</span><span class="tag">${j.queue==='Confirmed'?'Employer verified':'Automatic checks incomplete'}</span>${j.availability==='Closed'?'<span class="tag">Closed</span>':''}${listingBadges(j)}</div><div class="why">${esc(j.explanation)}</div>${j.duty_evidence?.length?`<details><summary>Experience matched to duties</summary><ul>${j.duty_evidence.map(item=>`<li><strong>${esc(item.skill)}</strong> · ${esc(item.duty)}</li>`).join('')}</ul></details>`:''}<details><summary>Employer description & verification</summary><p class="why">${esc(j.description)}</p><p class="note">${esc(j.application_evidence||'Not independently verified')}<br>Source: ${esc(j.source)}<br>Employer source checked: ${esc(date(j.last_verified))}<br>Direct posting checked: ${esc(date(j.posting_verified))}<br>Application form verified: ${esc(date(j.application_verified))}<br>Posted: ${esc(j.posted||'Unknown')}<br>Tracking updated: ${esc(date(j.tracking_updated))}</p></details><div class="actions">${employerPostingLink(j)}${state.application_prep_available?'<button class="btn secondary open-prep" type="button">Application Prep</button>':''}${unapplied.includes(j.status)?`<button class="btn secondary mark-applied">${bucket(j)==='ready'?'Mark as applied':'Already applied'}</button>`:''}</div>${aiPanel(j)}${reviewPanel(j)}${trackingPanel(j)}</article>`).join('')||`<div class="empty"><h2>No jobs in this bucket yet</h2><p>${activeBucket==='ready'?'Approve a job in Review Inbox to move it here.':activeBucket==='applied'?'Mark a job as applied to move it here.':'Try another bucket or clear your filters.'}</p></div>`;
  bindCards();bindAI();
 }
 function employerPostingLink(job) {
@@ -222,10 +222,124 @@ applicationForm.onsubmit=async event=>{
  }
 };
 
-async function post(url,payload){const r=await fetch(url,{method:'POST',...(url==='/api/run'?{signal:AbortSignal.timeout(5000)}:{}),headers:{'Content-Type':'application/json','X-Jobs-Client':'dashboard'},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw Error(data.error||'Could not save');return data;}
+async function post(url,payload){const timeout=url==='/api/run'?5000:url.endsWith('/application-prep')?15000:null;const r=await fetch(url,{method:'POST',...(timeout?{signal:AbortSignal.timeout(timeout)}:{}),headers:{'Content-Type':'application/json','X-Jobs-Client':'dashboard'},body:JSON.stringify(payload)});const data=await r.json();if(!r.ok)throw Object.assign(Error(data.error||'Could not save'),{status:r.status});return data;}
+const prepDialog=$('prep-dialog');
+const prepDraft=$('prep-draft');
+let prepJob, prepData, prepBusy=false, prepConflict=false;
+const prepDirty=()=>prepData && prepData.draft!==prepDraft.value;
+
+function updatePrepControls() {
+ $('prep-save').disabled=prepBusy||prepConflict||!prepDirty();
+ $('prep-close').disabled=prepBusy;
+ prepDraft.disabled=prepBusy;
+ $('prep-evidence').querySelectorAll('button').forEach(button=>button.disabled=prepBusy);
+}
+function renderPrepEvidence(prep) {
+ const examples=prep.examples.map((example,index)=>`<div class="prep-example">
+   <h4>${esc(example.skill)}</h4>
+   <small>Employer duty</small><blockquote>${esc(example.duty)}</blockquote>
+   <small>Your profile excerpt</small><blockquote>${esc(example.profile_excerpt)}</blockquote>
+   <button class="btn secondary" type="button" data-prep-example="${index}">Add ${esc(example.skill)} excerpt</button>
+  </div>`).join('');
+ let empty='Jobs found no matching work examples in your profile. You can still write a draft.';
+ if(!prep.has_profile)empty='Add examples of your work to Search Profile to compare them with this posting.';
+ else if(!prep.has_description)empty='Jobs has no employer description for this listing. Check the posting before drafting.';
+ const questions=[
+  ...prep.skills_to_document.map(skill=>`Add an example of ${skill} if you’ve used it in your work.`),
+  ...prep.qualification_checks,
+ ];
+ const checks=questions.length?`<section><h3>What to Check</h3><ul>${questions.map(question=>`<li>${esc(question)}</li>`).join('')}</ul></section>`:'';
+ $('prep-evidence').innerHTML=`<section><h3>Examples from Your Profile</h3>${examples||`<p>${empty}</p>`}</section>${checks}`;
+ $('prep-evidence').querySelectorAll('[data-prep-example]').forEach(button=>{
+  button.onclick=()=>{
+   const excerpt=prep.examples[Number(button.dataset.prepExample)].profile_excerpt;
+   if(prepDraft.value.split('\n').includes(excerpt))return;
+   const next=prepDraft.value+(prepDraft.value&&!prepDraft.value.endsWith('\n')?'\n':'')+excerpt;
+   if(next.length>prepDraft.maxLength){
+    $('prep-message').textContent='Keep the draft within 8,000 characters.';
+    return;
+   }
+   prepDraft.value=next;
+   $('prep-saved').textContent='';
+   updatePrepControls();
+  };
+ });
+}
+async function loadPrep() {
+ if(prepBusy)return;
+ prepBusy=true;
+ $('prep-message').textContent='Loading application prep…';
+ $('prep-reload').hidden=true;
+ updatePrepControls();
+ try{
+  const response=await fetch(`/api/jobs/${prepJob.id}/application-prep`,{signal:AbortSignal.timeout(15000)});
+  const result=await response.json();
+  if(!response.ok)throw Error(result.error||'Couldn’t load application prep.');
+  prepData=result;
+  prepDraft.value=result.draft;
+  prepConflict=false;
+  renderPrepEvidence(result);
+  $('prep-body').hidden=false;
+  $('prep-saved').textContent=result.updated?'Saved '+date(result.updated):'';
+  $('prep-message').textContent='';
+ }catch(error){
+  $('prep-message').textContent=error.message||'Couldn’t load application prep. Try again.';
+  $('prep-reload').hidden=false;
+  $('prep-reload').textContent=prepData?'Reload Saved Draft':'Try Again';
+ }finally{
+  prepBusy=false;
+  updatePrepControls();
+ }
+}
+function openPrep(job) {
+ prepJob=job;
+ prepData=null;
+ prepConflict=false;
+ prepDraft.value='';
+ $('prep-body').hidden=true;
+ $('prep-role').textContent=job.title+' · '+job.employer;
+ prepDialog.showModal();
+ void loadPrep();
+}
+function canClosePrep() {
+ return !prepBusy&&(!prepDirty()||confirm('Close without saving your draft?'));
+}
+$('prep-close').onclick=()=>{if(canClosePrep())prepDialog.close();};
+prepDialog.addEventListener('cancel',event=>{if(!canClosePrep())event.preventDefault();});
+$('prep-reload').onclick=()=>{
+ if(!prepDirty()||confirm('Replace your edits with the saved draft?'))void loadPrep();
+};
+prepDraft.oninput=()=>{
+ $('prep-saved').textContent='';
+ updatePrepControls();
+};
+$('prep-save').onclick=async()=>{
+ if(prepBusy||prepConflict||!prepDirty())return;
+ prepBusy=true;
+ $('prep-message').textContent='';
+ updatePrepControls();
+ try{
+  const result=await post(`/api/jobs/${prepJob.id}/application-prep`,{version:prepData.version,draft:prepDraft.value});
+  Object.assign(prepData,result);
+  $('prep-saved').textContent='Draft saved.';
+ }catch(error){
+  $('prep-message').textContent=error.status?error.message:'Couldn’t confirm the save. Your draft is still here. Try again.';
+  if(error.status===409){
+   prepConflict=true;
+   $('prep-reload').hidden=false;
+   $('prep-reload').textContent='Reload Saved Draft';
+  }
+ }finally{
+  prepBusy=false;
+  updatePrepControls();
+ }
+};
+
 function allowSave(key){return ![...drafts].some(k=>k!==key)||confirm('Other unsaved edits will be discarded after saving this decision. Continue?');}
 function bindCards(){document.querySelectorAll('article').forEach(card=>{
  const j=state.jobs.find(j=>j.id===+card.dataset.id),review=card.querySelector('.review-panel'),tracking=card.querySelector('.tracking-panel');
+ const prepButton=card.querySelector('.open-prep');
+ if(prepButton)prepButton.onclick=()=>openPrep(j);
  review?.querySelectorAll('input,textarea').forEach(e=>e.oninput=()=>drafts.add(j.id+':review'));
  tracking.querySelectorAll('input,textarea,select').forEach(e=>e.oninput=()=>{drafts.add(j.id+':tracking');tracking.querySelector('.saved').textContent='Unsaved changes';});
  review?.querySelectorAll('[data-decision]').forEach(button=>button.onclick=async()=>{
@@ -253,6 +367,6 @@ $('run').onclick=async()=>{
  void pollSearch();
 };
 $('refresh').onclick=()=>{if(discardCheck())load().catch(e=>notify(e.message));};
-window.onbeforeunload=e=>{if(drafts.size||preferencesDirty||applicationDialog.open){e.preventDefault();e.returnValue='';}};
+window.onbeforeunload=e=>{if(drafts.size||preferencesDirty||applicationDialog.open||(prepDialog.open&&prepDirty())){e.preventDefault();e.returnValue='';}};
 setInterval(pollSearch,2000);
 load().catch(e=>notify(e.message));

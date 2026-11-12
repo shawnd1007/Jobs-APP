@@ -1144,3 +1144,165 @@ struct SampleProfileEditor: View {
         }
     }
 }
+
+
+struct ApplicationPrepSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let job: Job
+    let address: String
+
+    @State private var prep: ApplicationPrep?
+    @State private var draft = ""
+    @State private var savedDraft = ""
+    @State private var version = 0
+    @State private var updated: String?
+    @State private var loading = false
+    @State private var saving = false
+    @State private var error: String?
+    @State private var conflict = false
+    @State private var confirmingReload = false
+    @State private var confirmingClose = false
+
+    private var dirty: Bool { draft != savedDraft }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let error {
+                    Section {
+                        Text(error).foregroundStyle(.secondary)
+                        if prep == nil {
+                            Button("Try Again") { Task { await load() } }.disabled(loading)
+                        } else if conflict {
+                            Button("Reload Saved Draft") { confirmingReload = true }.disabled(loading || saving)
+                        }
+                    }
+                }
+                if let prep {
+                    Section {
+                        Text(job.title).font(.headline)
+                        Text(job.employer).foregroundStyle(.secondary)
+                    }
+                    Section("Examples from Your Profile") {
+                        if prep.examples.isEmpty {
+                            Text(emptyExamples(prep)).foregroundStyle(.secondary)
+                        }
+                        ForEach(prep.examples, id: \.skill) { example in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(example.skill).font(.headline)
+                                Text("Employer duty").font(.caption).foregroundStyle(.secondary)
+                                Text(example.duty).textSelection(.enabled)
+                                Text("Your profile excerpt").font(.caption).foregroundStyle(.secondary)
+                                Text(example.profileExcerpt).textSelection(.enabled)
+                                Button("Add \(example.skill) excerpt", systemImage: "plus") {
+                                    if !draft.split(separator: "\n").contains(Substring(example.profileExcerpt)) {
+                                        draft += (draft.isEmpty || draft.hasSuffix("\n") ? "" : "\n") + example.profileExcerpt
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(saving || loading)
+                            }
+                        }
+                    }
+                    if !prep.skillsToDocument.isEmpty || !prep.qualificationChecks.isEmpty {
+                        Section("What to Check") {
+                            ForEach(prep.skillsToDocument, id: \.self) { skill in
+                                Text("Add an example of \(skill) if you’ve used it in your work.")
+                            }
+                            ForEach(prep.qualificationChecks, id: \.self) { Text($0) }
+                        }
+                    }
+                    Section {
+                        TextEditor(text: $draft)
+                            .frame(minHeight: 140)
+                            .accessibilityLabel("Your draft")
+                            .accessibilityIdentifier("applicationPrepDraft")
+                            .disabled(saving || loading)
+                        if draft.unicodeScalars.count > 8000 {
+                            Text("Keep the draft within 8,000 characters.").foregroundStyle(.red)
+                        }
+                        if let updated {
+                            Text("Saved \(displayTimestamp(updated))")
+                                .font(.footnote).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("applicationDraftSaved")
+                        }
+                    } header: {
+                        Text("Your Draft")
+                    } footer: {
+                        Text("Edit the excerpts and add your own examples before using this draft.")
+                    }
+                } else if loading || error == nil {
+                    ProgressView("Loading application prep…")
+                }
+            }
+            .navigationTitle("Application Prep")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        if dirty { confirmingClose = true } else { dismiss() }
+                    }
+                    .disabled(saving || loading)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if saving { ProgressView() }
+                    else {
+                        Button("Save Draft") { Task { await save() } }
+                            .disabled(prep == nil || !dirty || conflict || loading || draft.unicodeScalars.count > 8000)
+                    }
+                }
+            }
+            .confirmationDialog("Replace Your Edits With the Saved Draft?", isPresented: $confirmingReload) {
+                Button("Reload Saved Draft", role: .destructive) { Task { await load() } }
+            }
+            .confirmationDialog("Close Without Saving?", isPresented: $confirmingClose) {
+                Button("Discard Edits", role: .destructive) { dismiss() }
+            }
+            .interactiveDismissDisabled(dirty || saving)
+            .task { await load() }
+        }
+    }
+
+    private func emptyExamples(_ prep: ApplicationPrep) -> String {
+        if !prep.hasProfile { return "Add examples of your work to Search Profile to compare them with this posting." }
+        if !prep.hasDescription { return "Jobs has no employer description for this listing. Check the posting before drafting." }
+        return "Jobs found no matching work examples in your profile. You can still write a draft."
+    }
+
+    private func load() async {
+        guard !loading else { return }
+        loading = true
+        error = nil
+        defer { loading = false }
+        do {
+            let loaded = try await DashboardAPI.applicationPrep(jobID: job.id, at: address)
+            prep = loaded
+            draft = loaded.draft
+            savedDraft = loaded.draft
+            version = loaded.version
+            updated = loaded.updated
+            conflict = false
+        } catch {
+            self.error = DashboardAPI.connectionMessage(for: error)
+        }
+    }
+
+    private func save() async {
+        guard !saving, !conflict else { return }
+        saving = true
+        error = nil
+        defer { saving = false }
+        do {
+            let saved = try await DashboardAPI.saveApplicationDraft(jobID: job.id, draft: draft,
+                                                                    version: version, at: address)
+            savedDraft = saved.draft
+            version = saved.version
+            updated = saved.updated
+        } catch {
+            conflict = (error as? DashboardAPI.ServerError)?.status == 409
+            self.error = error is URLError
+                ? "Couldn’t confirm the save. Your draft is still here. Try again."
+                : DashboardAPI.connectionMessage(for: error)
+        }
+    }
+}

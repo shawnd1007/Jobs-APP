@@ -526,32 +526,55 @@ def employer_duties(description):
         for duty in re.split(r'(?<=[.!?;])\s+', line):
             if not duty or re.search(
                 r'\b(?:required|qualifications|years of experience|proficien(?:cy|t)|preferred|'
-                r'experience (?:in|with|using)|you (?:have|bring)|no (?:experience|knowledge))\b', duty, re.I
+                r'experience (?:in|with|using)|you (?:have|bring)|no (?:experience|knowledge)|'
+                r'without (?:using|requiring)|instead of|(?:do|does) not (?:use|require))\b', duty, re.I
             ):
                 continue
             if DUTY_ACTION.match(duty) or (duties_section and re.match(r'^[A-Za-z]+ing\b', duty)):
                 yield ' '.join(duty.split())
 
-def experience_evidence(description, profile, skills):
-    """Quote employer duties that use selected skills also mentioned in the profile."""
-    if not profile or not skills:
-        return []
-    profile_clauses = [clause for clause in re.split(r'[\n;]+|(?<=[.!?])\s+', clean(profile)) if not re.search(
-        r'\b(?:learning|want to learn|plan to learn|no (?:prior )?experience|never (?:used|worked with)|'
-        r'not (?:familiar|experienced)|new to)\b', clause, re.I
-    )]
-    supported = {}
-    for skill in skills:
-        pattern = re.compile(r'(?<![\w+#])' + re.escape(skill) + r'(?![\w+#])', re.I)
-        if any(pattern.search(clause) for clause in profile_clauses):
-            supported[skill] = pattern
+PROFILE_ACTION = re.compile(
+    r'^(?:I\s+)?(?:analy[sz]ed|audited|automated|built|coordinated|created|designed|developed|'
+    r'documented|handled|implemented|investigated|led|maintained|managed|monitored|owned|'
+    r'prepared|processed|reconciled|reported|resolved|reviewed|supported|tracked|trained|'
+    r'troubleshot|used|validated|verified|worked\s+with)\b', re.I
+)
+PROFILE_UNCERTAINTY = re.compile(
+    r"\b(?:learning|want(?:ed)? to|plan(?:ned)? to|hope(?:d)? to|interested in|"
+    r"seeking|aim(?:ed)? to|never|not|without|no|lack(?:ed|ing)?|"
+    r"new to|to learn|could|would|haven[’']t|hadn[’']t|didn[’']t)\b", re.I
+)
+
+
+def skill_pattern(skill):
+    return re.compile(r'(?<![\w+#])' + re.escape(skill) + r'(?![\w+#])', re.I)
+
+
+def profile_skill_examples(profile, skills):
+    """Use only intact profile excerpts that describe affirmative work."""
+    examples = {}
+    patterns = {skill: skill_pattern(skill) for skill in skills if skill}
+    for clause in re.split(r'[\r\n;•]+|(?<=[.!?])\s+', clean(profile)):
+        line = ' '.join(re.sub(r'^(?:[-–*]+|\d+[.)])\s*', '', clause.strip()).split())
+        if not 0 < len(line) <= 320 or not PROFILE_ACTION.match(line) or PROFILE_UNCERTAINTY.search(line):
+            continue
+        for skill, pattern in patterns.items():
+            if skill not in examples and pattern.search(line):
+                examples[skill] = line
+    return examples
+
+
+def experience_evidence(description, profile, skills, examples=None):
+    """Quote employer duties that use selected skills supported by a profile excerpt."""
+    examples = profile_skill_examples(profile, skills) if examples is None else examples
+    supported = {skill: skill_pattern(skill) for skill in examples}
     if not supported:
         return []
     evidence = {}
     for duty in dict.fromkeys(employer_duties(description)):
         for skill, pattern in supported.items():
-            if (match := pattern.search(duty)) and match.end() <= 240:
-                evidence.setdefault(skill, []).append(duty[:240])
+            if len(duty) <= 320 and pattern.search(duty):
+                evidence.setdefault(skill, []).append(duty)
 
     # Give each skill one quote and prefer a different duty when several skills overlap.
     used = set()
@@ -563,6 +586,7 @@ def experience_evidence(description, profile, skills):
     return matches
 
 def qualification_checks(description):
+    description = description.casefold()
     checks = []
     if re.search(r'\b(?:bachelor|master|doctoral|doctorate|degree)\b', description):
         equivalent = re.search(r'\b(?:equivalent (?:work |professional )?experience|experience in lieu of)\b', description)
@@ -1462,7 +1486,78 @@ def snapshot():
             job['interest'] = interests.get(job['id'])
         runs=[dict(r) for r in c.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 30')]
         for r in runs:r['report']=json.loads(r['report'])
-    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':SEARCH_ACTIVE.is_set(),'external_application_tracking':True,'firecrawl_configured':bool(cfg['firecrawl_enabled'] and firecrawl_key()),'schedule_hour_utc':cfg['schedule_hour_utc']})
+    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':SEARCH_ACTIVE.is_set(),'external_application_tracking':True,'application_prep_available':True,'firecrawl_configured':bool(cfg['firecrawl_enabled'] and firecrawl_key()),'schedule_hour_utc':cfg['schedule_hour_utc']})
+def application_prep(job_id):
+    with connect() as connection:
+        row = connection.execute(
+            """SELECT jobs.listing, application_drafts.draft, application_drafts.version, application_drafts.updated
+               FROM jobs LEFT JOIN application_drafts ON application_drafts.job_id=jobs.id WHERE jobs.id=?""",
+            (job_id,),
+        ).fetchone()
+    if not row:
+        return 404, {'error': 'Job not found.'}
+    job = json.loads(row['listing'])
+    if job.get('external_application'):
+        return 400, {'error': 'Application prep needs an employer posting.'}
+
+    cfg = config()
+    profile = cfg.get('profile', '')
+    description = clean(job.get('description'))
+    skills = list({skill.strip().casefold(): skill.strip()
+                   for skill in cfg.get('preferred_skills', []) if skill.strip()}.values())
+    examples = profile_skill_examples(profile, skills)
+    evidence = [
+        dict(item, profile_excerpt=examples[item['skill']])
+        for item in experience_evidence(description, profile, skills, examples)
+    ]
+    duties = list(employer_duties(description))
+    missing_examples = [
+        skill for skill in skills if skill not in examples and any(map(skill_pattern(skill).search, duties))
+    ]
+    return 200, {
+        'draft': row['draft'] or '', 'version': row['version'] or 0, 'updated': row['updated'],
+        'examples': evidence, 'skills_to_document': missing_examples[:12],
+        'qualification_checks': qualification_checks(description),
+        'has_profile': bool(profile.strip()), 'has_description': bool(description.strip()),
+    }
+
+
+def save_application_draft(job_id, payload):
+    if not isinstance(payload, dict):
+        return 400, {'error': 'Enter a valid application draft.'}
+    draft, version = payload.get('draft'), payload.get('version')
+    if not isinstance(draft, str) or len(draft) > 8000 or type(version) is not int or version < 0:
+        return 400, {'error': 'Application drafts can contain up to 8,000 characters.'}
+    try:
+        draft.encode('utf-8')
+    except UnicodeError:
+        return 400, {'error': 'The draft contains invalid text.'}
+
+    with connect() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        listing = connection.execute('SELECT listing FROM jobs WHERE id=?', (job_id,)).fetchone()
+        if not listing:
+            return 404, {'error': 'Job not found.'}
+        if json.loads(listing['listing']).get('external_application'):
+            return 400, {'error': 'Application prep needs an employer posting.'}
+        saved = connection.execute(
+            'SELECT draft, version, updated FROM application_drafts WHERE job_id=?', (job_id,),
+        ).fetchone()
+        current_version = saved['version'] if saved else 0
+        if saved and draft == saved['draft']:
+            return 200, dict(saved)
+        if version != current_version:
+            return 409, {'error': 'The saved draft changed. Reload it before replacing it.'}
+
+        updated = now()
+        connection.execute(
+            """INSERT INTO application_drafts(job_id,draft,version,updated) VALUES(?,?,?,?)
+               ON CONFLICT(job_id) DO UPDATE SET draft=excluded.draft,version=excluded.version,updated=excluded.updated""",
+            (job_id, draft, version + 1, updated),
+        )
+    return 200, {'draft': draft, 'version': version + 1, 'updated': updated}
+
+
 def save_interest(job_id, payload):
     state = payload.get('state')
     version = payload.get('version')
@@ -1495,6 +1590,9 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/v1/health':return self.send(200,{'status':'ok','api_version':1})
         if path=='/api/v1/search-status':return self.send(200,search_status())
         if path=='/api/v1/dashboard':return self.send(200,snapshot())
+        prep_match = re.fullmatch(r'/api/jobs/(\d+)/application-prep', path)
+        if prep_match:
+            return self.send(*application_prep(int(prep_match[1])))
         if path in ('/','/index.html'):return self.send(200,(ROOT/'site'/'index.html').read_text(encoding='utf-8-sig'),'text/html')
         if path=='/dashboard.js':return self.send(200,(ROOT/'site'/'dashboard.js').read_text(encoding='utf-8-sig'),'text/javascript')
         if path=='/prototype.js':return self.send(200,(ROOT/'site'/'prototype.js').read_text(encoding='utf-8-sig'),'text/javascript')
@@ -1544,6 +1642,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(code,result)
             except (ValueError,TypeError,KeyError) as e:return self.send(400,{'error':str(e)})
             finally:LOCK.release()
+        prep_match = re.fullmatch(r'/api/jobs/(\d+)/application-prep', self.path)
+        if prep_match:
+            try:
+                size = int(self.headers.get('Content-Length', 0))
+                if not 0 < size <= 100000:
+                    raise ValueError
+                payload = json.loads(self.rfile.read(size))
+            except (ValueError, UnicodeError):
+                return self.send(400, {'error': 'Could not read the application draft.'})
+            return self.send(*save_application_draft(int(prep_match[1]), payload))
         interest_match = re.fullmatch(r'/api/jobs/(\d+)/interest', self.path)
         if interest_match:
             try:

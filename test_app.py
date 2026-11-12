@@ -206,6 +206,55 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(app.qualification_checks('degree or equivalent work experience'),
                    ['Posting mentions a degree and equivalent experience.'])
 
+ def test_prep_uses_real_excerpts_and_keeps_gaps_honest(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(preferred_skills=['Excel','SQL','Python','Tableau','C','C++'], profile=(
+      'Reconciled monthly payments using Excel.\n'
+      'Did not use SQL.\nLearning Python.\n'
+      'My team built dashboards in Tableau.\nUsed C++ to build a practice tool.\n'
+      'Used to learn SQL.'))
+  job = dict(title='Fictional Billing Analyst',employer='Fictional Employer',url='https://example.com/prep',
+             description=('Responsibilities:\nReconcile payments using Excel.\nBuild SQL reports.\n'
+                          'Build Python dashboards.\nMaintain Tableau dashboards.\n'
+                          'Develop C++ tools.\nMaintain reports without using C.\n'
+                          'Qualifications:\nCertification is required.'))
+  with app.connect() as c:
+   job_id,_ = app.upsert(c,job)
+  with patch.object(app,'config',return_value=cfg):
+   status, prep = app.application_prep(job_id)
+  self.assertEqual(status,200)
+  examples={item['skill']:item['profile_excerpt'] for item in prep['examples']}
+  self.assertEqual(examples,{'Excel':'Reconciled monthly payments using Excel.',
+                             'C++':'Used C++ to build a practice tool.'})
+  self.assertEqual(prep['skills_to_document'],['SQL','Python','Tableau'])
+  self.assertTrue(prep['qualification_checks'])
+  self.assertEqual(prep['draft'],'')
+  self.assertEqual(prep['version'],0)
+
+ def test_prep_draft_retries_without_overwrite_and_survives_listing_refresh(self):
+  job = dict(title='Fictional Analyst',employer='Fictional Employer',url='https://example.com/worksheet',
+             description='Responsibilities:\nBuild reports in Excel.')
+  with app.connect() as c:
+   job_id,_ = app.upsert(c,job)
+   c.execute("UPDATE tracking SET notes='Fictional tracking note' WHERE job_id=?", (job_id,))
+  body = {'draft':'Fictional draft from the owner.', 'version':0}
+  first = app.save_application_draft(job_id,body)
+  self.assertEqual(first[0],200)
+  self.assertEqual(first,app.save_application_draft(job_id,body))
+  self.assertEqual(app.save_application_draft(job_id,dict(body,draft='Older client edit'))[0],409)
+  self.assertEqual(app.save_application_draft(job_id,dict(body,version=True))[0],400)
+  self.assertEqual(app.save_application_draft(job_id,dict(body,draft='x'*8001))[0],400)
+  with app.connect() as c:
+   app.upsert(c,dict(job,description='Updated employer details.',availability='Closed'))
+  loaded = app.application_prep(job_id)[1]
+  self.assertEqual(loaded['draft'],body['draft'])
+  self.assertEqual(loaded['version'],1)
+  self.assertEqual(next(j for j in app.records() if j['id']==job_id)['notes'],'Fictional tracking note')
+  self.assertNotIn('application_drafts',app.snapshot())
+  self.assertEqual(app.save_application_draft(job_id,{'draft':'','version':1})[1]['version'],2)
+  self.assertEqual(app.application_prep(job_id)[1]['draft'],'')
+  self.assertEqual(app.application_prep(999999)[0],404)
+
  def test_greenhouse_description_keeps_qualifications_out_of_duties(self):
   posting = {'id': 41, 'title': 'Operations Specialist', 'absolute_url': 'https://job-boards.greenhouse.io/example/jobs/41',
              'content': ('&lt;h3&gt;Responsibilities&lt;/h3&gt;'

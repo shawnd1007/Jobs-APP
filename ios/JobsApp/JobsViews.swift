@@ -642,7 +642,7 @@ struct JobDetail: View {
     @State private var adviceError: String?
 
     private enum Editor: String, Identifiable {
-        case review, tracking
+        case review, tracking, prep
         var id: Self { self }
     }
 
@@ -681,6 +681,10 @@ struct JobDetail: View {
                             LabeledContent("Application Tracking", value: job.status)
                         }
                         .accessibilityIdentifier("openApplicationTracking")
+                        if !job.isExternalApplication && workspace.dashboard?.applicationPrepAvailable == true {
+                            Button("Application Prep", systemImage: "doc.text") { editor = .prep }
+                                .accessibilityIdentifier("openApplicationPrep")
+                        }
                     }
                     if job.isExternalApplication {
                         Section("Posting Details") {
@@ -776,6 +780,7 @@ struct JobDetail: View {
                     switch item {
                     case .review: ReviewEditor(workspace: workspace, job: job)
                     case .tracking: TrackingEditor(workspace: workspace, job: job)
+                    case .prep: ApplicationPrepSheet(job: job, address: workspace.address)
                     }
                 }
                 .confirmationDialog("Request AI Career Advice?", isPresented: $confirmingAdvice) {

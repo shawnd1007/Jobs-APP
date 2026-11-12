@@ -21,7 +21,7 @@ def serve():
         cfg = json.loads((SOURCE / 'config.example.json').read_text(encoding='utf-8'))
         cfg.update(
             categories=['billing analyst'], preferred_skills=['Excel', 'SQL'],
-            profile='Fictional experience reconciling accounts using Excel and SQL.',
+            profile='Reconciled fictional accounts using Excel and SQL.',
             additional_boards={'ashby': ['fictional-slow'], 'personio': ['fictional']}, target_locations=['United States'],
             workplace_types=['remote'], request_delay_seconds=0, generic_urls_per_run=0,
         )
@@ -57,7 +57,9 @@ def serve():
             with app.connect() as connection:
                 for key, title in [('billing', 'Billing Analyst'), ('software', 'Software Engineer')]:
                     app.upsert(connection, dict(
-                        title=title, employer='Fictional Cedar Accounts', description='Fictional starter listing.',
+                        title=title, employer='Fictional Cedar Accounts',
+                        description=('Responsibilities:\nReconcile payments using Excel.' if key == 'billing'
+                                     else 'Fictional starter listing.'),
                         location='Remote - United States', remote=True, availability='Open',
                         url=f'https://example.com/{key}',
                     ))

@@ -51,7 +51,10 @@ def init(c):
       id INTEGER PRIMARY KEY AUTOINCREMENT, search_id INTEGER NOT NULL REFERENCES saved_searches(id) ON DELETE CASCADE,
       job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, created TEXT NOT NULL,
       unread INTEGER NOT NULL DEFAULT 1, UNIQUE(search_id,job_id));
-    PRAGMA user_version=5;
+    CREATE TABLE IF NOT EXISTS application_drafts (
+      job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+      draft TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL);
+    PRAGMA user_version=6;
     ''')
 
 

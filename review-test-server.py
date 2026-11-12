@@ -12,7 +12,7 @@ with tempfile.TemporaryDirectory(prefix='review-qa-',dir=app.DATA) as folder:
     if not target.is_relative_to(original_data):raise RuntimeError('QA folder outside workspace')
     app.DATA=target;app.DB=target/'qa.sqlite3'
     (target/'preferences.json').write_text(json.dumps({
-        'profile': 'Fictional QA profile used Excel and SQL for reporting.',
+        'profile': 'Used Excel and SQL for fictional monthly reporting.',
         'preferred_skills': ['Excel', 'SQL'],
     }), encoding='utf-8')
     app.init()
