@@ -17,7 +17,7 @@ function renderPrototype(){
   for(const key of ['profile','salary_floor','salary_policy','ai_model','ai_daily_limit','schedule_hour_utc'])document.querySelector(`[data-pref="${key}"]`).value=p[key];
   for(const key of ['categories','excluded_title_terms','additional_employer_urls'])document.querySelector(`[data-pref="${key}"]`).value=p[key].join('\n');
   for(const key of ['ai_enabled','schedule_enabled'])document.querySelector(`[data-pref="${key}"]`).checked=p[key];
-  for(const platform of ['ashby','greenhouse','lever'])document.querySelector(`[data-board="${platform}"]`).value=(p.additional_boards[platform]||[]).join('\n');
+  for(const field of document.querySelectorAll('[data-board]'))field.value=(p.additional_boards[field.dataset.board]||[]).join('\n');
   document.querySelector('[data-pref="skill_groups"]').value=p.skill_groups.map(g=>`${g.label} | ${g.points} | ${g.terms.join(', ')}`).join('\n');
  }
  document.querySelectorAll('#preferences-form input,#preferences-form textarea,#preferences-form select').forEach(e=>e.oninput=()=>preferencesDirty=true);
@@ -47,7 +47,7 @@ async function savePreferences(event){
  for(const key of ['salary_floor','ai_daily_limit','schedule_hour_utc'])p[key]=Number(document.querySelector(`[data-pref="${key}"]`).value);
  for(const key of ['categories','excluded_title_terms','additional_employer_urls'])p[key]=lines(document.querySelector(`[data-pref="${key}"]`).value);
  for(const key of ['ai_enabled','schedule_enabled'])p[key]=document.querySelector(`[data-pref="${key}"]`).checked;
- p.additional_boards={};for(const platform of ['ashby','greenhouse','lever'])p.additional_boards[platform]=lines(document.querySelector(`[data-board="${platform}"]`).value);
+ p.additional_boards={};for(const field of document.querySelectorAll('[data-board]'))p.additional_boards[field.dataset.board]=lines(field.value);
  p.skill_groups=lines(document.querySelector('[data-pref="skill_groups"]').value).map(line=>{const [label,weight,terms]=line.split('|');return {label:label?.trim(),points:Number(weight),terms:(terms||'').split(',').map(t=>t.trim()).filter(Boolean)};});
  const button=$('save-preferences');button.disabled=true;
  try{await post('/api/preferences',{revision:state.preferences_revision,preferences:p});preferencesDirty=false;await load();$('preferences-message').textContent='Preferences saved. Matching updates now; run a search to discover more jobs.';}catch(e){$('preferences-message').textContent=e.message;}finally{button.disabled=false;}

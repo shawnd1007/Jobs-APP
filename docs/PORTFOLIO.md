@@ -6,7 +6,7 @@ Job searches produce scattered links and uncertain evidence. A personal workspac
 
 ## The implementation
 
-Python retrieves public employer feeds, normalizes listing data and applies explicit rules. SQLite stores listings separately from human decisions and application history. HTML/CSS/JavaScript provide the browser workflow. Docker supplies a repeatable local runtime. Optional AI advice runs server-side and is cached independently.
+Python retrieves public employer feeds, normalizes listing data and applies explicit rules. SQLite stores listings separately from human decisions and application history. The browser dashboard and native SwiftUI app use the same backend. Docker supplies a repeatable local runtime. Optional AI advice runs server-side and is cached independently.
 
 ## Decisions worth demonstrating
 
@@ -22,4 +22,4 @@ Run the isolated browser tests against fictional data. Explain one adapter, trac
 
 ## Claims and boundaries
 
-This was developed with AI assistance. Its value is demonstrated through understanding, testing, modification and troubleshooting. It is a single-workspace private-network prototype, not a public multi-tenant service, universal crawler or native iOS application. Paid AI and macOS/Xcode execution require their own validation. The provided workflow has not yet run on a published GitHub repository.
+Jobs was developed with AI assistance. The current build is a single-workspace prototype for trusted networks. The [approved product vision](PRODUCT-VISION.md) sets the goals for a paid recruiter with isolated accounts. Cite the [verification record](VERIFICATION.md) when describing a tested platform or feature.

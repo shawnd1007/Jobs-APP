@@ -1,12 +1,8 @@
-# Working on the prototype
+# Contributing to Jobs
 
-1. Run `python3 setup_project.py` once. It creates ignored local files and never overwrites existing ones.
-2. Use a separate development database from your authoritative personal installation.
-3. Make a small branch and a focused change. Preserve the separation of listings, human reviews, tracking and AI advice.
-4. Run relevant Python checks and the isolated browser tests after UI changes. Browser suites share port 18084 and must run sequentially.
-5. Inspect `git diff` and staged files before committing. Never stage local configuration, databases, keys, personal research or private migration archives.
-6. Explain the problem, resulting behavior and verification in the commit or pull request.
+Start with the [approved product vision](docs/PRODUCT-VISION.md), then check the [roadmap](docs/NEXT-STEPS.md) and [current verification](docs/VERIFICATION.md). A feature should strengthen the flow from understanding the person through finding, verifying, applying to, and tracking a real opportunity.
 
-Python 3.13 is the baseline. Node 22+ and the lockfile-pinned Playwright version are used only for browser checks. On Windows these tests currently launch Microsoft Edge; on other platforms they launch the installed Playwright Chromium.
-
-The CI configuration targets Linux. A committed workflow is not a passing hosted CI run until GitHub Actions has actually executed it. Test macOS on the target machine before claiming support.
+- Use a separate development checkout and database. Run `python3 setup_project.py` once to create ignored local configuration and an empty seed. Use the [README](README.md) to run the backend and the [iPhone guide](ios/README.md) to run Xcode.
+- Preserve the boundaries in the [architecture guide](docs/COMPLETE-GUIDE.md#3-the-architecture-in-plain-english). Source refresh owns employer facts. The user owns review decisions, tracking and profile choices. AI advice stays separate.
+- Use fictional fixtures and temporary databases for tests. Provider requests are mocked in AI tests. The two browser checks share port 18084 and run sequentially through `npm run test:browser`. Python 3.13 is the baseline, and Node 22 or newer is used for browser tests. Windows uses Edge. macOS and Linux use Playwright Chromium.
+- Follow the [feature-branch and draft PR workflow](docs/GITHUB-SETUP.md). Review the exact staged diff before publishing. Include the problem, resulting behavior, observed checks, and remaining limits in the PR.

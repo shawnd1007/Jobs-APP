@@ -17,7 +17,8 @@ PREFERENCE_KEYS = ('profile', 'categories', 'salary_floor', 'salary_policy',
                    'excluded_title_terms', 'skill_groups', 'additional_boards',
                    'additional_employer_urls', 'disabled_sources', 'ai_enabled',
                    'ai_model', 'ai_daily_limit', 'schedule_enabled', 'schedule_hour_utc',
-                   'target_locations', 'workplace_types', 'preferred_skills')
+                   'target_locations', 'workplace_types', 'preferred_skills',
+                   'remote_hiring_locations', 'legacy_geography')
 
 
 def settings(base, data):
@@ -27,6 +28,7 @@ def settings(base, data):
     base.setdefault('preferred_skills', [])
     base.setdefault('target_locations', [])
     base.setdefault('workplace_types', [])
+    base.setdefault('legacy_geography', bool(base.get('local_areas')))
     base.setdefault('salary_policy', 'overlap')
     base.setdefault('excluded_title_terms', [])
     base.setdefault('disabled_sources', [])
@@ -51,7 +53,10 @@ def init(c):
       id INTEGER PRIMARY KEY AUTOINCREMENT, search_id INTEGER NOT NULL REFERENCES saved_searches(id) ON DELETE CASCADE,
       job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, created TEXT NOT NULL,
       unread INTEGER NOT NULL DEFAULT 1, UNIQUE(search_id,job_id));
-    PRAGMA user_version=5;
+    CREATE TABLE IF NOT EXISTS application_drafts (
+      job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+      draft TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL);
+    PRAGMA user_version=6;
     ''')
 
 
@@ -82,18 +87,26 @@ def save_preferences(a, payload):
             if not isinstance(values, list) or len(values) > 150 or any(not isinstance(v, str) or not 1 <= len(v) <= 600 for v in values):
                 raise ValueError('Invalid ' + key)
         if not updated['categories']: raise ValueError('Choose at least one role keyword')
-        locations = updated['target_locations']
-        if (not isinstance(locations, list) or len(locations) > 30 or
-                any(not isinstance(value, str) or not 1 <= len(value.strip()) <= 100 for value in locations)):
-            raise ValueError('Enter up to 30 location phrases, each 1–100 characters')
+        if type(updated['legacy_geography']) is not bool:
+            raise ValueError('Invalid legacy geography setting')
+        for key in ('target_locations', 'remote_hiring_locations'):
+            if key not in updated:
+                continue
+            locations = updated[key]
+            if (not isinstance(locations, list) or len(locations) > 30 or
+                    any(not isinstance(value, str) or not 1 <= len(value.strip()) <= 100 for value in locations)):
+                raise ValueError('Enter up to 30 location phrases, each 1–100 characters')
         modes = updated['workplace_types']
         if not isinstance(modes, list) or any(mode not in ('remote', 'hybrid', 'onsite') for mode in modes):
             raise ValueError('Invalid workplace type')
         boards = updated['additional_boards']
-        if not isinstance(boards, dict) or set(boards) - {'ashby', 'greenhouse', 'lever'}: raise ValueError('Unsupported board platform')
+        if not isinstance(boards, dict) or set(boards) - a.BOARD_PLATFORMS: raise ValueError('Unsupported board platform')
         for names in boards.values():
             if not isinstance(names, list) or len(names) > 150 or any(not isinstance(n, str) or not re.fullmatch(r'[a-zA-Z0-9._-]{1,100}', n) for n in names):
                 raise ValueError('Use employer board slugs, for example deepgram')
+        for platform, label in a.XML_FEED_PLATFORMS.items():
+            if any(not a.CAREER_SITE_SLUG.fullmatch(name.lower()) for name in boards.get(platform, [])):
+                raise ValueError(f'Use the company part of the {label} career-site address')
         for url in updated['additional_employer_urls']: a.safe_url(url)
         groups = updated.get('skill_groups', [])
         if not isinstance(groups, list) or len(groups) > 20: raise ValueError('Invalid skill groups')
@@ -123,6 +136,8 @@ def source_result(a, source, state, count=0, error=''):
 def source_snapshot(a, jobs, cfg):
     sources = set()
     for j in jobs:
+        if j.get('external_application') or j.get('identity_review'):
+            continue
         board = a.board_identity(j['url'])
         sources.add('/'.join(board) if board else j['url'])
     for platform, names in cfg['additional_boards'].items():
@@ -157,6 +172,8 @@ def _ai_review(a, job_id):
     if not cfg['ai_enabled'] or not ai_key(a): return 400, {'error': 'Enable AI in Preferences and configure the server API key first.'}
     j = next((j for j in a.records() if j['id'] == job_id), None)
     if not j: return 404, {'error': 'Job not found'}
+    if j.get('external_application'):
+        return 400, {'error': 'AI review needs an employer posting checked by Jobs.'}
     digest = fingerprint(j, cfg)
     # Reserve before the request. Uncertain network outcomes still count; never auto-retry paid calls.
     with a.connect() as c:
@@ -202,14 +219,18 @@ def enrich_snapshot(a, result):
                   sources=source_snapshot(a, result['jobs'], cfg), ai_configured=bool(ai_key(a)))
     with a.connect() as c:
         searches = saved_searches(c)
-        names = {search['id']: search['name'] for search in searches}
         result['saved_searches'] = searches
         result['unread_match_count'] = c.execute('SELECT COUNT(*) FROM match_alerts WHERE unread=1').fetchone()[0]
-        result['match_alerts'] = [dict(r, unread=bool(r['unread']), search_name=names[r['search_id']])
-                                  for r in c.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200')
-                                  if r['search_id'] in names]
+        alert_rows = c.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200').fetchall()
         advice = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM ai_reviews')}
         usage = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
+    searches_by_id = {search['id']: search for search in searches}
+    jobs_by_id = {job['id']: job for job in result['jobs']}
+    result['match_alerts'] = [
+        dict(row, unread=bool(row['unread']), search_name=search['name'],
+             current_state=match_alert_state(a, jobs_by_id.get(row['job_id']), search))
+        for row in alert_rows if (search := searches_by_id.get(row['search_id']))
+    ]
     result['ai_attempts_today'] = usage[0] if usage else 0
     for j in result['jobs']:
         saved = advice.get(j['id'])
@@ -222,6 +243,12 @@ def saved_searches(c):
             for row in c.execute('SELECT * FROM saved_searches ORDER BY id')]
 
 
+def search_title_matches(title, search):
+    terms = search.get('title_terms', [])
+    return not terms or any(re.search(r'(?<!\w)' + re.escape(term) + r'(?!\w)', title, re.I)
+                            for term in terms)
+
+
 def matching_searches(a, job, searches):
     if job.get('availability') != 'Open':
         return []
@@ -231,23 +258,32 @@ def matching_searches(a, job, searches):
     for search in searches:
         if not search['enabled']:
             continue
-        title_terms = search.get('title_terms', [])
-        if title_terms and not any(re.search(r'(?<!\w)' + re.escape(term.lower()) + r'(?!\w)', title)
-                                   for term in title_terms):
+        if not search_title_matches(title, search):
             continue
-        if not any(re.search(r'(?<!\w)' + re.escape(skill.lower()) + r'(?!\w)', text)
+        if not any(re.search(r'(?<![\w+#])' + re.escape(skill.lower()) + r'(?![\w+#])', text)
                    for skill in search['skills']):
             continue
         geography = {'target_locations': search['locations'], 'workplace_types': search['workplace_types']}
         if a.location_eligibility(job, geography)[0] != 'Eligible':
             continue
-        high = a.base_salary(job)
-        low = job.get('salary_min')
-        if type(high) not in (int, float) or type(low) not in (int, float) or not 0 < low <= high:
+        low, high = a.annual_base_bounds(job)
+        if low is None or high is None:
             continue
         if high >= search['salary_min'] and (search['salary_max'] is None or low <= search['salary_max']):
             matches.append(search['id'])
     return matches
+
+
+def match_alert_state(a, job, search):
+    if job is None or job.get('identity_review') or job.get('recruitee_offer_changed'):
+        return 'unavailable'
+    if job.get('availability') == 'Closed':
+        return 'closed'
+    if not search['enabled']:
+        return 'paused'
+    if not job.get('posting_link_verified'):
+        return 'recheck'
+    return 'current' if matching_searches(a, job, [search]) else 'changed'
 
 
 def record_match_alerts(c, job_id, search_ids, created):

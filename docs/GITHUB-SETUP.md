@@ -1,29 +1,34 @@
-# Your first GitHub setup
+# Work on Jobs across machines
 
-Use this clean source folder, not the personal migration archive. Start with a private repository while reviewing the project.
+The private source repository is [shawnd1007/Jobs-APP](https://github.com/shawnd1007/Jobs-APP). The [approved product vision](PRODUCT-VISION.md) is the starting point for new work. The [README](../README.md) has the run and test commands.
 
-The prepared local folder may already contain a Git repository and staged files. Run `git status` first. ZIP source exports exclude `.git`; initialize an extracted archive with `git init -b main`.
+## Get the right source
 
-```sh
-git status
-git add .
-git diff --cached --stat
-git diff --cached
-git commit -m "Prepare personal Jobs prototype"
-```
-
-If Git needs an author identity, configure your chosen name and email/no-reply address locally. No identity is invented by the packaging script.
-
-Create an empty repository in your GitHub account. Leave its README/license/ignore initialization unchecked because this folder already has starting files. Substitute your own remote URL:
+Authenticate with GitHub, then clone into a new directory for development.
 
 ```sh
-git remote add origin https://github.com/YOUR-ACCOUNT/YOUR-REPOSITORY.git
+git clone https://github.com/shawnd1007/Jobs-APP.git
+cd Jobs-APP
+git status --short --branch
 git remote -v
-git push -u origin main
+git fetch origin
 ```
 
-These steps follow [GitHub's official local-repository instructions](https://docs.github.com/en/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github). Authenticate using your chosen GitHub tool. GitHub Desktop is an alternative if you prefer reviewing changes visually.
+For existing work, check the draft PR's head and base. Follow the existing feature branch. For example, Build 9 is on `codex/stage-two-iphone-polish` in [draft PR #2](https://github.com/shawnd1007/Jobs-APP/pull/2). To work on it from a new clone, run `git switch --track origin/codex/stage-two-iphone-polish`. If the branch already exists locally, use `git switch codex/stage-two-iphone-polish` and inspect the differences before pulling.
 
-Nothing has been pushed by preparing this package. No real API key, application database, personal experience profile or original job directory belongs in this repository. `.gitignore` protects future additions; it does not remove a file already committed.
+For an independent change, start from the agreed base. The repository uses `main` for integration and `codex/<topic>` feature branches for app work. Use a draft pull request into `main` for review. For source from a ZIP or a live folder without history, keep that folder and copy only the reviewed source changes into a clone with the correct branch history.
 
-No open-source license has been selected. Decide that separately before advertising an open-source release. GitHub stores source history; keep private database backups separately.
+## Publish a reviewed change
+
+1. Inspect the branch, working tree, and remote. Keep unrelated changes in place or use a separate checkout.
+2. Stage only the intended source, tests, and documentation. Inspect `git diff --cached --stat`, `git diff --cached`, and `git diff --cached --check`.
+3. Run the relevant checks with fictional data. Commit with a clear explanation of the change and verification.
+4. Push the feature branch with `git push -u origin HEAD`. Open or update the draft PR. Confirm the remote SHA and check GitHub Actions for that SHA. Merge only when explicitly requested.
+
+Keep local configuration, résumé and application data, secrets, screenshots, build outputs, and migration archives in the private workspace. Use a separate private backup for the database. GitHub author identity can use your GitHub no-reply address. Keep credentials out of commit metadata and source.
+
+## Carry local simulator work forward
+
+Before choosing a base for iPhone work, compare the local SwiftUI files with the draft branch. Local simulator work can exist outside Git history. Port the intended screen changes onto the draft branch and retain newer behavior from both copies. Review the resulting SwiftUI diff by screen.
+
+Build the exact reviewed source in an isolated simulator app pointed at fictional data. Open the requested simulator in Device Hub and verify the visible design as well as the changed journeys before reporting completion. Record the commit, build, screens observed, and checks still open in the PR. Keep screenshots and simulator data outside Git.

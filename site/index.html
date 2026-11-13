@@ -20,7 +20,45 @@ h2{margin:0;font-size:19px;color:#173347;line-height:1.3}.salary{font-size:18px;
 .btn:hover{background:#086067}.copy{word-break:break-all;font-size:11px;color:#64808c;margin-top:8px}footer{max-width:1120px;margin:0 auto;padding:0 24px 28px;color:#5c7481;font-size:13px}
 article[hidden]{display:none!important}@media(max-width:420px){main{padding:14px}.cards{grid-template-columns:minmax(0,1fr)}input,select{min-width:0;width:100%}header{padding:24px 16px}h1{font-size:25px}}</style></head><body>
 <header><a href="/" style="color:#deebf1">Homepage</a><h1>Your Career Workspace</h1><p>Find relevant work. Understand the fit. Keep your next steps together.</p></header>
-<main><nav class="workspace-nav" aria-label="Workspace"><button data-workspace="jobs" aria-selected="true">Jobs</button><button data-workspace="sources" aria-selected="false">Employer boards</button><button data-workspace="preferences" aria-selected="false">Preferences</button><button data-workspace="guide" aria-selected="false">How it works</button></nav><p id="notice" role="status" aria-live="polite"></p><section id="workspace-jobs" class="workspace-panel"><div class="callout"><div id="summary"></div><p id="system" role="status">Loading shared job database...</p><button id="run" class="btn">Run Job Search Now</button> <button id="refresh" class="btn">Refresh dashboard</button></div>
+<main><nav class="workspace-nav" aria-label="Workspace"><button data-workspace="jobs" aria-selected="true">Jobs</button><button data-workspace="sources" aria-selected="false">Employer boards</button><button data-workspace="preferences" aria-selected="false">Preferences</button><button data-workspace="guide" aria-selected="false">How it works</button></nav><p id="notice" role="status" aria-live="polite"></p><section id="workspace-jobs" class="workspace-panel"><div class="callout"><div id="summary"></div><p id="system" role="status">Loading shared job database...</p><p id="search-progress" role="status"></p><button id="run" class="btn" disabled>Run Job Search Now</button> <button id="refresh" class="btn">Refresh dashboard</button></div>
+<button id="add-application" class="btn secondary" type="button" disabled>Add Application</button>
+<dialog id="application-dialog" aria-labelledby="application-heading">
+  <form id="application-form">
+    <h2 id="application-heading">Add Application</h2>
+    <p>Track an application you found outside Jobs.</p>
+    <div class="form-grid">
+      <label>Job title<input name="title" maxlength="200" required></label>
+      <label>Employer<input name="employer" maxlength="200" required></label>
+      <label>Location (optional)<input name="location" maxlength="200"></label>
+      <label>Posting link (optional)<input name="url" type="url" maxlength="2048" placeholder="https://"></label>
+      <label>Status<select name="status" required></select></label>
+      <label>Application date<input name="application_date" type="date"></label>
+      <label>Follow-up date<input name="follow_up" type="date"></label>
+      <label class="wide">Notes<textarea name="notes" maxlength="10000"></textarea></label>
+    </div>
+    <p id="application-message" role="status"></p>
+    <div class="form-actions">
+      <button id="cancel-application" class="btn secondary" type="button">Cancel</button>
+      <button id="save-application" class="btn" type="submit">Save application</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="prep-dialog" aria-labelledby="prep-heading">
+  <h2 id="prep-heading">Application Prep</h2>
+  <p id="prep-role"></p>
+  <p id="prep-message" role="status"></p>
+  <button id="prep-reload" class="btn secondary" type="button" hidden>Reload Saved Draft</button>
+  <div id="prep-body" hidden>
+    <div id="prep-evidence"></div>
+    <label>Your draft<textarea id="prep-draft" maxlength="8000"></textarea></label>
+    <p class="hint">Edit the excerpts and add your own examples before using this draft.</p>
+    <p id="prep-saved" role="status"></p>
+  </div>
+  <div class="form-actions">
+    <button id="prep-close" class="btn secondary" type="button">Close</button>
+    <button id="prep-save" class="btn" type="button" disabled>Save Draft</button>
+  </div>
+</dialog>
 <nav id="buckets" aria-label="Job workflow buckets"></nav><section class="bucket-heading"><h2 id="bucket-title">Review Inbox</h2><p id="bucket-description"></p></section><div class="quick-views"><button data-preset="all">All roles</button><button data-preset="technical">Support</button><button data-preset="implementation">Implementation</button><button data-preset="followup">Follow-ups due</button></div><div class="controls">
 <input id="search" placeholder="Search company, title, description or notes" aria-label="Search">
 <select id="queue" aria-label="Automatic verification"><option value="all">All automatic checks</option><option value="Confirmed">Employer verified</option><option value="Review">Verification / salary review</option><option value="Location Review">Location needs confirmation</option><option value="Excluded">Excluded by requirements</option></select>
@@ -28,11 +66,11 @@ article[hidden]{display:none!important}@media(max-width:420px){main{padding:14px
 <select id="area" aria-label="Area"><option value="">All areas</option><option>Remote</option><option>Jacksonville</option><option>Buford area</option></select>
 <select id="salary" aria-label="Minimum published maximum base"><option value="">All salaries / unknown</option><option value="70000">Published maximum base $70k+</option><option value="85000">Published maximum base $85k+</option><option value="100000">Published maximum base $100k+</option></select>
 <select id="score" aria-label="Minimum score"><option value="">All match scores</option><option value="85">Excellent</option><option value="70">Strong or better</option><option value="55">Reasonable or better</option></select>
-<label>Posted since<input type="date" id="posted"></label><label>Verified since<input type="date" id="verified"></label>
+<label>Posted since<input type="date" id="posted"></label><label>Application verified since<input type="date" id="verified"></label>
 <select id="sort" aria-label="Sort"><option value="created">Newest discovered</option><option value="score">Best match</option><option value="salary">Highest salary</option><option value="status">Application status</option><option value="updated">Recently updated</option><option value="posted">Newest posted</option></select>
 </div><p id="count"></p><div id="jobs" class="cards"></div>
 <h2 style="margin-top:30px">Daily Job Search Updates</h2><div id="reports"></div></section>
-<section id="workspace-sources" class="workspace-panel" hidden><div class="panel-card"><h2>Follow employers directly</h2><p>Greenhouse, Ashby and Lever feeds work without Firecrawl. Add employer board slugs in Preferences. Other employer URLs get a best-effort posting check and may need manual verification.</p><p id="source-summary" class="stat-line"></p></div><div id="source-list" class="source-list"></div></section>
+<section id="workspace-sources" class="workspace-panel" hidden><div class="panel-card"><h2>Follow employers directly</h2><p>Greenhouse, Ashby, Lever, SmartRecruiters, Personio and Recruitee employer feeds work without Firecrawl. Add employer board slugs in Preferences. Individual employer URLs may need manual verification.</p><p id="source-summary" class="stat-line"></p></div><div id="source-list" class="source-list"></div></section>
 <section id="workspace-preferences" class="workspace-panel" hidden><form id="preferences-form"><div class="panel-card"><h2>Your search preferences</h2><p>These settings control your personal search and explainable matching rules. Saved records and application history are retained.</p><div class="form-grid">
 <label class="wide">Experience profile<textarea data-pref="profile" required maxlength="12000"></textarea><small>Used by AI reviews. Add only experience you can explain and demonstrate.</small></label>
 <label>Role keywords<textarea data-pref="categories" required></textarea><small>One title phrase per line; used for discovery and title matching.</small></label>
@@ -41,7 +79,7 @@ article[hidden]{display:none!important}@media(max-width:420px){main{padding:14px
 <label>Salary qualification<select data-pref="salary_policy"><option value="overlap">Published range reaches my target</option><option value="minimum">Entire published range meets my target</option></select></label>
 <label class="wide">Matching skills and weights<textarea data-pref="skill_groups"></textarea><small>One group per line: Skill label | points (0–25) | keyword, keyword. These are transparent scoring rules, separate from AI advice.</small></label>
 </div></div><div class="panel-card"><h2>Employer boards</h2><p>Use the employer slug from its board URL. For jobs.ashbyhq.com/deepgram, enter deepgram. Additions take effect on the next search.</p><div class="form-grid">
-<label>Ashby slugs<textarea data-board="ashby"></textarea></label><label>Greenhouse slugs<textarea data-board="greenhouse"></textarea></label><label>Lever slugs<textarea data-board="lever"></textarea></label><label>Other employer posting URLs<textarea data-pref="additional_employer_urls"></textarea><small>One public HTTPS posting URL per line. Workday and dynamic pages may require manual checking.</small></label>
+<label>Ashby slugs<textarea data-board="ashby"></textarea></label><label>Greenhouse slugs<textarea data-board="greenhouse"></textarea></label><label>Lever slugs<textarea data-board="lever"></textarea></label><label>SmartRecruiters slugs<textarea data-board="smartrecruiters"></textarea></label><label>Personio career-site slugs<textarea data-board="personio"></textarea><small>For example, enter sample for sample.jobs.personio.com. The employer must enable its XML feed.</small></label><label>Recruitee career-site slugs<textarea data-board="recruitee"></textarea><small>Enter the company part of its public company.recruitee.com careers address.</small></label><label>Other employer posting URLs<textarea data-pref="additional_employer_urls"></textarea><small>One public HTTPS posting URL per line. Workday and dynamic pages may require manual checking.</small></label>
 </div></div><div class="panel-card"><h2>Schedule and AI</h2><div class="form-grid"><label class="check"><input type="checkbox" data-pref="schedule_enabled">Run a daily employer search</label><label>Daily hour (UTC)<input data-pref="schedule_hour_utc" type="number" min="0" max="23" required></label><label class="check"><input type="checkbox" data-pref="ai_enabled">Enable requested AI career reviews</label><label>OpenAI model<input data-pref="ai_model" required pattern="[a-zA-Z0-9._-]+"></label><label>Maximum AI attempts per day<input data-pref="ai_daily_limit" type="number" min="1" max="100" required></label><p id="ai-state" class="stat-line"></p></div><p class="hint">AI is optional and runs per job when you click Request AI review. Your profile and posting are sent; application notes are excluded. Keep the API key on the server in secrets/openai.key. The request limit bounds attempts, not dollars. Firecrawl remains disabled.</p></div><div class="form-actions"><button id="save-preferences" class="btn" type="submit">Save preferences</button><p id="preferences-message" role="status"></p></div></form></section>
 <section id="workspace-guide" class="workspace-panel" hidden><div class="panel-card"><h2>From employer posting to your next step</h2><div class="step-grid"><div><h3>1. Discover</h3><p>The Python backend reads employer feeds and checks posting URLs. It stores listing facts in SQLite and reports source failures.</p></div><div><h3>2. Understand</h3><p>Your title and skill rules rank the jobs. Optional AI compares your experience with a posting and suggests questions. Missing evidence stays uncertain.</p></div><div><h3>3. Decide and track</h3><p>You review location, salary and the application. Approval prepares the job for you to apply on the employer site. Notes and progress are saved separately.</p></div></div><p><strong>Project map:</strong> index.html is the structure, the two JavaScript files handle interaction, app.py handles HTTP and discovery, prototype.py handles preferences, source health and AI. data/jobs.sqlite3 stores records. Docker connects those pieces.</p><p><strong>For your Mac:</strong> this web prototype can continue running on the Windows host while you access it through your private network. The versioned JSON API is the starting point for a future SwiftUI client. Xcode is a separate client project; this release does not claim to include an iOS app.</p></div></section></main>
 <footer>Application tracking is saved in the shared database. Search never submits applications or changes your tracking. Imported history needs confirmation. Missing salaries and uncertain eligibility stay in review.</footer>

@@ -11,6 +11,10 @@ import prototype
 
 class PrototypeTests(unittest.TestCase):
     def setUp(self):
+        base = json.loads((Path(__file__).resolve().parent / "config.example.json").read_text())
+        config = patch.object(app, "config", side_effect=lambda: app.prototype.settings(dict(base), app.DATA))
+        config.start()
+        self.addCleanup(config.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.old = app.DATA, app.DB
         self.oldseed = app.SEED
@@ -70,7 +74,7 @@ class PrototypeTests(unittest.TestCase):
         cfg = app.config()
         self.assertEqual(cfg['target_locations'], ['Austin, TX', 'United States'])
         self.assertEqual(cfg['preferred_skills'], ['SQL', 'Python'])
-        job = dict(title='Financial Analyst', location='Austin, TX', availability='Open',
+        job = dict(title='Financial Analyst', location='Austin, TX', availability='Open', workplace_type='onsite',
                    description='Experience with SQL and Python.')
         match = app.assess(job.copy(), cfg)
         self.assertEqual(match['location_eligibility'], 'Eligible')
@@ -101,21 +105,79 @@ class PrototypeTests(unittest.TestCase):
         cfg.update(additional_boards={'greenhouse': ['fictional']}, public_web_search_enabled=False,
                    firecrawl_enabled=False, request_delay_seconds=0, generic_urls_per_run=0)
         job = dict(title='Fictional Engineer', employer='Fictional', url='https://job-boards.greenhouse.io/fictional/jobs/98765',
-                   location='Austin, TX', availability='Open', description='SQL reporting',
+                   location='Austin, TX', availability='Open', description='SQL reporting', workplace_type='onsite',
                    salary_min=90000, salary_max=110000, salary_currency='USD', salary_period='year',
                    salary_type='base')
-        with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', return_value=[job]):
-            for _ in range(2):
-                self.assertTrue(app.LOCK.acquire(False))
-                self.assertEqual(app.run_pipeline()['state'], 'success')
+        def board(*_):
+            return [dict(job)]
+
+        def run():
+            self.assertTrue(app.LOCK.acquire(False))
+            return app.run_pipeline()
+
+        with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=board), \
+             patch.object(app, 'read_response') as page:
+            page.side_effect = TimeoutError('Fictional posting timeout')
+            self.assertEqual(run()['state'], 'partial')
+            initial = app.snapshot()
+            self.assertEqual(initial['match_alerts'], [])
+            retained = next(item for item in initial['jobs'] if item['url'] == job['url'])
+            self.assertEqual(retained['availability'], 'Needs Verification')
+            with app.connect() as c:
+                c.execute("UPDATE tracking SET notes='Fictional reminder' WHERE job_id=?", (retained['id'],))
+
+            page.side_effect = None
+            page.return_value = (b'<title>Fictional Engineer</title>', job['url'])
+            self.assertEqual(run()['state'], 'success')
             dashboard = app.snapshot()
+            checked = next(item for item in dashboard['jobs'] if item['id'] == retained['id'])
+            self.assertTrue(checked['posting_link_verified'])
+            self.assertIsNone(checked.get('application_verified'))
+            self.assertEqual(checked['notes'], 'Fictional reminder')
+            self.assertEqual(run()['state'], 'success')
+            self.assertEqual(app.snapshot()['match_alerts'], dashboard['match_alerts'])
+            self.assertEqual(page.call_count, 2)
+            with app.connect() as c:
+                c.execute("UPDATE jobs SET listing=json_set(listing,'$.posting_verified',?) WHERE id=?",
+                          ('2000-01-01T00:00:00+00:00', retained['id']))
+            stale_dashboard = app.snapshot()
+            stale = next(item for item in stale_dashboard['jobs'] if item['id'] == retained['id'])
+            self.assertFalse(stale['posting_link_verified'])
+            self.assertEqual({a['current_state'] for a in stale_dashboard['match_alerts']}, {'recheck'})
+            self.assertEqual(run()['state'], 'success')
+            recovered = app.snapshot()
+            self.assertEqual(recovered['match_alerts'], dashboard['match_alerts'])
+
+            search = dashboard['saved_searches'][0]
+            for version, changes, expected in (
+                (search['version'], {'enabled': False}, 'paused'),
+                (search['version'] + 1, {'salary_min': 130000, 'salary_max': None}, 'changed'),
+                (search['version'] + 2, {}, 'current'),
+            ):
+                self.assertEqual(prototype.change_saved_search(app, {
+                    'action': 'save', 'id': search['id'], 'version': version,
+                    'criteria': dict(search, **changes),
+                })[0], 200)
+                updated_alert = next(item for item in app.snapshot()['match_alerts']
+                                     if item['search_id'] == search['id'])
+                self.assertEqual(updated_alert['current_state'], expected)
+                self.assertTrue(updated_alert['unread'])
+
+            with app.connect() as c:
+                c.execute("UPDATE jobs SET listing=json_set(listing,'$.availability','Closed') WHERE id=?",
+                          (retained['id'],))
+            closed = app.snapshot()
+            self.assertEqual({a['current_state'] for a in closed['match_alerts']}, {'closed'})
+            self.assertEqual([a['id'] for a in closed['match_alerts']],
+                             [a['id'] for a in dashboard['match_alerts']])
+            self.assertEqual(closed['unread_match_count'], 2)
         alerts = dashboard['match_alerts']
         self.assertEqual({item['search_name'] for item in alerts}, {'Austin SQL', 'Second search'})
         self.assertEqual(len(alerts), 2)
         self.assertEqual(dashboard['unread_match_count'], 2)
         self.assertEqual(prototype.change_saved_search(app, {'action': 'read', 'through': alerts[0]['id']})[0], 200)
         self.assertEqual(app.snapshot()['unread_match_count'], 0)
-        search = dashboard['saved_searches'][0]
+        search = app.snapshot()['saved_searches'][0]
         stale = {'action': 'delete', 'id': search['id'], 'version': search['version'] + 1}
         self.assertEqual(prototype.change_saved_search(app, stale)[0], 409)
         self.assertEqual(prototype.change_saved_search(app, dict(stale, version=search['version']))[0], 200)
@@ -134,6 +196,21 @@ class PrototypeTests(unittest.TestCase):
         self.assertEqual(higher-app.assess(dict(j),cfg)['score'],18)
         cfg['excluded_title_terms']=['specialist']
         self.assertEqual(app.assess(dict(j),cfg)['queue'],'Excluded')
+
+    def test_role_fit_is_portable_and_independent_of_eligibility(self):
+        cfg = app.config()
+        cfg.update(categories=['lab technician'], preferred_skills=['microscopy', 'c'],
+                   skill_groups=[dict(label='Sample preparation', terms=['sample preparation'], points=25)])
+        listing = dict(title='Lab-Technician', description='Microscopy, sample preparation, C++.',
+                       location='Remote United States', availability='Open')
+        eligible = app.assess(dict(listing), cfg)
+        other_location = app.assess(dict(listing, location='Berlin, Germany'), cfg)
+        self.assertEqual(eligible['score_breakdown'],
+                         dict(target_role=45, selected_skills=8, skill_groups=25))
+        self.assertEqual(eligible['matched_skills'], ['microscopy'])
+        self.assertEqual(eligible['score'], other_location['score'])
+        unrelated = app.assess(dict(listing, title='Lab Technicianship Coordinator'), cfg)
+        self.assertEqual(unrelated['score_breakdown']['target_role'], 0)
 
     def test_watched_board_is_retained_without_matching_jobs(self):
         cfg=app.config();cfg.update(additional_boards={},public_web_search_enabled=False,firecrawl_enabled=False,generic_urls_per_run=0,request_delay_seconds=0)
