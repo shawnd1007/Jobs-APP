@@ -651,9 +651,6 @@ private struct JobFilterForm: View {
             Toggle("Open Listings Only", isOn: $filters.openOnly)
             choice("Work Setting", $filters.workSetting, ["Remote", "Hybrid", "On-site"])
             choice("Employer", $filters.employer, Array(Set(jobs.map(\.employer))).sorted())
-            Picker("Sort", selection: $filters.sort) {
-                ForEach(JobFilters.Sort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }
             choice("Application Status", $filters.status, (dashboard?.statuses ?? []).filter { $0 != "Needs Verification" })
             choice("Category", $filters.category, Array(Set(jobs.map { $0.category ?? "Imported" })).sorted())
             choice("Area", $filters.area, Array(Set(jobs.compactMap(\.area))).sorted())
