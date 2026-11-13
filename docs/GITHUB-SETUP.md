@@ -26,3 +26,9 @@ For an independent change, start from the agreed base. The repository uses `main
 4. Push the feature branch with `git push -u origin HEAD`. Open or update the draft PR. Confirm the remote SHA and check GitHub Actions for that SHA. Merge only when explicitly requested.
 
 Keep local configuration, résumé and application data, secrets, screenshots, build outputs, and migration archives in the private workspace. Use a separate private backup for the database. GitHub author identity can use your GitHub no-reply address. Keep credentials out of commit metadata and source.
+
+## Carry local simulator work forward
+
+Before choosing a base for iPhone work, compare the local SwiftUI files with the draft branch. Local simulator work can exist outside Git history. Port the intended screen changes onto the draft branch and retain newer behavior from both copies. Review the resulting SwiftUI diff by screen.
+
+Build the exact reviewed source in an isolated simulator app pointed at fictional data. Open the requested simulator in Device Hub and verify the visible design as well as the changed journeys before reporting completion. Record the commit, build, screens observed, and checks still open in the PR. Keep screenshots and simulator data outside Git.

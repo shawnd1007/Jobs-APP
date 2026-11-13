@@ -1,59 +1,21 @@
 import SwiftUI
 
 enum JobsTheme {
-    static let accent = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.49, green: 0.87, blue: 0.75, alpha: 1)
-            : UIColor(red: 0.02, green: 0.35, blue: 0.31, alpha: 1)
-    })
-    static let canvas = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.07, green: 0.11, blue: 0.11, alpha: 1)
-            : UIColor(red: 0.95, green: 0.96, blue: 0.94, alpha: 1)
-    })
-    static let surface = Color(uiColor: .secondarySystemGroupedBackground)
-    static let pine = Color(red: 0.04, green: 0.19, blue: 0.18)
-    static let mint = Color(red: 0.75, green: 0.95, blue: 0.83)
-}
+    static let accent = adaptive(light: 0x2454D6, dark: 0x9CB7FF)
+    static let canvas = adaptive(light: 0xF6F8FC, dark: 0x111827)
+    static let surface = adaptive(light: 0xFFFFFF, dark: 0x1C2636)
+    static let border = adaptive(light: 0xDCE3ED, dark: 0x364359)
 
-struct EditorialPanel: View {
-    let label: String
-    let title: String
-    let detail: String
-    var compact = false
-    @ScaledMetric(relativeTo: .largeTitle) private var titleSize = 35
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 8 : 13) {
-            Label(label, systemImage: "sparkles")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(JobsTheme.mint)
-            Text(title)
-                .font(.system(size: compact ? titleSize * 0.9 : titleSize, weight: .semibold, design: .serif))
-                .foregroundStyle(.white)
-                .accessibilityAddTraits(.isHeader)
-            Text(detail)
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.84))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(compact ? 19 : 24)
-        .background(alignment: .trailing) {
-            ZStack(alignment: .topTrailing) {
-                LinearGradient(colors: [JobsTheme.pine, Color(red: 0.08, green: 0.32, blue: 0.27)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                ForEach([112.0, 155, 198], id: \.self) { size in
-                    RoundedRectangle(cornerRadius: size / 3)
-                        .strokeBorder(JobsTheme.mint.opacity(0.19), lineWidth: 1)
-                        .frame(width: size, height: size)
-                        .rotationEffect(.degrees(35))
-                        .offset(x: size / 3, y: -size / 2.5)
-                }
-            }
-            .accessibilityHidden(true)
-        }
-        .clipShape(.rect(cornerRadius: 26))
+    private static func adaptive(light: UInt32, dark: UInt32) -> Color {
+        Color(uiColor: UIColor { traits in
+            let value = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(
+                red: CGFloat((value >> 16) & 255) / 255,
+                green: CGFloat((value >> 8) & 255) / 255,
+                blue: CGFloat(value & 255) / 255,
+                alpha: 1
+            )
+        })
     }
 }
 
@@ -68,8 +30,14 @@ struct WorkspaceWelcome: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                EditorialPanel(label: "Jobs", title: "Find work that fits.",
-                               detail: "Explore roles, see why they match, and keep every application in one place.")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Find work that fits")
+                        .font(.largeTitle.bold())
+                        .accessibilityAddTraits(.isHeader)
+                    Text("See why roles match your experience and keep track of the ones you pursue.")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                }
                 VStack(alignment: .leading, spacing: 16) {
                     Button(action: openSample) {
                         Label("Explore sample jobs", systemImage: "arrow.right")

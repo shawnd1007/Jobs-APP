@@ -10,6 +10,19 @@ struct ForYou: View {
     let openBrowse: () -> Void
     let openSettings: () -> Void
     let openSearch: () -> Void
+    @ViewBuilder
+    private func shortlistActions(_ job: Job) -> some View {
+        let saved = job.interest?.state == "saved"
+        Button(saved ? "Saved" : "Save", systemImage: saved ? "bookmark.fill" : "bookmark") {
+            Task { await change(job, to: saved ? "none" : "saved") }
+        }
+        .accessibilityHint(saved ? "Remove from My Jobs" : "Add to My Jobs")
+        Button("Pass", systemImage: "xmark") {
+            Task { await change(job, to: "passed") }
+        }
+        .tint(.secondary)
+    }
+
     @State private var showingReview = false
     @State private var editingSearchProfile = false
     @State private var undo: (id: Int, state: String, version: Int)?
@@ -40,9 +53,6 @@ struct ForYou: View {
         let visible = showingReview ? review : ready
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                EditorialPanel(label: "Your job feed", title: "Find your next fit.",
-                               detail: "Matched skills, published pay and what to check before you apply.",
-                               compact: true)
                 Picker("Feed", selection: $showingReview) {
                     Text("Top Matches").tag(false)
                     Text("Needs Review").tag(true)
@@ -90,30 +100,20 @@ struct ForYou: View {
                 ForEach(visible) { job in
                     VStack(alignment: .leading, spacing: 15) {
                         NavigationLink(value: job.id) {
-                            JobCard(job: job, showScore: true)
+                            JobCard(job: job, showScore: false, showFitSummary: true)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        Divider()
-                        HStack(spacing: 12) {
-                            let saved = job.interest?.state == "saved"
-                            Button(saved ? "Saved" : "Save", systemImage: saved ? "bookmark.fill" : "bookmark") {
-                                Task { await change(job, to: saved ? "none" : "saved") }
-                            }
-                            .accessibilityHint(saved ? "Remove from My Jobs" : "Add to My Jobs")
-                            Button("Pass", systemImage: "xmark") { Task { await change(job, to: "passed") } }
+                        ViewThatFits(in: .horizontal) {
+                            HStack(spacing: 12) { shortlistActions(job) }
+                            VStack(alignment: .leading, spacing: 8) { shortlistActions(job) }
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
                         .disabled(workspace.saving || !workspace.canWrite)
                     }
-                    .padding(18)
-                    .background(JobsTheme.surface, in: .rect(cornerRadius: 22))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 22).strokeBorder(.primary.opacity(0.07))
-                            .allowsHitTesting(false)
-                    }
+                    .jobCardSurface()
                 }
             }
             .padding(.horizontal, 18)
@@ -201,12 +201,29 @@ struct ForYou: View {
     }
 }
 
+private extension View {
+    func jobCardSurface() -> some View {
+        self
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(JobsTheme.surface, in: .rect(cornerRadius: 16))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16).strokeBorder(JobsTheme.border)
+                    .allowsHitTesting(false)
+            }
+    }
+}
+
 private struct JobCard: View {
     let job: Job
     let showScore: Bool
+    var showFitSummary = false
+    var prominentTitle = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
+            Text(job.title).font(showScore || showFitSummary || prominentTitle ? .title3.bold() : .headline)
+                .foregroundStyle(.primary)
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .center, spacing: 10) {
                     employer
@@ -218,8 +235,6 @@ private struct JobCard: View {
                     if showScore { score }
                 }
             }
-            Text(job.title).font(showScore ? .title3.bold() : .headline)
-                .foregroundStyle(.primary)
             if let location = job.location, !location.isEmpty {
                 Label(location, systemImage: "mappin.and.ellipse")
                     .font(.subheadline)
@@ -240,6 +255,18 @@ private struct JobCard: View {
                 if job.created.prefix(10) == utcDay {
                     Label("New Today", systemImage: "sparkle")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if showFitSummary {
+                if let skills = job.matchedSkills, !skills.isEmpty {
+                    Label("Matched profile skills: \(skills.prefix(2).joined(separator: " and "))",
+                          systemImage: "checkmark.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if let group = job.matchedGroups?.first {
+                    Label(group, systemImage: "checkmark.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             if showScore {
@@ -419,17 +446,36 @@ struct JobList: View {
                     )
                 }
                 ForEach(visible) { job in
-                    NavigationLink(value: job.id) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            JobCard(job: job, showScore: !trackingOnly && filters.sort == .score)
-                            if trackingOnly, job.status != "Not Applied" {
-                                Text(job.status).font(.footnote.weight(.medium)).foregroundStyle(JobsTheme.accent)
-                            } else if !trackingOnly, job.interest?.state == "saved" {
-                                Label("Saved", systemImage: "bookmark.fill")
-                                    .font(.footnote.weight(.medium)).foregroundStyle(JobsTheme.accent)
+                    VStack(alignment: .leading, spacing: 12) {
+                        NavigationLink(value: job.id) {
+                            JobCard(job: job, showScore: false, showFitSummary: !trackingOnly,
+                                    prominentTitle: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if trackingOnly {
+                            Button(job.applicationStage == "Not Applied" ? "Track application" : job.applicationStage,
+                                   systemImage: "checklist") {
+                                trackingJob = job
                             }
+                            .accessibilityHint("Edit application tracking")
+                            .buttonStyle(.bordered)
+                        } else {
+                            let saved = job.interest?.state == "saved"
+                            Button(saved ? "Saved" : "Save", systemImage: saved ? "bookmark.fill" : "bookmark") {
+                                Task { await toggleSaved(job) }
+                            }
+                            .accessibilityHint(saved ? "Remove from My Jobs" : "Add to My Jobs")
+                            .buttonStyle(.bordered)
+                            .disabled(workspace.saving || !workspace.canWrite)
                         }
                     }
+                    .jobCardSurface()
+                    .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 6, trailing: 0))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                     .swipeActions(allowsFullSwipe: false) {
                         if trackingOnly {
                             Button("Tracking", systemImage: "checklist") { trackingJob = job }

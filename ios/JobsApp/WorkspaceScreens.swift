@@ -406,32 +406,39 @@ struct PreferencesEditor: View {
                     TextField("Experience and preferences", text: $draft.preferences.profile, axis: .vertical)
                         .lineLimit(4...10)
                 }
-                Section("Target Roles") {
-                    multiline("Job titles, one per line", $draft.categories)
-                }
-                Section("Skills to Use") {
+                Section("Job Preferences") {
+                    ProfileTermsLink(title: "Target Roles", prompt: "Add a job title", terms: $draft.categories)
+                    ProfileTermsLink(title: "Titles to Avoid", prompt: "Add a title or phrase", terms: $draft.exclusions)
                     SkillPickerLink(selection: Binding(
                         get: { draft.preferences.preferredSkills ?? [] },
                         set: { draft.preferences.preferredSkills = $0 }
                     ))
                 }
-                Section("Locations and Work Setting") {
+                Section("Where you want to work") {
                     if draft.preferences.remoteHiringLocations == nil {
                         Toggle("Separate commute and remote locations", isOn: $draft.separateLocations)
                     }
                     if draft.separateLocations {
-                        multiline("Commute cities with state or region, one per line", $draft.locations)
-                        multiline("Remote hiring states or countries, one per line", $draft.remoteLocations)
+                        ProfileTermsLink(title: "Commute Locations", prompt: "City, state or region", terms: $draft.locations)
+                        ProfileTermsLink(title: "Remote Hiring Regions", prompt: "State or country", terms: $draft.remoteLocations)
                     } else {
-                        multiline("Existing location preferences, one per line", $draft.locations)
-                        if draft.preferences.legacyGeography == true {
-                            Text("Blank locations and work settings retain your existing workspace rules.")
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
+                        ProfileTermsLink(title: "Locations", prompt: "City, state, or country",
+                                         terms: $draft.locations, emptySummary: "Workspace defaults")
                     }
-                    workplace("Remote", "remote")
-                    workplace("Hybrid", "hybrid")
-                    workplace("On-site", "onsite")
+                    NavigationLink {
+                        Form {
+                            Section("Work arrangements you’d consider") {
+                                workplace("Remote", "remote")
+                                workplace("Hybrid", "hybrid")
+                                workplace("On-site", "onsite")
+                            }
+                        }
+                        .scrollContentBackground(.hidden)
+                        .background(JobsTheme.canvas.ignoresSafeArea())
+                        .navigationTitle("Work Arrangement")
+                    } label: {
+                        LabeledContent("Work Arrangement", value: workArrangementSummary)
+                    }
                 }
                 Section("Salary") {
                     Menu("Choose a Salary Target") {
@@ -535,6 +542,14 @@ struct PreferencesEditor: View {
         skills.removeAll { $0.caseInsensitiveCompare(skill) == .orderedSame }
         if enabled && skills.count < 150 { skills.append(skill) }
         draft.preferences.preferredSkills = skills
+    }
+
+    private var workArrangementSummary: String {
+        let modes = draft.preferences.workplaceTypes ?? []
+        let labels = [("remote", "Remote"), ("hybrid", "Hybrid"), ("onsite", "On-site")]
+            .filter { modes.contains($0.0) }
+            .map { $0.1 }
+        return labels.isEmpty ? "Workspace defaults" : labels.joined(separator: ", ")
     }
 
     private func workplace(_ title: String, _ key: String) -> some View {
@@ -1355,5 +1370,60 @@ struct ApplicationPrepSheet: View {
                 ? "Couldn’t confirm the save. Your draft is still here. Try again."
                 : DashboardAPI.connectionMessage(for: error)
         }
+    }
+}
+
+private struct ProfileTermsLink: View {
+    let title: String
+    let prompt: String
+    @Binding var terms: String
+    var emptySummary = "None"
+    @State private var newTerm = ""
+
+    private var entries: [String] {
+        terms.split(whereSeparator: \.isNewline).map(String.init)
+    }
+
+    var body: some View {
+        NavigationLink {
+            List {
+                Section {
+                    TextField(prompt, text: $newTerm)
+                        .submitLabel(.done)
+                        .onSubmit(addTerm)
+                    Button("Add", systemImage: "plus", action: addTerm)
+                        .disabled(trimmedTerm.isEmpty)
+                }
+                Section {
+                    ForEach(Array(entries.enumerated()), id: \.offset) { entry in
+                        Text(entry.element)
+                    }
+                    .onDelete { offsets in
+                        var updated = entries
+                        updated.remove(atOffsets: offsets)
+                        terms = updated.joined(separator: "\n")
+                    }
+                } footer: {
+                    if !entries.isEmpty { Text("Swipe left on an entry to remove it.") }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(JobsTheme.canvas.ignoresSafeArea())
+            .navigationTitle(title)
+        } label: {
+            LabeledContent(title, value: entries.isEmpty ? emptySummary : entries.count == 1 ? entries[0] : "\(entries.count) selected")
+        }
+    }
+
+    private var trimmedTerm: String {
+        newTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func addTerm() {
+        guard !trimmedTerm.isEmpty else { return }
+        if !entries.contains(where: { $0.caseInsensitiveCompare(trimmedTerm) == .orderedSame }) {
+            terms = (entries + [trimmedTerm]).joined(separator: "\n")
+        }
+        newTerm = ""
     }
 }
