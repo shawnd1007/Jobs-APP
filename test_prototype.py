@@ -11,6 +11,10 @@ import prototype
 
 class PrototypeTests(unittest.TestCase):
     def setUp(self):
+        base = json.loads((Path(__file__).resolve().parent / "config.example.json").read_text())
+        config = patch.object(app, "config", side_effect=lambda: app.prototype.settings(dict(base), app.DATA))
+        config.start()
+        self.addCleanup(config.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.old = app.DATA, app.DB
         self.oldseed = app.SEED
