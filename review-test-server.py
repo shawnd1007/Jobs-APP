@@ -7,6 +7,13 @@ from http.server import ThreadingHTTPServer
 import app
 app.SEED=Path(__file__).resolve().parent/'fixtures'/'seed.html'
 
+def fixture_config():
+    base = json.loads((Path(__file__).resolve().parent / 'config.example.json').read_text())
+    return app.prototype.settings(base, app.DATA)
+
+
+app.config = fixture_config
+
 with tempfile.TemporaryDirectory(prefix='review-qa-',dir=app.DATA) as folder:
     original_data=app.DATA.resolve();target=Path(folder).resolve()
     if not target.is_relative_to(original_data):raise RuntimeError('QA folder outside workspace')
