@@ -192,6 +192,8 @@ enum JobBucket: String, CaseIterable, Identifiable {
 
 struct Preferences: Codable {
     var preferredSkills: [String]?
+    var remoteHiringLocations: [String]? = nil
+    var legacyGeography: Bool? = nil
     var targetLocations: [String]?
     var workplaceTypes: [String]?
     var profile: String

@@ -219,6 +219,7 @@ struct PreferencesScreen: View {
     let editServer: () -> Void
     let openSample: () -> Void
     @State private var editingPreferences = false
+    @State private var editingAdministration = false
 
     var body: some View {
         List {
@@ -240,6 +241,7 @@ struct PreferencesScreen: View {
                 }
             }
             Section("Employer Sources") {
+                Button("Workspace Administration", systemImage: "gearshape") { editingAdministration = true }
                 NavigationLink("Employer Boards") { EmployerBoards(workspace: workspace) }
             }
             Section("Connection") {
@@ -258,6 +260,11 @@ struct PreferencesScreen: View {
         .background(JobsTheme.canvas.ignoresSafeArea())
         .navigationTitle("Settings")
         .refreshable { await workspace.refresh() }
+        .sheet(isPresented: $editingAdministration) {
+            if let dashboard = workspace.dashboard {
+                PreferencesEditor(workspace: workspace, dashboard: dashboard, administration: true)
+            }
+        }
         .sheet(isPresented: $editingPreferences) {
             if let dashboard = workspace.dashboard {
                 PreferencesEditor(workspace: workspace, dashboard: dashboard)
@@ -274,6 +281,8 @@ private struct PreferenceUpdate<Value: Encodable>: Encodable {
 private struct PreferencesDraft {
     var preferences: Preferences
     var locations: String
+    var remoteLocations: String
+    var separateLocations: Bool
     var categories: String
     var exclusions: String
     var employerURLs: String
@@ -286,6 +295,8 @@ private struct PreferencesDraft {
     init(_ dashboard: Dashboard) {
         let values = dashboard.preferences
         preferences = values
+        remoteLocations = (values.remoteHiringLocations ?? []).joined(separator: "\n")
+        separateLocations = values.remoteHiringLocations != nil
         locations = (values.targetLocations ?? []).joined(separator: "\n")
         categories = values.categories.joined(separator: "\n")
         exclusions = values.excludedTitleTerms.joined(separator: "\n")
@@ -313,6 +324,10 @@ private struct PreferencesDraft {
         result.salaryFloor = salary
         result.aiDailyLimit = limit
         result.targetLocations = lines(locations)
+        if separateLocations {
+            result.remoteHiringLocations = lines(remoteLocations)
+            result.legacyGeography = false
+        }
         result.categories = lines(categories)
         result.excludedTitleTerms = lines(exclusions)
         result.additionalEmployerUrls = lines(employerURLs)
@@ -344,7 +359,7 @@ private struct PreferencesDraft {
     }
 }
 
-private struct PreferencesEditor: View {
+struct PreferencesEditor: View {
     @Environment(\.dismiss) private var dismiss
     let workspace: Workspace
     @State private var draft: PreferencesDraft
@@ -355,100 +370,121 @@ private struct PreferencesEditor: View {
     @State private var readingResume = false
     @State private var importError: String?
 
-    init(workspace: Workspace, dashboard: Dashboard) {
+    let administration: Bool
+    var onSaved: () -> Void
+
+    init(workspace: Workspace, dashboard: Dashboard, administration: Bool = false, onSaved: @escaping () -> Void = {}) {
         self.workspace = workspace
+        self.administration = administration
+        self.onSaved = onSaved
         _draft = State(initialValue: PreferencesDraft(dashboard))
     }
 
     var body: some View {
-        SaveForm(title: "Search Profile", workspace: workspace) {
-            Section("Résumé") {
-                Button(savedResume == nil ? "Import Résumé" : "Replace Résumé",
-                       systemImage: "doc.badge.plus") { importingResume = true }
-                    .disabled(readingResume)
-                if readingResume { ProgressView("Reading résumé…") }
-                if let savedResume {
-                    Button(savedResume.name, systemImage: "doc.text") { resume = savedResume }
-                    Button("Remove Résumé", role: .destructive) {
-                        do {
-                            try ResumePreview.remove()
-                            self.savedResume = nil
-                            importError = nil
-                        } catch { importError = error.localizedDescription }
-                    }
-                }
-                Text("Your file preview stays on this iPhone. Choose the skills and experience you want to save to your Mac’s search profile.")
-                    .font(.footnote).foregroundStyle(.secondary)
-                if let importError { Text(importError).foregroundStyle(.red) }
-            }
-            Section("Candidate Profile") {
-                TextField("Experience and preferences", text: $draft.preferences.profile, axis: .vertical)
-                    .lineLimit(4...10)
-            }
-            Section("Role and Skill Matching") {
-                multiline("Role phrases, one per line", $draft.categories)
-                multiline("Excluded title terms, one per line", $draft.exclusions)
-                multiline("Skill groups: Name | Weight | term, term", $draft.skills)
-            }
-            Section("Skills to Use") {
-                SkillPickerLink(selection: Binding(
-                    get: { draft.preferences.preferredSkills ?? [] },
-                    set: { draft.preferences.preferredSkills = $0 }
-                ))
-            }
-            Section("Locations and Work Setting") {
-                multiline("Cities or regions, one per line (e.g. Austin, TX or United States)", $draft.locations)
-                workplace("Remote", "remote")
-                workplace("Hybrid", "hybrid")
-                workplace("On-site", "onsite")
-                Text("Leave locations and work settings blank to keep the original workspace rules.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            Section("Salary") {
-                Menu("Choose a Salary Target") {
-                    ForEach([50_000, 70_000, 85_000, 100_000, 125_000, 150_000], id: \.self) { salary in
-                        Button {
-                            draft.salaryFloor = String(salary)
-                        } label: {
-                            Text(salary, format: .currency(code: "USD").precision(.fractionLength(0)))
+        SaveForm(title: administration ? "Workspace Administration" : "Search Profile", workspace: workspace) {
+            if !administration {
+                Section("Résumé") {
+                    Button(savedResume == nil ? "Import Résumé" : "Replace Résumé",
+                           systemImage: "doc.badge.plus") { importingResume = true }
+                        .disabled(readingResume)
+                    if readingResume { ProgressView("Reading résumé…") }
+                    if let savedResume {
+                        Button(savedResume.name, systemImage: "doc.text") { resume = savedResume }
+                        Button("Remove Résumé", role: .destructive) {
+                            do {
+                                try ResumePreview.remove()
+                                self.savedResume = nil
+                                importError = nil
+                            } catch { importError = error.localizedDescription }
                         }
                     }
+                    Text("Your file preview stays on this iPhone. Choose the skills and experience you want to save to your Mac’s search profile.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if let importError { Text(importError).foregroundStyle(.red) }
                 }
-                TextField("Annual Target in USD", text: $draft.salaryFloor).keyboardType(.numberPad)
-                Picker("Policy", selection: $draft.preferences.salaryPolicy) {
-                    Text("Range Reaches Target").tag("overlap")
-                    Text("Entire Range Meets Target").tag("minimum")
+                Section("Candidate Profile") {
+                    TextField("Experience and preferences", text: $draft.preferences.profile, axis: .vertical)
+                        .lineLimit(4...10)
                 }
-            }
-            Section("Employer Sources") {
-                boardField("Ashby", "ashby")
-                boardField("Greenhouse", "greenhouse")
-                boardField("Lever", "lever")
-                boardField("SmartRecruiters", "smartrecruiters")
-                boardField("Personio", "personio")
-                boardField("Recruitee", "recruitee")
-                multiline("Employer posting URLs, one per line", $draft.employerURLs)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-            }
-            Section("Schedule") {
-                Toggle("Daily Employer Search", isOn: $draft.preferences.scheduleEnabled)
-                Picker("UTC Hour", selection: $draft.preferences.scheduleHourUtc) {
-                    ForEach(0..<24) { Text("\($0):00").tag($0) }
+                Section("Target Roles") {
+                    multiline("Job titles, one per line", $draft.categories)
                 }
-            }
-            Section {
-                Toggle("Enable Requested Career Reviews", isOn: $draft.preferences.aiEnabled)
-                TextField("OpenAI Model", text: $draft.preferences.aiModel)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                TextField("Daily Attempt Limit", text: $draft.aiLimit).keyboardType(.numberPad)
-            } header: {
-                Text("AI Career Advice")
-            } footer: {
-                Text("Store the API key on the Mac. Reviews are requested individually from a job’s detail screen.")
+                Section("Skills to Use") {
+                    SkillPickerLink(selection: Binding(
+                        get: { draft.preferences.preferredSkills ?? [] },
+                        set: { draft.preferences.preferredSkills = $0 }
+                    ))
+                }
+                Section("Locations and Work Setting") {
+                    if draft.preferences.remoteHiringLocations == nil {
+                        Toggle("Separate commute and remote locations", isOn: $draft.separateLocations)
+                    }
+                    if draft.separateLocations {
+                        multiline("Commute cities with state or region, one per line", $draft.locations)
+                        multiline("Remote hiring states or countries, one per line", $draft.remoteLocations)
+                    } else {
+                        multiline("Existing location preferences, one per line", $draft.locations)
+                        if draft.preferences.legacyGeography == true {
+                            Text("Blank locations and work settings retain your existing workspace rules.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    workplace("Remote", "remote")
+                    workplace("Hybrid", "hybrid")
+                    workplace("On-site", "onsite")
+                }
+                Section("Salary") {
+                    Menu("Choose a Salary Target") {
+                        ForEach([50_000, 70_000, 85_000, 100_000, 125_000, 150_000], id: \.self) { salary in
+                            Button {
+                                draft.salaryFloor = String(salary)
+                            } label: {
+                                Text(salary, format: .currency(code: "USD").precision(.fractionLength(0)))
+                            }
+                        }
+                    }
+                    TextField("Annual Target in USD", text: $draft.salaryFloor).keyboardType(.numberPad)
+                    Picker("Policy", selection: $draft.preferences.salaryPolicy) {
+                        Text("Range Reaches Target").tag("overlap")
+                        Text("Entire Range Meets Target").tag("minimum")
+                    }
+                }
+            } else {
+                Section("Matching Rules") {
+                    multiline("Excluded title terms, one per line", $draft.exclusions)
+                    multiline("Skill groups: Name | Weight | term, term", $draft.skills)
+                }
+                Section("Employer Sources") {
+                    boardField("Ashby", "ashby")
+                    boardField("Greenhouse", "greenhouse")
+                    boardField("Lever", "lever")
+                    boardField("SmartRecruiters", "smartrecruiters")
+                    boardField("Personio", "personio")
+                    boardField("Recruitee", "recruitee")
+                    multiline("Employer posting URLs, one per line", $draft.employerURLs)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                }
+                Section("Schedule") {
+                    Toggle("Daily Employer Search", isOn: $draft.preferences.scheduleEnabled)
+                    Picker("UTC Hour", selection: $draft.preferences.scheduleHourUtc) {
+                        ForEach(0..<24) { Text("\($0):00").tag($0) }
+                    }
+                }
+                Section {
+                    Toggle("Enable Requested Career Reviews", isOn: $draft.preferences.aiEnabled)
+                    TextField("OpenAI Model", text: $draft.preferences.aiModel)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("Daily Attempt Limit", text: $draft.aiLimit).keyboardType(.numberPad)
+                } header: {
+                    Text("AI Career Advice")
+                } footer: {
+                    Text("Store the API key on the Mac. Reviews are requested individually from a job’s detail screen.")
+                }
             }
         } save: {
             try await workspace.save("/api/preferences", draft.payload())
             dismiss()
+            onSaved()
         } reload: {
             if let dashboard = workspace.dashboard { draft = PreferencesDraft(dashboard) }
         }

@@ -11,6 +11,7 @@ struct ForYou: View {
     let openSettings: () -> Void
     let openSearch: () -> Void
     @State private var showingReview = false
+    @State private var editingSearchProfile = false
     @State private var undo: (id: Int, state: String, version: Int)?
     @State private var message: String?
 
@@ -69,7 +70,7 @@ struct ForYou: View {
                         if hasSources {
                             Button("Open Employer Search", action: openSearch).buttonStyle(.borderedProminent)
                         }
-                        Button("Open Search Settings", action: openSettings)
+                        Button("Set Up Search Profile") { editingSearchProfile = true }
                     }
                     .background(JobsTheme.surface, in: .rect(cornerRadius: 22))
                 } else if visible.isEmpty {
@@ -124,6 +125,18 @@ struct ForYou: View {
         .navigationTitle("For You")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: Int.self) { JobDetail(workspace: workspace, jobID: $0) }
+        .toolbar {
+            if !workspace.isSample, workspace.dashboard != nil {
+                Button("Search Profile", systemImage: "person.crop.circle") { editingSearchProfile = true }
+            }
+        }
+        .sheet(isPresented: $editingSearchProfile) {
+            if let dashboard = workspace.dashboard {
+                PreferencesEditor(workspace: workspace, dashboard: dashboard) {
+                    showingReview = false
+                }
+            }
+        }
         .refreshable { await workspace.refresh() }
         .safeAreaInset(edge: .bottom) {
             if let message {

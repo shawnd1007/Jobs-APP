@@ -899,6 +899,30 @@ class PersistenceTests(unittest.TestCase):
   cases=[('London, UK',True,'Rejected'),('Remote - Colombia',True,'Rejected'),('Texas',True,'Rejected'),('Bangalore, India',False,'Rejected'),('Example City, NY',False,'Rejected'),('Cedar Point',False,'Review'),('Cedar Point, WA',False,'Review'),('Cedar Point, ME',False,'Eligible'),('Pine Harbor, OR Hybrid',False,'Eligible'),('Juniper Cove, Oregon',False,'Eligible'),('Remote - United States',True,'Eligible'),('U.S. Remote',True,'Eligible'),('Remote',True,'Review'),('Remote USA Hybrid',True,'Review')]
   for loc,remote,expected in cases:
    with self.subTest(location=loc):self.assertEqual(app.location_eligibility({'location':loc,'remote':remote},cfg)[0],expected)
+ def test_separate_commute_and_remote_geography(self):
+  cfg = dict(app.config(), target_locations=['Portland, OR'], remote_hiring_locations=['United States'],
+             workplace_types=['remote', 'hybrid'])
+  cases = [
+      ('Portland, OR', 'hybrid', '', 'Eligible'),
+      ('Portland', 'hybrid', '', 'Review'),
+      ('Seattle, WA', 'hybrid', '', 'Rejected'),
+      ('Portland, OR', 'remote', '', 'Review'),
+      ('United States', 'remote', '', 'Eligible'),
+      ('United States', 'remote', 'Applicants must reside in Virginia.', 'Review'),
+      ('Portland, OR', 'onsite', '', 'Rejected'),
+  ]
+  for location, mode, description, expected in cases:
+   with self.subTest(location=location, mode=mode, description=description):
+    job = dict(location=location, workplace_type=mode, description=description)
+    self.assertEqual(app.location_eligibility(job, cfg)[0], expected)
+  self.assertEqual(app.discovery_regions(cfg), ['remote United States', 'Portland, OR'])
+
+ def test_new_geography_has_no_personal_defaults(self):
+  cfg = dict(legacy_geography=False, remote_hiring_locations=[])
+  self.assertEqual(app.discovery_regions(cfg), ['remote'])
+  self.assertEqual(app.location_eligibility({'location': 'Portland, OR', 'workplace_type': 'onsite'}, cfg)[0], 'Eligible')
+  self.assertEqual(app.location_eligibility({'location': 'Remote - United States'}, cfg)[0], 'Review')
+
  def test_remote_restricted_state_not_eligible(self):
   j={'location':'Remote - US','remote':True,'description':'You must reside in Virginia.'}
   self.assertNotEqual(app.location_eligibility(j,app.config())[0],'Eligible')

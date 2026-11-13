@@ -17,7 +17,8 @@ PREFERENCE_KEYS = ('profile', 'categories', 'salary_floor', 'salary_policy',
                    'excluded_title_terms', 'skill_groups', 'additional_boards',
                    'additional_employer_urls', 'disabled_sources', 'ai_enabled',
                    'ai_model', 'ai_daily_limit', 'schedule_enabled', 'schedule_hour_utc',
-                   'target_locations', 'workplace_types', 'preferred_skills')
+                   'target_locations', 'workplace_types', 'preferred_skills',
+                   'remote_hiring_locations', 'legacy_geography')
 
 
 def settings(base, data):
@@ -27,6 +28,7 @@ def settings(base, data):
     base.setdefault('preferred_skills', [])
     base.setdefault('target_locations', [])
     base.setdefault('workplace_types', [])
+    base.setdefault('legacy_geography', bool(base.get('local_areas')))
     base.setdefault('salary_policy', 'overlap')
     base.setdefault('excluded_title_terms', [])
     base.setdefault('disabled_sources', [])
@@ -85,10 +87,15 @@ def save_preferences(a, payload):
             if not isinstance(values, list) or len(values) > 150 or any(not isinstance(v, str) or not 1 <= len(v) <= 600 for v in values):
                 raise ValueError('Invalid ' + key)
         if not updated['categories']: raise ValueError('Choose at least one role keyword')
-        locations = updated['target_locations']
-        if (not isinstance(locations, list) or len(locations) > 30 or
-                any(not isinstance(value, str) or not 1 <= len(value.strip()) <= 100 for value in locations)):
-            raise ValueError('Enter up to 30 location phrases, each 1–100 characters')
+        if type(updated['legacy_geography']) is not bool:
+            raise ValueError('Invalid legacy geography setting')
+        for key in ('target_locations', 'remote_hiring_locations'):
+            if key not in updated:
+                continue
+            locations = updated[key]
+            if (not isinstance(locations, list) or len(locations) > 30 or
+                    any(not isinstance(value, str) or not 1 <= len(value.strip()) <= 100 for value in locations)):
+                raise ValueError('Enter up to 30 location phrases, each 1–100 characters')
         modes = updated['workplace_types']
         if not isinstance(modes, list) or any(mode not in ('remote', 'hybrid', 'onsite') for mode in modes):
             raise ValueError('Invalid workplace type')

@@ -569,10 +569,11 @@ def work_arrangement(job, location=None, description=None):
 
 
 def preferred_location(loc, desc, mode, cfg):
-    targets = cfg.get('target_locations', [])
+    split = 'remote_hiring_locations' in cfg
+    targets = cfg.get('remote_hiring_locations', []) if split and mode == 'remote' else cfg.get('target_locations', [])
     modes = cfg.get('workplace_types', [])
     area = WORK_ARRANGEMENT_LABELS.get(mode, 'Other')
-    if modes and mode == 'unknown':
+    if (modes or split) and mode == 'unknown':
         return 'Review', 'Employer work arrangement is not published clearly', area
     if modes and mode not in modes:
         return 'Rejected', 'Work arrangement is outside your preferences', area
@@ -580,6 +581,10 @@ def preferred_location(loc, desc, mode, cfg):
             r'(?:must (?:reside|live|be based|be located)|only in|restricted to|'
             r'exclud(?:es|ing)|except for|(?:hiring|eligible|approved) states)', loc + ' ' + desc)):
         return 'Review', 'Check the employer’s remote residence restrictions', area
+    if split and mode == 'remote' and not targets:
+        return 'Review', 'Add where you can work remotely to check hiring eligibility', area
+    if split and mode in ('onsite', 'hybrid') and not loc:
+        return 'Review', 'Employer office location is missing', area
     if not targets and modes:
         return 'Eligible', f'Published work arrangement matches {area}', area
     if not loc:
@@ -595,9 +600,35 @@ def preferred_location(loc, desc, mode, cfg):
             return 'Eligible', f'Published location matches {target}', area
     if mode == 'remote':
         return 'Review', 'Confirm where the employer can hire remote workers', area
+    if split and targets:
+        if any(' ' + location_words(target.split(',')[0]) + ' ' in published for target in targets
+               if ',' in target):
+            return 'Review', 'Confirm the region of the employer’s office', area
+        if not re.search(r'[,/]|\b[0-9]{5}\b', loc):
+            return 'Review', 'Confirm the region of the employer’s office', area
+    if split and not targets and mode in ('onsite', 'hybrid'):
+        return 'Eligible', 'No commute area required', area
     if targets:
         return 'Rejected', 'Published office location is outside your preferences', area
     return 'Review', 'Add a location or verify the employer’s office location', area
+
+def uses_legacy_geography(cfg):
+    return (cfg.get('legacy_geography', bool(cfg.get('local_areas')))
+            and not cfg.get('target_locations') and not cfg.get('workplace_types')
+            and 'remote_hiring_locations' not in cfg)
+
+
+def discovery_regions(cfg):
+    if uses_legacy_geography(cfg):
+        return ['remote United States', 'Jacksonville Florida', 'Buford Suwanee Duluth Georgia']
+    modes = cfg.get('workplace_types') or ('remote', 'hybrid', 'onsite')
+    remote = ['remote ' + region for region in cfg.get('remote_hiring_locations', [])] or ['remote']
+    offices = cfg.get('target_locations', [])
+    if 'remote_hiring_locations' not in cfg and offices:
+        return offices
+    return ((remote if 'remote' in modes else [])
+            + (offices if 'hybrid' in modes or 'onsite' in modes else [])) or ['']
+
 
 def location_eligibility(j,cfg):
     loc=clean(j.get('location','')).lower()
@@ -606,7 +637,7 @@ def location_eligibility(j,cfg):
     mode = work_arrangement(j, loc, desc)
     if mode == 'conflict':
         return 'Review', 'Employer details disagree about the work arrangement', 'Other'
-    if cfg.get('target_locations') or cfg.get('workplace_types'):
+    if not uses_legacy_geography(cfg):
         return preferred_location(loc, desc, mode, cfg)
     remote = mode == 'remote'
     hybrid = mode == 'hybrid'
@@ -638,7 +669,7 @@ def location_eligibility(j,cfg):
     if hybrid and not loc:return 'Review','Hybrid or office attendance requirement: confirm the office is in an approved local area','Other'
     return 'Rejected' if loc else 'Review','Office location is outside Jacksonville or the Buford area' if loc else 'Office location missing','Other'
 def discovery_locations(cfg):
-    if cfg.get('target_locations') or cfg.get('workplace_types'):
+    if not uses_legacy_geography(cfg):
         return ('Eligible', 'Review')
     return ('Eligible',)
 
@@ -1424,7 +1455,7 @@ def run_pipeline(trigger='manual'):
                 progress('Discovering employer sources', offset, total)
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
                 domains=['jobs.ashbyhq.com','job-boards.greenhouse.io','jobs.lever.co','myworkdayjobs.com','jobs.smartrecruiters.com','recruitee.com']
-                regions=cfg.get('target_locations') or ['remote United States','Jacksonville Florida','Buford Suwanee Duluth Georgia']
+                regions=discovery_regions(cfg)
                 query='"'+category+'" jobs '+regions[offset%len(regions)]+' site:'+domains[(start+offset)%len(domains)]
                 try:
                     url='https://www.bing.com/search?format=rss&q='+up.quote(query)
@@ -1439,6 +1470,7 @@ def run_pipeline(trigger='manual'):
                 except Exception as e:report['failures'].append('Public web discovery: '+type(e).__name__)
                 pause()
         if cfg['firecrawl_enabled'] and key:
+            regions = discovery_regions(cfg)
             # Rotate categories over days so all categories receive coverage within a week.
             start=dt.date.today().toordinal()*cfg['firecrawl_searches_per_run']
             total = cfg['firecrawl_searches_per_run']
@@ -1448,7 +1480,7 @@ def run_pipeline(trigger='manual'):
                 progress('Discovering employer sources', offset, total)
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
                 try:
-                    hits=firecrawl('search',{'query':category+' jobs remote United States OR Jacksonville OR Suwanee OR Buford employer careers','limit':cfg['search_results'],'sources':['web'],'tbs':'qdr:w'},report)
+                    hits=firecrawl('search',{'query':category+' jobs '+regions[offset % len(regions)]+' employer careers','limit':cfg['search_results'],'sources':['web'],'tbs':'qdr:w'},report)
                     for hit in hits.get('web',[]):
                         b=board_identity(hit.get('url',''))
                         if b:boards.add(b)

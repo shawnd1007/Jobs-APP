@@ -18,3 +18,11 @@ Selecting a document through the system Files picker and receiving alerts on a s
 
 - Build 8 checked 29 watched employer boards on the Mac and rechecked 153 listings with zero feed errors. That run produced zero new saved-search alerts. The [source guide](EMPLOYER-BOARDS.md) explains how to inspect the live board list and outcomes.
 - The November 10, 2026 source package passed 34 unit tests on Windows and Python 3.13 Alpine Docker, and passed both browser suites with Edge on Windows. Those counts describe that earlier snapshot.
+
+## Search profile and shortlist
+
+For You opens the Search Profile directly. Import a résumé or enter experience manually, review the skills, choose target roles and pay, and save to refresh the shortlist. Workspace Administration contains employer sources, matching weights, schedule, and provider settings.
+
+Fresh installations use separate commute and remote hiring locations. Existing configurations with local areas retain their prior rules when their location and arrangement fields are blank. Existing combined location preferences also retain their behavior until the user opts into separate fields. Unknown or restricted remote eligibility goes to review. Saved searches continue to use their own criteria.
+
+The iPhone 17 simulator in Device Hub displayed the fictional shortlist, opened the profile from For You, enabled separate location fields, and returned to an updated shortlist after saving. Backend regression cases cover Portland hybrid listings, an ambiguous city, remote hiring restrictions, and the legacy geography. The system Files picker, VoiceOver, signed-device behavior, and customer account isolation require further validation.
