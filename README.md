@@ -51,6 +51,7 @@ Node is only a development/test dependency. The runtime backend uses the Python 
 
 | Where to start | What it covers |
 | --- | --- |
+| [Customer workflow](docs/CUSTOMER-WORKFLOW.md) | Proposed résumé-to-shortlist journey, automatic AI responsibilities, failure handling, and acceptance scenarios; review before implementation |
 | [Product vision](docs/PRODUCT-VISION.md) | The approved product and business goals |
 | [Project guide](docs/COMPLETE-GUIDE.md) | Current architecture, data ownership, setup, API, and recovery |
 | [iPhone guide](ios/README.md) | Xcode setup, offline reading, résumé import, and alerts |
