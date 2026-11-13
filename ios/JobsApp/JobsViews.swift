@@ -357,9 +357,15 @@ struct JobList: View {
                     }
                     .disabled(!workspace.canWrite || workspace.saving)
                 }
-                Section("Follow-ups") {
-                    followUpRow("Due or overdue", icon: "calendar.badge.clock", count: due.count, scope: .due)
-                    followUpRow("Upcoming", icon: "calendar", count: upcoming.count, scope: .upcoming)
+                if !due.isEmpty || !upcoming.isEmpty || filters.followUp != .none {
+                    Section("Follow-ups") {
+                        if !due.isEmpty || filters.followUp == .due {
+                            followUpRow("Due or overdue", icon: "calendar.badge.clock", count: due.count, scope: .due)
+                        }
+                        if !upcoming.isEmpty || filters.followUp == .upcoming {
+                            followUpRow("Upcoming", icon: "calendar", count: upcoming.count, scope: .upcoming)
+                        }
+                    }
                 }
             }
             Section {
@@ -375,8 +381,6 @@ struct JobList: View {
                     Button("Back to \(label(for: bucket))", systemImage: "arrow.uturn.backward") {
                         filters.followUp = .none
                     }
-                } else if !trackingOnly {
-                    browseControls(jobs: jobs)
                 }
                 if filters.activeCount > 0 {
                     Button("Clear filters (\(filters.activeCount))", systemImage: "xmark.circle") {
@@ -477,21 +481,6 @@ struct JobList: View {
         .accessibilityAddTraits(filters.followUp == scope ? .isSelected : [])
     }
 
-    @ViewBuilder
-    private func browseControls(jobs: [Job]) -> some View {
-        Picker("Sort", selection: $filters.sort) {
-            ForEach(JobFilters.Sort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-        }
-        Picker("Work Setting", selection: $filters.workSetting) {
-            Text("Any").tag("")
-            ForEach(["Remote", "Hybrid", "On-site"], id: \.self) { setting in
-                let count = jobs.filter { $0.workSetting == setting }.count
-                Text("\(setting) (\(count))").tag(setting)
-            }
-        }
-        Toggle("Open Listings Only", isOn: $filters.openOnly)
-    }
-
     private func toggleSaved(_ job: Job) async {
         let next = job.interest?.state == "saved" ? "none" : "saved"
         do {
@@ -561,7 +550,7 @@ private struct JobFilters {
                     return (first.publishedAnnualBaseMax ?? -1) > (second.publishedAnnualBaseMax ?? -1)
                 }
             case .status:
-                if first.status != second.status { return first.status < second.status }
+                if first.applicationStage != second.applicationStage { return first.applicationStage < second.applicationStage }
             case .updated:
                 if first.updated != second.updated { return first.updated > second.updated }
             case .posted:
@@ -579,7 +568,7 @@ private struct JobFilters {
             && (!openOnly || job.availability == "Open")
             && (workSetting.isEmpty || job.workSetting == workSetting)
             && (employer.isEmpty || job.employer == employer)
-            && (status.isEmpty || job.status == status)
+            && (status.isEmpty || job.applicationStage == status)
             && (category.isEmpty || (job.category ?? "Imported") == category)
             && (area.isEmpty || job.area == area)
             && (queue.isEmpty || job.queue == queue)
@@ -603,7 +592,10 @@ private struct JobFilterForm: View {
             Toggle("Open Listings Only", isOn: $filters.openOnly)
             choice("Work Setting", $filters.workSetting, ["Remote", "Hybrid", "On-site"])
             choice("Employer", $filters.employer, Array(Set(jobs.map(\.employer))).sorted())
-            choice("Application Status", $filters.status, dashboard?.statuses ?? [])
+            Picker("Sort", selection: $filters.sort) {
+                ForEach(JobFilters.Sort.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            choice("Application Status", $filters.status, (dashboard?.statuses ?? []).filter { $0 != "Needs Verification" })
             choice("Category", $filters.category, Array(Set(jobs.map { $0.category ?? "Imported" })).sorted())
             choice("Area", $filters.area, Array(Set(jobs.compactMap(\.area))).sorted())
             choice("Verification", $filters.queue, ["Confirmed", "Review", "Location Review", "Excluded"])
@@ -685,8 +677,17 @@ struct JobDetail: View {
                                 }
                             }
                         }
+                        if job.hasVerifiedPostingLink, let url = job.postingURL,
+                           let checked = job.postingVerified, !checked.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label("Employer link checked \(displayTimestamp(checked))", systemImage: "clock")
+                                Text(url.absoluteString).textSelection(.enabled)
+                            }
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        }
                         Button { editor = .tracking } label: {
-                            LabeledContent("Application Tracking", value: job.status)
+                            LabeledContent("Application Tracking", value: job.applicationStage)
                         }
                         .accessibilityIdentifier("openApplicationTracking")
                         if !job.isExternalApplication && workspace.dashboard?.applicationPrepAvailable == true {
@@ -1009,7 +1010,7 @@ struct TrackingDraft: Codable {
 
     init(_ job: Job) {
         version = job.version
-        status = job.status
+        status = job.applicationStage
         applicationDate = job.applicationDate
         followUp = job.followUp
         notes = job.notes
@@ -1032,7 +1033,7 @@ private struct TrackingEditor: View {
         SaveForm(title: "Application Tracking", workspace: workspace) {
             Section("Application") {
                 Picker("Status", selection: $draft.status) {
-                    ForEach(workspace.dashboard?.statuses ?? [], id: \.self) { Text($0).tag($0) }
+                    ForEach((workspace.dashboard?.statuses ?? []).filter { $0 != "Needs Verification" }, id: \.self) { Text($0).tag($0) }
                 }
                 OptionalDateField(label: "Application Date", value: $draft.applicationDate)
                 OptionalDateField(label: "Follow-up Date", value: $draft.followUp)

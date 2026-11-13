@@ -20,6 +20,20 @@ struct SearchScreen: View {
     var body: some View {
         List {
             if let dashboard = workspace.dashboard {
+                if let searches = dashboard.savedSearches {
+                    Section("Your matches") {
+                        NavigationLink {
+                            MatchInbox(workspace: workspace)
+                        } label: {
+                            LabeledContent("Match Alerts", value: "\(dashboard.unreadMatchCount ?? 0) unread")
+                        }
+                        NavigationLink {
+                            SavedSearchesScreen(workspace: workspace)
+                        } label: {
+                            LabeledContent("Saved Searches", value: String(searches.count))
+                        }
+                    }
+                }
                 Section {
                     Button("Run Employer Search", systemImage: "magnifyingglass") {
                         Task { await workspace.startSearch() }
@@ -53,20 +67,6 @@ struct SearchScreen: View {
                     Text("Find New Jobs")
                 } footer: {
                     Text("The Mac checks employer sources and updates this workspace. Some checks can take a few minutes.")
-                }
-                if let searches = dashboard.savedSearches {
-                    Section("Your matches") {
-                        NavigationLink {
-                            MatchInbox(workspace: workspace)
-                        } label: {
-                            LabeledContent("Match Alerts", value: "\(dashboard.unreadMatchCount ?? 0) unread")
-                        }
-                        NavigationLink {
-                            SavedSearchesScreen(workspace: workspace)
-                        } label: {
-                            LabeledContent("Saved Searches", value: String(searches.count))
-                        }
-                    }
                 }
                 Section("Daily Search") {
                     LabeledContent("Schedule", value: dashboard.preferences.scheduleEnabled

@@ -138,6 +138,7 @@ struct Job: Decodable, Identifiable {
         return expires >= .now
     }
 
+    var applicationStage: String { status == "Needs Verification" ? "Not Applied" : status }
     var postingURL: URL? { url.flatMap(DashboardAPI.webURL) }
 
     var trackingStage: JobBucket? {
