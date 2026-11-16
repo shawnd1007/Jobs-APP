@@ -19,6 +19,7 @@ import urllib.request as ur
 import xml.etree.ElementTree as ET
 from uuid import uuid4
 import prototype
+import recruiter
 from contextvars import ContextVar
 from queue import Empty, Queue
 import sys
@@ -253,6 +254,7 @@ def init():
             c.execute('ALTER TABLE runs ADD COLUMN trigger TEXT')
         c.execute('PRAGMA user_version=4')
         prototype.init(c)
+        recruiter.init(c)
         c.execute("UPDATE runs SET state='interrupted',finished=? WHERE state='running'",(now(),))
         if not c.execute('SELECT 1 FROM jobs LIMIT 1').fetchone():
             source=SEED.read_text(encoding='utf-8-sig')
@@ -1401,7 +1403,7 @@ def release_pending_alert(connection, job_id, previous, current, searches):
         set_pending_alert(connection, job_id, False)
 
 
-def run_pipeline(trigger='manual'):
+def run_pipeline(trigger='manual', config_override=None):
     report={'new_qualified':0,'new_review':0,'reverified':0,'newly_closed':0,'duplicates':0,'failures':[],'top_new':[],'firecrawl_requests':0,'firecrawl_credits_reported':0,'log':[]}
     run_id = None
     deadline = time.monotonic() + SEARCH_SECONDS
@@ -1429,7 +1431,7 @@ def run_pipeline(trigger='manual'):
                                (now(), 'running', json.dumps(report), trigger))
             run_id = cursor.lastrowid
             searches = prototype.saved_searches(c)
-        cfg = config()
+        cfg = config_override if config_override is not None else config()
         backup()
         existing = [job for job in records() if not job.get('external_application')]
         boards = set()
@@ -1594,7 +1596,7 @@ def run_pipeline(trigger='manual'):
                         if ident in known_identities:continue
                         j = assess(hydrate_board_listing(board, j), cfg)
                         matched = prototype.matching_searches(service(), j, searches)
-                        if not matched and not profile_candidate(j, cfg, report):
+                        if not cfg.get('recruiter_discovery') and not matched and not profile_candidate(j, cfg, report):
                             continue
                         candidates[ident] = (j, matched)
                 report['log'].append(platform+'/'+board+': '+str(len(live))+' live postings')
@@ -1657,7 +1659,7 @@ def run_pipeline(trigger='manual'):
                     continue
                 j = assess(j, cfg)
                 matched = prototype.matching_searches(service(), j, searches)
-                if not matched and not profile_candidate(j, cfg, report):
+                if not cfg.get('recruiter_discovery') and not matched and not profile_candidate(j, cfg, report):
                     continue
                 if ident in candidates:
                     report['duplicates'] += 1
@@ -1684,7 +1686,7 @@ def run_pipeline(trigger='manual'):
                 report['deferred_candidates'] = len(ranked) - index
                 break
             progress('Saving results', new_count, min(len(ranked), limit))
-            job = finalize(job, cfg, report, check_posting=bool(matched))
+            job = finalize(job, cfg, report, check_posting=bool(matched) or cfg.get('recruiter_discovery', False))
             with connect() as c:
                 job_id, added = upsert(c, job)
                 if added and matched:
@@ -1908,6 +1910,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
     def do_GET(self):
         path=up.urlsplit(self.path).path
+        if path=='/api/recruiter':return self.send(200,recruiter.read(service()))
         if path=='/api/dashboard':return self.send(200,snapshot())
         if path=='/api/v1/health':return self.send(200,{'status':'ok','api_version':1})
         if path=='/api/v1/search-status':return self.send(200,search_status())
@@ -1924,6 +1927,14 @@ class Handler(BaseHTTPRequestHandler):
         # Reject cross-site form/script mutations, including DNS rebinding origins.
         host=self.headers.get('Host','');origin=self.headers.get('Origin','')
         if self.headers.get('X-Jobs-Client')!='dashboard' or (origin and up.urlsplit(origin).netloc!=host):return self.send(403,{'error':'Same-origin dashboard required'})
+        if self.path == '/api/recruiter':
+            try:
+                size = int(self.headers.get('Content-Length', 0))
+                if not 0 < size <= 150000:
+                    raise ValueError('The résumé request is too large or empty.')
+                return self.send(*recruiter.start(service(), json.loads(self.rfile.read(size))))
+            except (ValueError, UnicodeError) as error:
+                return self.send(400, {'error': str(error)})
         if self.path=='/api/run':return self.send(202 if start_run() else 409,{'running':True})
         if self.path == '/api/applications':
             try:

@@ -579,7 +579,7 @@ struct PreferencesEditor: View {
     }
 }
 
-private struct ResumePreview: Identifiable, Codable {
+struct ResumePreview: Identifiable, Codable {
     var id: String { name }
     let name: String
     let text: String
@@ -628,7 +628,8 @@ private struct ResumePreview: Identifiable, Codable {
             return searchable.range(of: #"(?<![\p{L}\p{N}+#])"# + phrase + #"(?![\p{L}\p{N}+#])"#,
                                     options: [.regularExpression, .caseInsensitive]) != nil
         }
-        return Self(name: url.lastPathComponent, text: String(text.prefix(16_000)), skills: skills)
+        guard text.count <= 30_000 else { throw ImportError("This résumé is too long. Use a shorter document with your relevant work history.") }
+        return Self(name: url.lastPathComponent, text: text, skills: skills)
     }
 
     private struct ImportError: LocalizedError {

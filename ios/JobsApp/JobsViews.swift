@@ -5,7 +5,7 @@ struct InterestUpdate: Encodable {
     let version: Int
 }
 
-struct ForYou: View {
+struct LegacyForYou: View {
     let workspace: Workspace
     let openBrowse: () -> Void
     let openSettings: () -> Void
@@ -201,7 +201,7 @@ struct ForYou: View {
     }
 }
 
-private extension View {
+extension View {
     func jobCardSurface() -> some View {
         self
             .padding(18)
@@ -683,6 +683,7 @@ private struct JobFilterForm: View {
 struct JobDetail: View {
     let workspace: Workspace
     let jobID: Int
+    var recruiterMatch: RecruiterState.Match? = nil
     @State private var editor: Editor?
     @State private var interestError: String?
     @State private var requestingAdvice = false
@@ -699,12 +700,12 @@ struct JobDetail: View {
             if let job = workspace.dashboard?.jobs.first(where: { $0.id == jobID }) {
                 List {
                     Section {
-                        JobCard(job: job, showScore: !job.isExternalApplication)
+                        JobCard(job: job, showScore: !job.isExternalApplication && recruiterMatch == nil)
                             .accessibilityAddTraits(.isHeader)
                         if !workspace.isSample && !job.isExternalApplication {
                             LabeledContent("Employer Pay Details", value: job.publishedPay)
                         }
-                        if let reason = job.salaryReason, !job.meetsSalaryPolicy {
+                        if recruiterMatch == nil, let reason = job.salaryReason, !job.meetsSalaryPolicy {
                             Text(reason).font(.subheadline).foregroundStyle(.secondary)
                                 .accessibilityIdentifier("salaryPolicyReason")
                         }
@@ -746,7 +747,7 @@ struct JobDetail: View {
                             LabeledContent("Application Tracking", value: job.applicationStage)
                         }
                         .accessibilityIdentifier("openApplicationTracking")
-                        if !job.isExternalApplication && workspace.dashboard?.applicationPrepAvailable == true {
+                        if recruiterMatch == nil && !job.isExternalApplication && workspace.dashboard?.applicationPrepAvailable == true {
                             Button("Application Prep", systemImage: "doc.text") { editor = .prep }
                                 .accessibilityIdentifier("openApplicationPrep")
                         }
@@ -756,6 +757,17 @@ struct JobDetail: View {
                             Text("You entered these details. Jobs hasn’t verified the posting.")
                         }
                     } else {
+                        if let match = recruiterMatch {
+                            Section(match.label) {
+                                Text(match.reason)
+                                LabeledContent("Your experience", value: match.resumeEvidence)
+                                LabeledContent("Employer duties", value: match.jobEvidence)
+                                ForEach(match.checks + match.gaps, id: \.self) { Text($0).font(.subheadline) }
+                            }
+                            Section("What to emphasize") {
+                                ForEach(match.emphasis, id: \.self) { Text($0) }
+                            }
+                        } else {
                         Section("Why It Matches") {
                             if let breakdown = job.scoreBreakdown {
                                 scoreRow("Target role", points: breakdown.targetRole, maximum: 45)
@@ -781,9 +793,10 @@ struct JobDetail: View {
                                 }
                             }
                         }
+                        }
                         Section("Employer Verification") {
                             LabeledContent("Automatic Checks", value: verificationLabel(for: job))
-                            if let reason = job.locationReason, !reason.isEmpty { Text(reason) }
+                            if recruiterMatch == nil, let reason = job.locationReason, !reason.isEmpty { Text(reason) }
                             if let evidence = job.applicationEvidence, !evidence.isEmpty { Text(evidence) }
                             if let source = job.source, !source.isEmpty { LabeledContent("Source", value: source) }
                             if let checked = job.lastVerified, !checked.isEmpty {
@@ -797,7 +810,7 @@ struct JobDetail: View {
                                 LabeledContent("Application Form Verified", value: displayTimestamp(verified))
                                     .accessibilityIdentifier("applicationFormChecked")
                             }
-                            ForEach(job.reviewBlockers + (job.matchGaps ?? []), id: \.self) { blocker in
+                            ForEach(recruiterMatch == nil ? job.reviewBlockers + (job.matchGaps ?? []) : [], id: \.self) { blocker in
                                 Label(blocker, systemImage: "exclamationmark.circle")
                                     .foregroundStyle(.secondary)
                             }
@@ -821,7 +834,7 @@ struct JobDetail: View {
                             if let action = job.interest {
                                 LabeledContent("Last List Action", value: displayTimestamp(action.updated))
                             }
-                            if !workspace.isSample {
+                            if !workspace.isSample && recruiterMatch == nil {
                                 Button { editor = .review } label: {
                                     LabeledContent("Review and Approval", value: job.reviewDecision)
                                 }
@@ -830,7 +843,7 @@ struct JobDetail: View {
                         if let description = job.description, !description.isEmpty {
                             Section("Employer Description") { Text(description).textSelection(.enabled) }
                         }
-                        if !workspace.isSample { adviceSection(job) }
+                        if !workspace.isSample && recruiterMatch == nil { adviceSection(job) }
                     }
                 }
                 .scrollContentBackground(.hidden)

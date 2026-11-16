@@ -1,0 +1,165 @@
+"""V2 orchestration acceptance tests, isolated fictional profiles and feeds."""
+import json
+import threading
+import time
+import unittest
+from unittest.mock import patch, MagicMock
+import recruiter
+from fixtures.recruiter_fixture import environment, MARA, JULES, strategy
+
+REAL_AI = recruiter.ai
+
+PREFS = dict(salary=70000, currency='USD', period='year', flexible=False,
+             commute='Portland, Oregon', remote_region='Oregon, United States', modes=['remote', 'onsite', 'hybrid'])
+
+
+class RecruiterTests(unittest.TestCase):
+    def setUp(self):
+        self.context = environment()
+        self.a, self.calls = self.context.__enter__()
+        self.addCleanup(self.context.__exit__, None, None, None)
+
+    def wait(self):
+        until = time.monotonic() + 10
+        while recruiter.LOCK.locked() and time.monotonic() < until:
+            time.sleep(.01)
+        self.assertFalse(recruiter.LOCK.locked())
+        return recruiter.read(self.a)
+
+    def analyze(self, resume=MARA):
+        state = recruiter.read(self.a)
+        code, _ = recruiter.start(self.a, dict(action='analyze', resume=resume, version=state['version']))
+        self.assertEqual(code, 202)
+        state = self.wait()
+        self.assertEqual(state['stage'], 'ready', state.get('error'))
+        return state
+
+    def search(self):
+        state = recruiter.read(self.a)
+        self.assertEqual(recruiter.start(self.a, dict(action='search', version=state['version'], preferences=PREFS))[0], 202)
+        state = self.wait()
+        self.assertEqual(state['stage'], 'complete', state.get('error'))
+        return state
+
+    def test_complete_retrieval_changes_with_resume_and_preserves_owner_settings(self):
+        before = dict(self.a.config())
+        self.assertEqual(self.a.records(), [])
+        self.analyze()
+        state = self.search()
+        self.assertTrue(any('bing.com' in url for url in self.calls))
+        self.assertTrue(any('api.lever.co' in url for url in self.calls))
+        self.assertEqual(len(self.a.records()), 6)
+        self.assertEqual(len(state['matches']), 6)
+        groups = {m['title'] + m['location']: m['group'] for m in state['matches']}
+        self.assertEqual(groups['Revenue Cycle SupervisorRemote — Oregon, United States'], 'close')
+        self.assertEqual(groups['Medical Billing SpecialistRemote — United States'], 'review')
+        self.assertEqual(groups['Medical Billing SpecialistRemote — United States, excluding Oregon'], 'avoid')
+        self.assertEqual(groups['Clinical Laboratory ScientistRemote — Oregon, United States'], 'avoid')
+        self.assertEqual(groups['Patient Accounts LeadPortland, Oregon'], 'review')
+        self.analyze(JULES)
+        other = self.search()
+        close = [m['title'] for m in other['matches'] if m['group'] == 'close']
+        self.assertEqual(close, ['CNC Machinist'])
+        self.assertEqual(self.a.config(), before)
+        self.assertNotIn('resume', recruiter.read(self.a))
+
+    def test_duplicate_taps_and_stale_versions_cannot_replay(self):
+        entered, release = threading.Event(), threading.Event()
+        def slow(*args):
+            entered.set(); release.wait(3); return strategy(MARA)
+        with patch.object(recruiter, 'strategy', side_effect=slow):
+            self.assertEqual(recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA))[0], 202)
+            self.assertTrue(entered.wait(1))
+            self.assertEqual(recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA))[0], 409)
+            release.set(); self.wait()
+        self.assertEqual(recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA))[0], 409)
+
+    def test_invalid_evidence_never_becomes_profile(self):
+        bad = strategy(MARA)
+        bad['skills'][0]['evidence'] = 'Invented clinical license'
+        with patch.object(recruiter, 'ai', return_value=bad):
+            recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA))
+            state = self.wait()
+        self.assertEqual(state['stage'], 'failed')
+        self.assertNotIn('strategy', state)
+        self.assertIn('traced', state['error'])
+
+    def test_interrupted_analysis_keeps_resume_for_retry(self):
+        recruiter.write(self.a, dict(version=1, stage='analyzing', resume=MARA, matches=[], error=''))
+        with self.a.connect() as c: recruiter.init(c)
+        self.assertEqual(recruiter.read(self.a)['stage'], 'interrupted')
+        recruiter.start(self.a, dict(action='analyze', version=1))
+        self.assertEqual(self.wait()['stage'], 'ready')
+
+    def test_pay_and_geography_constraints_override_ai(self):
+        self.analyze(); self.search()
+        job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
+        for change, expected in [({'salary_max': 60000, 'salary_min': 50000}, 'avoid'),
+                                 ({'salary_min': 60000}, 'review'), ({'salary_currency': 'CAD'}, 'review'),
+                                 ({'availability': 'Closed'}, 'avoid'), ({'posting_verified': None}, 'review')]:
+            with self.subTest(change=change):
+                result = recruiter.match(self.a, recruiter.read(self.a, True), dict(job, **change))
+                self.assertEqual(result['group'], expected)
+
+    def test_failure_keeps_progress_and_does_not_touch_tracking(self):
+        self.analyze(); self.search()
+        job = self.a.records()[0]
+        with self.a.connect() as c:
+            c.execute("UPDATE tracking SET notes='Fictional preserved note',status='Applied' WHERE job_id=?", (job['id'],))
+        with self.a.connect() as c: c.execute('DELETE FROM recruiter_match_cache')
+        with patch.object(recruiter, 'ai', side_effect=ValueError('Service temporarily unavailable')):
+            s = recruiter.read(self.a)
+            recruiter.start(self.a, dict(action='search', version=s['version'], preferences=PREFS))
+            state = self.wait()
+        self.assertEqual(state['stage'], 'failed')
+        self.assertEqual(next(j for j in self.a.records() if j['id'] == job['id'])['notes'], 'Fictional preserved note')
+
+    def test_repeated_search_reuses_ai_but_rechecks_constraints(self):
+        self.analyze(); self.search()
+        with patch.object(recruiter, 'ai', side_effect=AssertionError('Paid analysis replayed')):
+            state = self.search()
+        self.assertTrue(state['matches'])
+        state = recruiter.read(self.a, True)
+        state['preferences']['salary'] = 999999
+        job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
+        with patch.object(recruiter, 'ai', side_effect=AssertionError('Cached advice ignored')):
+            self.assertEqual(recruiter.match(self.a, state, job)['group'], 'avoid')
+
+    def test_provider_failure_is_redacted_and_reserves_budget(self):
+        cfg = dict(self.a.config(), ai_enabled=True, ai_daily_limit=1)
+        with patch.object(self.a, 'config', return_value=cfg), \
+             patch.object(recruiter.prototype, 'ai_key', return_value='fictional-test-token'), \
+             patch('urllib.request.urlopen', side_effect=RuntimeError('sensitive provider body')) as network:
+            with self.assertRaisesRegex(ValueError, 'AI analysis could not finish'):
+                REAL_AI(self.a, 'career_strategy', {'resume': MARA}, recruiter.STRATEGY)
+            with self.assertRaisesRegex(ValueError, 'allowance'):
+                REAL_AI(self.a, 'career_strategy', {'resume': MARA}, recruiter.STRATEGY)
+            self.assertEqual(network.call_count, 1)
+            payload = json.loads(network.call_args.args[0].data)
+            self.assertFalse(payload['store'])
+            self.assertTrue(payload['text']['format']['strict'])
+
+    def test_disabled_ai_does_not_call_provider(self):
+        with patch('urllib.request.urlopen') as network:
+            with self.assertRaisesRegex(ValueError, 'unavailable'):
+                REAL_AI(self.a, 'career_strategy', {'resume': MARA}, recruiter.STRATEGY)
+            network.assert_not_called()
+
+    def test_changed_posting_invalidates_saved_recommendation(self):
+        self.analyze(); self.search()
+        job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
+        job['description'] = 'Employer changed the duties after matching.'
+        with self.a.connect() as c: self.a.upsert(c, job)
+        result = next(m for m in recruiter.read(self.a)['matches'] if m['job_id'] == job['id'])
+        self.assertEqual(result['group'], 'review')
+        self.assertTrue(any('changed' in c for c in result['checks']))
+
+    def test_invalid_preferences_and_input_do_not_mutate_state(self):
+        with self.assertRaises(ValueError): recruiter.start(self.a, dict(action='analyze', version=0, resume='tiny'))
+        self.assertEqual(recruiter.read(self.a)['version'], 0)
+        for change in ({'remote_region': ''}, {'commute': ''}, {'modes': []}, {'salary': True}, {'currency': 'FAKE'}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                recruiter.preferences({'preferences': dict(PREFS, **change)})
+
+
+if __name__ == '__main__': unittest.main()

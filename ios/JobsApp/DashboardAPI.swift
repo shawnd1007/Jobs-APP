@@ -429,7 +429,7 @@ enum DashboardAPI {
         _ = try await request(path, at: address, body: encoder.encode(body))
     }
 
-    private static func request(_ path: String, at address: String, body: Data? = nil) async throws -> Data {
+    static func request(_ path: String, at address: String, body: Data? = nil) async throws -> Data {
         guard let url = endpoint(path, at: address) else {
             throw ServerError(status: 0, message: "Check the URL in Server Settings.")
         }
