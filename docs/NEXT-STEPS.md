@@ -18,6 +18,7 @@ The matching follow-up adds [distinct duty evidence](COMPLETE-GUIDE.md#7-how-mat
 - Show meaningful search progress, including the current stage and available counts, so people can tell the search is still working. Handle unknown totals and incomplete coverage honestly.
 - Suggest and validate locations as people type, including city, state, and country, while preserving a way to correct the selection.
 - Keep a copy of the uploaded résumé in the candidate profile, with clear access, replacement, and deletion controls.
+- Under each job posting, offer AI-assisted résumé editing that creates a tailored version from the candidate's master résumé and the actual posting. Keep the original intact, never invent qualifications, and let the candidate review and edit the tailored version before use.
 - Measure recruiter AI token usage and cost per search, including retries, to estimate the cost of weekly use and support subscription pricing decisions.
 - Design a weekly customer search allowance: let an accepted search finish its full intended process, then limit customers to one search per week; provide Shawn a separate allowance for ongoing testing. Keep review, applying and application tracking available throughout the week. Define recovery for failures without charging a user for another weekly search.
 
