@@ -220,6 +220,9 @@ struct PreferencesScreen: View {
     let openSample: () -> Void
     @State private var editingPreferences = false
     @State private var editingAdministration = false
+    @State private var confirmingRecruiterReset = false
+    @State private var resettingRecruiter = false
+    @State private var resetMessage: String?
 
     var body: some View {
         List {
@@ -244,6 +247,16 @@ struct PreferencesScreen: View {
                 Button("Workspace Administration", systemImage: "gearshape") { editingAdministration = true }
                 NavigationLink("Employer Boards") { EmployerBoards(workspace: workspace) }
             }
+            if !workspace.isSample {
+                Section("Recruiter") {
+                    Button("Start a New Résumé", systemImage: "arrow.counterclockwise", role: .destructive) {
+                        confirmingRecruiterReset = true
+                    }.disabled(resettingRecruiter || workspace.address.isEmpty)
+                    Text("Clears the recruiter résumé, profile, preferences and matches on this server. Saved jobs and application tracking stay in your workspace.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if let resetMessage { Text(resetMessage).font(.footnote) }
+                }
+            }
             Section("Connection") {
                 Button("Server Settings", systemImage: "desktopcomputer", action: editServer)
                 Text(workspace.address).font(.footnote).foregroundStyle(.secondary)
@@ -259,6 +272,11 @@ struct PreferencesScreen: View {
         .scrollContentBackground(.hidden)
         .background(JobsTheme.canvas.ignoresSafeArea())
         .navigationTitle("Settings")
+        .confirmationDialog("Start a new résumé?", isPresented: $confirmingRecruiterReset, titleVisibility: .visible) {
+            Button("Clear Recruiter Profile", role: .destructive) { Task { await resetRecruiter() } }
+        } message: {
+            Text("This clears the résumé and recruiter results for every device connected to this workspace. Saved jobs and applications are kept.")
+        }
         .refreshable { await workspace.refresh() }
         .sheet(isPresented: $editingAdministration) {
             if let dashboard = workspace.dashboard {
@@ -270,6 +288,20 @@ struct PreferencesScreen: View {
                 PreferencesEditor(workspace: workspace, dashboard: dashboard)
             }
         }
+    }
+
+    @MainActor private func resetRecruiter() async {
+        resettingRecruiter = true
+        defer { resettingRecruiter = false }
+        do {
+            let data = try await DashboardAPI.request("/api/recruiter", at: workspace.address)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let state = try decoder.decode(RecruiterState.self, from: data)
+            let body = try JSONSerialization.data(withJSONObject: ["action": "reset", "version": state.version])
+            _ = try await DashboardAPI.request("/api/recruiter", at: workspace.address, body: body)
+            resetMessage = "Recruiter profile cleared. You can upload a new résumé."
+        } catch { resetMessage = error.localizedDescription }
     }
 }
 

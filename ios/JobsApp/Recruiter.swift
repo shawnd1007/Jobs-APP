@@ -8,6 +8,7 @@ struct RecruiterState: Decodable {
         let summary: String
         let skills: [Evidence]
         let roles, adjacentRoles, cautions: [Role]
+        let omittedUnverified: Int?
     }
     struct Match: Decodable, Identifiable {
         var id: Int { jobId }
@@ -153,7 +154,7 @@ struct RecruiterHome: View {
             if state?.strategy != nil {
                 Menu {
                     Button("Your search preferences") { editingPreferences = true }
-                    Button("Replace résumé") { importing = true }
+                    Button("Replace résumé") { openFilePicker() }
                     Button("Refresh matches") { Task { await search() } }
                 } label: { Image(systemName: "slider.horizontal.3") }
                 .accessibilityLabel("Recruiter options")
@@ -161,6 +162,7 @@ struct RecruiterHome: View {
             }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.pdf, .plainText]) { result in
+            workspace.choosingRecruiterFile = false
             switch result {
             case .success(let url):
                 Task {
@@ -176,9 +178,13 @@ struct RecruiterHome: View {
                 if (issue as? CocoaError)?.code != .userCancelled { error = issue.localizedDescription }
             }
         }
+        .onChange(of: importing) { _, presented in
+            if !presented { workspace.choosingRecruiterFile = false }
+        }
+        .onDisappear { workspace.choosingRecruiterFile = false }
         .task(id: workspace.address) {
             while !Task.isCancelled {
-                await reload()
+                if !workspace.choosingRecruiterFile { await reload() }
                 do { try await Task.sleep(for: .seconds(state?.busy == true ? 1 : 5)) }
                 catch { return }
             }
@@ -197,7 +203,7 @@ struct RecruiterHome: View {
                 Label("Tell us your pay and location", systemImage: "2.circle")
                 Label("Get matches with clear reasons", systemImage: "3.circle")
             }.font(.subheadline.weight(.medium))
-            Button { importing = true } label: {
+            Button { openFilePicker() } label: {
                 Label("Upload résumé", systemImage: "arrow.up.doc").frame(maxWidth: .infinity)
             }.buttonStyle(.borderedProminent).controlSize(.large)
             Text("PDF or text, up to 10 MB. Jobs sends your résumé text to its AI service to build your profile. You can review the evidence and replace your résumé.")
@@ -217,6 +223,10 @@ struct RecruiterHome: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Your search, built around you").font(.title2.bold())
             Text(strategy.summary).font(.subheadline)
+            if let omitted = strategy.omittedUnverified, omitted > 0 {
+                Text("Jobs left out \(omitted) suggestions because their supporting quotes couldn't be verified. Your résumé remains available to review or replace.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Text("ROLES TO EXPLORE").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             ForEach(strategy.roles, id: \.title) { role in
                 Label(role.title, systemImage: "arrow.up.right").font(.headline)
@@ -358,10 +368,16 @@ struct RecruiterHome: View {
         }
     }
 
+    @MainActor private func openFilePicker() {
+        workspace.choosingRecruiterFile = true
+        importing = true
+    }
+
     @MainActor private func reload() async {
-        guard !workspace.address.isEmpty else { return }
+        guard !workspace.address.isEmpty, !workspace.choosingRecruiterFile else { return }
         do {
             let data = try await DashboardAPI.request("/api/recruiter", at: workspace.address)
+            guard !workspace.choosingRecruiterFile else { return }
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             let next = try decoder.decode(RecruiterState.self, from: data)
@@ -373,7 +389,9 @@ struct RecruiterHome: View {
             if state?.version != next.version || state == nil { error = nil }
             state = next
             if finished { await workspace.refresh() }
-        } catch is CancellationError { } catch { self.error = error.localizedDescription }
+        } catch is CancellationError { } catch {
+            if !workspace.choosingRecruiterFile { self.error = error.localizedDescription }
+        }
     }
 
     @MainActor private func analyze(_ text: String?) async {

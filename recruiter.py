@@ -5,9 +5,13 @@ reconnects cannot replay paid requests. Never retry uncertain AI calls silently.
 """
 import hashlib
 import json
+import logging
+import os
 import re
 import threading
+import unicodedata
 import urllib.request
+from difflib import SequenceMatcher
 import prototype
 
 LOCK = threading.Lock()
@@ -125,8 +129,17 @@ def ai(a, name, inputs, schema):
 
 
 def quote_in(quote, source):
-    normalize = lambda x: ' '.join(x.casefold().split())
-    return bool(quote.strip()) and normalize(quote) in normalize(source)
+    def normalize(value):
+        value = unicodedata.normalize('NFKC', value).translate(str.maketrans({
+            '“': '"', '”': '"', '‘': "'", '’': "'",
+            '‐': '-', '‑': '-', '–': '-', '—': '-',
+        }))
+        return ' '.join(value.casefold().split())
+
+    evidence = normalize(quote)
+    if len(evidence) >= 2 and evidence[0] == evidence[-1] and evidence[0] in ('"', "'"):
+        evidence = evidence[1:-1].strip()
+    return bool(evidence) and evidence in normalize(source)
 
 
 def strategy(a, resume):
@@ -136,9 +149,24 @@ def strategy(a, resume):
     validate(result, STRATEGY)
     if not result['roles'] or not result['skills']:
         raise ValueError('The résumé needs more readable work experience before Jobs can build a search.')
+    omitted = 0
     for key in ('skills', 'roles', 'adjacent_roles', 'cautions'):
-        if any(not quote_in(item['evidence'], resume) for item in result[key]):
-            raise ValueError('AI returned experience that could not be traced to the résumé. Your file is saved; retry analysis.')
+        verified = []
+        for index, item in enumerate(result[key]):
+            if not quote_in(item['evidence'], resume):
+                if os.environ.get('JOBS_RECRUITER_DEBUG') == '1':
+                    quote = ' '.join(item['evidence'].casefold().split())
+                    source = ' '.join(resume.casefold().split())
+                    longest = SequenceMatcher(None, quote, source, autojunk=False).find_longest_match().size
+                    logging.info('Recruiter evidence validation failed: section=%s item=%d evidence_length=%d resume_length=%d longest_exact_span=%d',
+                                 key, index, len(quote), len(source), longest)
+                omitted += 1
+                continue
+            verified.append(item)
+        result[key] = verified
+    if not result['roles'] or not result['skills']:
+        raise ValueError('Jobs could not verify enough résumé evidence to build a search. Your file is saved; retry analysis.')
+    result['omitted_unverified'] = omitted
     return result
 
 
@@ -281,7 +309,7 @@ def work(a, state, action):
 
 
 def start(a, payload):
-    if not isinstance(payload, dict) or payload.get('action') not in ('analyze', 'search'):
+    if not isinstance(payload, dict) or payload.get('action') not in ('analyze', 'search', 'reset'):
         raise ValueError('Choose résumé analysis or job search.')
     if not LOCK.acquire(False):
         return 409, {'error': 'Jobs is already working. Your progress will appear shortly.'}
@@ -291,6 +319,13 @@ def start(a, payload):
         if type(payload.get('version')) is not int or payload['version'] != old['version']:
             return 409, {'error': 'Your recruiter profile changed. Refresh before continuing.'}
         action = payload['action']
+        if action == 'reset':
+            state = dict(version=old['version'] + 1, stage='empty', matches=[], error='')
+            state['updated'] = a.now()
+            with a.connect() as c:
+                c.execute('INSERT OR REPLACE INTO recruiter_state VALUES(1,?)', (json.dumps(state),))
+                c.execute('DELETE FROM recruiter_match_cache')
+            return 200, {'reset': True}
         state = dict(old, error='', version=old['version'] + 1)
         if action == 'analyze':
             resume = payload.get('resume', old.get('resume'))

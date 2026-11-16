@@ -23,6 +23,7 @@ final class Workspace {
     private(set) var cacheError: String?
     var connectionError: String?
     var searchError: String?
+    var choosingRecruiterFile = false
     private(set) var searchStatus: SearchStatus?
     private(set) var searchConnectionLost = false
     private var checkingSearchStatus = false
@@ -87,18 +88,18 @@ final class Workspace {
     }
 
     func refresh(replacingInFlight: Bool = false) async {
-        guard !isSample, !address.isEmpty, !loading || replacingInFlight else { return }
+        guard !isSample, !address.isEmpty, !choosingRecruiterFile, !loading || replacingInFlight else { return }
         let load = UUID()
         latestLoad = load
         loading = true
         defer { if latestLoad == load { loading = false } }
         do {
             let result = try await DashboardAPI.load(at: address)
-            guard latestLoad == load, !Task.isCancelled else { return }
+            guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
             accept(result)
             await MatchNotifications.deliver(for: self)
         } catch {
-            guard latestLoad == load, !Task.isCancelled else { return }
+            guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
             connected = false
             connectionError = DashboardAPI.connectionMessage(for: error)
         }
@@ -239,7 +240,7 @@ final class Workspace {
 
 private struct WorkspaceView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("backendURL") private var address = ""
+    @AppStorage("backendURL") private var address = Bundle.main.object(forInfoDictionaryKey: "JobsDefaultServer") as? String ?? ""
     @AppStorage("keepOfflineWorkspace") private var keepOfflineWorkspace = true
     @State private var workspace = Workspace()
     @State private var editingServer = false

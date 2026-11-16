@@ -14,6 +14,30 @@ PREFS = dict(salary=70000, currency='USD', period='year', flexible=False,
 
 
 class RecruiterTests(unittest.TestCase):
+    def test_reset_clears_recruiter_only_and_rejects_stale_requests(self):
+        self.analyze()
+        self.search()
+        before = recruiter.read(self.a)
+        records = self.a.records()
+        settings = dict(self.a.config())
+        status, _ = recruiter.start(self.a, dict(action='reset', version=before['version']))
+        self.assertEqual(status, 200)
+        self.assertEqual(recruiter.read(self.a, True)['stage'], 'empty')
+        self.assertNotIn('resume', recruiter.read(self.a, True))
+        self.assertEqual(self.a.records(), records)
+        self.assertEqual(self.a.config(), settings)
+        self.assertEqual(recruiter.start(self.a, dict(action='analyze', version=before['version'], resume=MARA))[0], 409)
+        with self.a.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM recruiter_match_cache').fetchone()[0], 0)
+
+    def test_evidence_accepts_formatting_but_not_changed_claims(self):
+        source = 'Mara managed 80 billing projects and resolved client issues.'
+        self.assertTrue(recruiter.quote_in('“managed 80 billing projects”', source))
+        self.assertTrue(recruiter.quote_in('managed 80\n billing projects', source))
+        self.assertFalse(recruiter.quote_in('managed 800 billing projects', source))
+        self.assertFalse(recruiter.quote_in('managed billing projects and hired staff', source))
+        self.assertFalse(recruiter.quote_in('""', source))
+
     def setUp(self):
         self.context = environment()
         self.a, self.calls = self.context.__enter__()
@@ -80,9 +104,19 @@ class RecruiterTests(unittest.TestCase):
         with patch.object(recruiter, 'ai', return_value=bad):
             recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA))
             state = self.wait()
-        self.assertEqual(state['stage'], 'failed')
-        self.assertNotIn('strategy', state)
-        self.assertIn('traced', state['error'])
+        self.assertEqual(state['stage'], 'ready')
+        self.assertNotIn('Invented clinical license', [s['evidence'] for s in state['strategy']['skills']])
+        self.assertEqual(state['strategy']['omitted_unverified'], 1)
+
+    def test_unverified_caution_is_omitted(self):
+        response = strategy(MARA)
+        response['cautions'] = [dict(title='Pilot', reason='Training needed', evidence='Invented flight license')]
+        with patch.object(recruiter, 'ai', return_value=response):
+            result = recruiter.strategy(self.a, MARA)
+        self.assertEqual(result['cautions'], [])
+        self.assertEqual(result['omitted_unverified'], 1)
+        self.assertTrue(result['skills'])
+        self.assertTrue(result['roles'])
 
     def test_interrupted_analysis_keeps_resume_for_retry(self):
         recruiter.write(self.a, dict(version=1, stage='analyzing', resume=MARA, matches=[], error=''))

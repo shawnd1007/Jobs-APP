@@ -13,6 +13,23 @@ The matching follow-up adds [distinct duty evidence](COMPLETE-GUIDE.md#7-how-mat
 | 3 | Make profile, fit, and application preparation more useful. Application Prep now pairs employer duties with profile excerpts and saves a draft. Improve transferable-skill review and evaluate evidence quality across job families. | Test with fictional résumés and labeled postings from multiple occupations. Show the evidence behind a suggestion, gaps and unknowns, and keep any fit score separate from hiring probability. |
 | 4 | Close tracking gaps. The browser and connected iPhone can now add an outside application. Validate historical imports and extend corrections for manually entered posting details. | Use fictional CSV exports with duplicate and ambiguous requisitions. The original personal tracker or another confirmed export is needed to import Shawn’s additional history. |
 
+## Ideas from personal testing
+
+- Show meaningful search progress, including the current stage and available counts, so people can tell the search is still working. Handle unknown totals and incomplete coverage honestly.
+- Suggest and validate locations as people type, including city, state, and country, while preserving a way to correct the selection.
+- Keep a copy of the uploaded résumé in the candidate profile, with clear access, replacement, and deletion controls.
+- Measure recruiter AI token usage and cost per search, including retries, to estimate the cost of weekly use and support subscription pricing decisions.
+- Design a weekly customer search allowance: let an accepted search finish its full intended process, then limit customers to one search per week; provide Shawn a separate allowance for ongoing testing. Keep review, applying and application tracking available throughout the week. Define recovery for failures without charging a user for another weekly search.
+
+### Weekly-search model: questions to resolve
+
+- Define what a complete search covers, including how many openings receive personalized comparison, how unfinished work is surfaced, and how to avoid silently deferring most results.
+- Record input and output tokens, model, attempts, retries, and estimated provider cost for each search; separately account for hosting and any search-provider charges. Verify real costs before choosing a customer price or token allowance.
+- Decide when the weekly allowance resets, how partial failures recover without consuming another search, and how the user can see the next available search. Keep saved opportunities, application tracking, notes, and follow-ups accessible between searches.
+- Give Shawn a clearly separated testing allowance without weakening future customer limits. Validate the policy with real usage and costs before implementing or promising a subscription tier.
+
+These are requested improvements, not claims about completed functionality.
+
 ## Validate the paid service before wider access
 
 1. Add authenticated accounts, authorization on every workspace operation, user-controlled correction and deletion, and tested isolation across data, caches, backups, and background jobs.
