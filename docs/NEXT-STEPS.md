@@ -20,6 +20,7 @@ The matching follow-up adds [distinct duty evidence](COMPLETE-GUIDE.md#7-how-mat
 - Keep a copy of the uploaded résumé in the candidate profile, with clear access, replacement, and deletion controls.
 - Under each job posting, offer AI-assisted résumé editing that creates a tailored version from the candidate's master résumé and the actual posting. Keep the original intact, never invent qualifications, and let the candidate review and edit the tailored version before use.
 - Measure recruiter AI token usage and cost per search, including retries, to estimate the cost of weekly use and support subscription pricing decisions.
+- Explore an optional bring-your-own-OpenAI-key plan with a lower app fee and customer-paid AI usage, potentially allowing searches and résumé edits beyond the included weekly allowance. Evaluate practical limits, key protection, cost transparency, provider rules, and support before promising unlimited use or a price.
 - Design a weekly customer search allowance: let an accepted search finish its full intended process, then limit customers to one search per week; provide Shawn a separate allowance for ongoing testing. Keep review, applying and application tracking available throughout the week. Define recovery for failures without charging a user for another weekly search.
 
 ### Weekly-search model: questions to resolve
