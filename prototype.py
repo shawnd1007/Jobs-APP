@@ -161,6 +161,10 @@ def ai_key(a):
     return os.environ.get('OPENAI_API_KEY') or (path.read_text().strip() if path.exists() else '')
 
 
+def unlimited_personal_testing():
+    return os.environ.get('JOBS_PERSONAL_UNLIMITED_AI') == '1'
+
+
 def ai_review(a, job_id):
     if not AI_LOCK.acquire(False): return 409, {'error': 'An AI review is already running. Please wait.'}
     try: return _ai_review(a, job_id)
@@ -182,7 +186,7 @@ def _ai_review(a, job_id):
         if cached and cached['fingerprint'] == digest: return 200, {'cached': True}
         c.execute('INSERT OR IGNORE INTO ai_usage VALUES(?,0)', (a.now()[:10],))
         n = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()[0]
-        if n >= cfg['ai_daily_limit']: return 429, {'error': 'Daily AI request limit reached.'}
+        if not unlimited_personal_testing() and n >= cfg['ai_daily_limit']: return 429, {'error': 'Daily AI request limit reached.'}
         c.execute('UPDATE ai_usage SET attempts=attempts+1 WHERE day=?', (a.now()[:10],))
     schema = {'type': 'object', 'additionalProperties': False, 'properties': {
         'summary': {'type': 'string'},

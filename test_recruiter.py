@@ -173,6 +173,40 @@ class RecruiterTests(unittest.TestCase):
             self.assertFalse(payload['store'])
             self.assertTrue(payload['text']['format']['strict'])
 
+    def test_personal_override_records_attempts_without_daily_cap(self):
+        cfg = dict(self.a.config(), ai_enabled=True, ai_daily_limit=1)
+        with patch.dict('os.environ', {'JOBS_PERSONAL_UNLIMITED_AI': '1'}), \
+             patch.object(self.a, 'config', return_value=cfg), \
+             patch.object(recruiter.prototype, 'ai_key', return_value='fictional-test-token'), \
+             patch('urllib.request.urlopen', side_effect=RuntimeError('offline fixture')) as network:
+            for _ in range(2):
+                with self.assertRaisesRegex(ValueError, 'AI analysis could not finish'):
+                    REAL_AI(self.a, 'career_strategy', {'resume': MARA}, recruiter.STRATEGY)
+            self.assertEqual(network.call_count, 2)
+            with self.a.connect() as c:
+                self.assertEqual(c.execute('SELECT attempts FROM ai_usage').fetchone()[0], 2)
+
+    def test_personal_override_compares_more_than_twelve(self):
+        self.analyze()
+        state = recruiter.read(self.a)
+        jobs = [dict(id=i, updated=str(i), availability='Open') for i in range(15)]
+        def finish_search(*args, **kwargs):
+            self.a.LOCK.release()
+            return {'state': 'success'}
+        with patch.dict('os.environ', {'JOBS_PERSONAL_UNLIMITED_AI': '1'}), \
+             patch.object(self.a, 'run_pipeline', side_effect=finish_search), \
+             patch.object(self.a, 'records', return_value=jobs), \
+             patch.object(recruiter, 'match', side_effect=lambda a, s, j: {'job_id': j['id'], 'group': 'avoid'}):
+            self.assertEqual(recruiter.start(self.a, dict(action='search', version=state['version'], preferences=PREFS))[0], 202)
+            until = time.monotonic() + 10
+            while recruiter.LOCK.locked() and time.monotonic() < until:
+                time.sleep(.01)
+            self.assertFalse(recruiter.LOCK.locked())
+            result = recruiter.read(self.a, True)
+        self.assertEqual(result['stage'], 'complete')
+        self.assertEqual(len(result['matches']), 15)
+        self.assertEqual(result['deferred'], 0)
+
     def test_disabled_ai_does_not_call_provider(self):
         with patch('urllib.request.urlopen') as network:
             with self.assertRaisesRegex(ValueError, 'unavailable'):

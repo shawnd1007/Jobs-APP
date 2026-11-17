@@ -101,7 +101,7 @@ def ai(a, name, inputs, schema):
         day = a.now()[:10]
         c.execute('INSERT OR IGNORE INTO ai_usage VALUES(?,0)', (day,))
         attempts = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (day,)).fetchone()[0]
-        if attempts >= cfg['ai_daily_limit']:
+        if not prototype.unlimited_personal_testing() and attempts >= cfg['ai_daily_limit']:
             raise ValueError('The service has reached its AI allowance for today. Your progress is saved.')
         c.execute('UPDATE ai_usage SET attempts=attempts+1 WHERE day=?', (day,))
     payload = dict(model=cfg['ai_model'], store=False, max_output_tokens=4500,
@@ -287,10 +287,11 @@ def work(a, state, action):
             state.update(stage='matching', coverage=report.get('state', 'partial'), matches=[])
             write(a, state)
             jobs = [j for j in a.records() if not j.get('external_application') and j.get('availability') != 'Closed']
-            # Bound paid work; disclose deferred candidates rather than imply full coverage.
+            # Keep the normal cap unless the operator explicitly enables personal testing.
             jobs.sort(key=lambda j: j.get('updated', ''), reverse=True)
-            state['deferred'] = max(0, len(jobs) - 12)
-            for job in jobs[:12]:
+            selected = jobs if prototype.unlimited_personal_testing() else jobs[:12]
+            state['deferred'] = len(jobs) - len(selected)
+            for job in selected:
                 state['matches'].append(match(a, state, job))
                 write(a, state)
             state['matches'].sort(key=lambda m: ['close', 'adjacent', 'review', 'avoid'].index(m['group']))
