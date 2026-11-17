@@ -173,6 +173,46 @@ class RecruiterTests(unittest.TestCase):
             self.assertFalse(payload['store'])
             self.assertTrue(payload['text']['format']['strict'])
 
+    def test_records_reported_tokens_even_when_response_is_incomplete(self):
+        cfg = dict(self.a.config(), ai_enabled=True, ai_daily_limit=10)
+        response = MagicMock()
+        response.__enter__.return_value = response
+        body = {'status': 'incomplete', 'usage': {'input_tokens': 120, 'output_tokens': 30,
+                 'input_tokens_details': {'cached_tokens': 20}}}
+        with patch.object(self.a, 'config', return_value=cfg), \
+             patch.object(recruiter.prototype, 'ai_key', return_value='fictional-test-token'), \
+             patch('urllib.request.urlopen', return_value=response), \
+             patch.object(recruiter.json, 'load', return_value=body):
+            token = recruiter.OPERATION.set(42)
+            try:
+                with self.assertRaisesRegex(ValueError, 'could not finish'):
+                    REAL_AI(self.a, 'career_strategy', {'resume': MARA}, recruiter.STRATEGY)
+            finally:
+                recruiter.OPERATION.reset(token)
+        with self.a.connect() as c:
+            row = c.execute('SELECT operation,kind,status,input_tokens,output_tokens,cached_input_tokens FROM recruiter_ai_calls').fetchone()
+        self.assertEqual(tuple(row), (42, 'career_strategy', 'reported', 120, 30, 20))
+
+    def test_usage_report_prices_known_usage_and_identifies_unknown(self):
+        with self.a.connect() as c:
+            c.execute('INSERT INTO recruiter_ai_calls(operation,kind,model,started,status,input_tokens,output_tokens,cached_input_tokens) VALUES(?,?,?,?,?,?,?,?)',
+                      (7, 'candidate_match', 'gpt-5.4-mini', '2026-11-16', 'reported', 1000000, 1000000, 200000))
+            c.execute('INSERT INTO recruiter_ai_calls(operation,kind,model,started,status) VALUES(?,?,?,?,?)',
+                      (7, 'candidate_match', 'gpt-5.4-mini', '2026-11-16', 'unknown'))
+        entry = recruiter.usage_report(self.a)['operations'][0]
+        self.assertEqual(entry['calls'], 2)
+        self.assertEqual(entry['unknown_calls'], 1)
+        self.assertAlmostEqual(entry['estimated_cost_usd'], 5.115)
+        self.assertEqual(entry['input_tokens'], 1000000)
+
+    def test_usage_report_keeps_token_counts_for_unknown_model_pricing(self):
+        with self.a.connect() as c:
+            c.execute('INSERT INTO recruiter_ai_calls(operation,kind,model,started,status,input_tokens,output_tokens,cached_input_tokens) VALUES(?,?,?,?,?,?,?,?)',
+                      (8, 'candidate_match', 'fictional-new-model', '2026-11-16', 'reported', 120, 30, 20))
+        entry = recruiter.usage_report(self.a)['operations'][0]
+        self.assertEqual((entry['input_tokens'], entry['output_tokens'], entry['cached_input_tokens']), (120, 30, 20))
+        self.assertEqual(entry['unknown_calls'], 1)
+
     def test_personal_override_records_attempts_without_daily_cap(self):
         cfg = dict(self.a.config(), ai_enabled=True, ai_daily_limit=1)
         with patch.dict('os.environ', {'JOBS_PERSONAL_UNLIMITED_AI': '1'}), \

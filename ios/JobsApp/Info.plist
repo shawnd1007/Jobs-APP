@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>JobsEntraClientID</key>
+    <string>$(JOBS_ENTRA_CLIENT_ID)</string>
+    <key>JobsEntraTenantID</key>
+    <string>$(JOBS_ENTRA_TENANT_ID)</string>
+    <key>JobsAzureHost</key>
+    <string>$(JOBS_AZURE_HOST)</string>
+    <key>CFBundleURLTypes</key>
+    <array><dict><key>CFBundleURLSchemes</key><array><string>msal$(JOBS_ENTRA_CLIENT_ID)</string></array></dict></array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Connect to the Jobs workspace running on your Mac.</string>
     <key>NSAppTransportSecurity</key>

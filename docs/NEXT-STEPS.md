@@ -37,3 +37,19 @@ These are requested improvements, not claims about completed functionality.
 1. Add authenticated accounts, authorization on every workspace operation, user-controlled correction and deletion, and tested isolation across data, caches, backups, and background jobs.
 2. Evaluate deployment, monitoring, consent, accessibility, recovery, and alert delivery for real users. Validate provider usage and cost with a separately authorized trial.
 3. Measure time saved, relevance, correct employer links, repeat use, and willingness to pay. About $10/month is a pricing hypothesis. Fifty boards is an illustrative ambition. Use measured value, reliability, and costs to decide what to offer.
+
+### Personal Azure setup in progress
+
+- Azure App Service and a small PostgreSQL flexible server have been created for personal testing. The server has seven-day automatic backups; one initial backup was observed, but a restore has not been tested. Track costs and free-service usage separately from OpenAI usage.
+- PostgreSQL support is under development. Isolated local PostgreSQL tests use fictional data and cover startup, settings persistence, job tracking, a mocked search, and AI token records. They do not prove the hosted service or signed phone works.
+- Before relying on the hosted service, finish secure App Service database identity and restricted network access, deploy the reviewed backend, test a backup restore and authenticated phone connection, and carry the approved employer-board settings to the new workspace. Do not copy personal résumé or application data without a separate, deliberate migration.
+
+## Prepare for the iPhone App Store
+
+These are future release tasks, not completed features or an approval to publish.
+
+- Enroll in the [Apple Developer Program](https://developer.apple.com/help/account/membership/program-enrollment/) and verify identity. Individual enrollment displays the person's legal name as seller; eligible organizations have additional verification requirements. The program fee is currently $99 per year in the US.
+- Build and sign a distribution version in Xcode, create the app record in App Store Connect, and consider TestFlight for pre-release testing.
+- Prepare the store listing, screenshots, support information, privacy policy, and accurate data-collection disclosures. Explain how résumés and other personal information are handled, including AI processing.
+- Provide Apple with a working way to review the app, including a review account if needed, and submit the app for App Review. If accounts can be created, support account deletion in the app. See [Apple's review guidelines](https://developer.apple.com/app-store/review/guidelines/).
+- Before wider release, implement and verify secure accounts, separation of users' information, durable storage, recovery, and a dependable hosted service. Review Apple's current in-app purchase and subscription rules, banking, tax, and fees before setting a paid offering.

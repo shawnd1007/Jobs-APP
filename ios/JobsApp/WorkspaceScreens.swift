@@ -249,6 +249,7 @@ struct PreferencesScreen: View {
             }
             if !workspace.isSample {
                 Section("Recruiter") {
+                    NavigationLink("AI Usage and Cost") { RecruiterUsageScreen(workspace: workspace) }
                     Button("Start a New Résumé", systemImage: "arrow.counterclockwise", role: .destructive) {
                         confirmingRecruiterReset = true
                     }.disabled(resettingRecruiter || workspace.address.isEmpty)
@@ -302,6 +303,48 @@ struct PreferencesScreen: View {
             _ = try await DashboardAPI.request("/api/recruiter", at: workspace.address, body: body)
             resetMessage = "Recruiter profile cleared. You can upload a new résumé."
         } catch { resetMessage = error.localizedDescription }
+    }
+}
+
+private struct RecruiterUsageScreen: View {
+    let workspace: Workspace
+    @State private var usage: RecruiterUsage?
+    @State private var error: String?
+
+    var body: some View {
+        List {
+            if let usage {
+                Section("About these estimates") {
+                    Text(usage.note)
+                    Text("Pricing checked \(usage.pricingAsOf).")
+                }.font(.footnote)
+                if usage.operations.isEmpty { Text("No recorded recruiter AI calls yet.") }
+                ForEach(Array(usage.operations.enumerated()), id: \.offset) { _, operation in
+                    Section(operation.kind == "career_strategy" ? "Résumé analysis" : "Job comparisons") {
+                        LabeledContent("Started", value: operation.started)
+                        LabeledContent("Model", value: operation.model)
+                        LabeledContent("AI calls", value: "\(operation.calls)")
+                        LabeledContent("Input tokens", value: "\(operation.inputTokens)")
+                        LabeledContent("Cached input tokens", value: "\(operation.cachedInputTokens)")
+                        LabeledContent("Output tokens", value: "\(operation.outputTokens)")
+                        LabeledContent("Estimated known cost", value: operation.estimatedCostUsd.formatted(.currency(code: "USD").precision(.fractionLength(4...6))))
+                        if operation.unknownCalls > 0 {
+                            Text("\(operation.unknownCalls) call(s) have incomplete usage or unknown pricing and are not included in this estimate.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } else if let error { Text(error).foregroundStyle(.red) }
+            else { ProgressView("Loading AI usage…") }
+        }
+        .navigationTitle("AI Usage and Cost")
+        .task { await load() }
+        .refreshable { await load() }
+    }
+
+    private func load() async {
+        do { usage = try await DashboardAPI.recruiterUsage(at: workspace.address); error = nil }
+        catch { self.error = DashboardAPI.connectionMessage(for: error) }
     }
 }
 

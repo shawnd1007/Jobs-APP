@@ -1,12 +1,87 @@
 import SwiftUI
 import UserNotifications
+import MSAL
+
+@MainActor
+final class MicrosoftSession {
+    static let shared = MicrosoftSession()
+    private var application: MSALPublicClientApplication?
+    private var account: MSALAccount?
+
+    private func setting(_ name: String) -> String {
+        (Bundle.main.object(forInfoDictionaryKey: name) as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func applies(to address: String) -> Bool {
+        let host = setting("JobsAzureHost")
+        guard !host.isEmpty, let url = DashboardAPI.webURL(address), url.scheme == "https" else { return false }
+        return url.host?.lowercased() == host.lowercased() && (url.port == nil || url.port == 443)
+    }
+
+    private func client() throws -> MSALPublicClientApplication {
+        if let application { return application }
+        let clientID = setting("JobsEntraClientID"), tenantID = setting("JobsEntraTenantID")
+        guard !clientID.isEmpty, !tenantID.isEmpty,
+              let authorityURL = URL(string: "https://login.microsoftonline.com/\(tenantID)") else {
+            throw DashboardAPI.ServerError(status: 0, message: "Microsoft sign-in is not configured for this build.")
+        }
+        let authority = try MSALAADAuthority(url: authorityURL)
+        let config = MSALPublicClientApplicationConfig(clientId: clientID, redirectUri: "msal\(clientID)://auth", authority: authority)
+        let result = try MSALPublicClientApplication(configuration: config)
+        application = result
+        return result
+    }
+
+    private var scopes: [String] { ["api://\(setting("JobsEntraClientID"))/user_impersonation"] }
+
+    func signIn() async throws {
+        let client = try client()
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first(where: { $0.activationState == .foregroundActive }),
+              var controller = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+            throw DashboardAPI.ServerError(status: 0, message: "Could not open Microsoft sign-in.")
+        }
+        while let presented = controller.presentedViewController { controller = presented }
+        let web = MSALWebviewParameters(authPresentationViewController: controller)
+        let parameters = MSALInteractiveTokenParameters(scopes: scopes, webviewParameters: web)
+        let result: MSALResult = try await withCheckedThrowingContinuation { continuation in
+            client.acquireToken(with: parameters) { result, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let result { continuation.resume(returning: result) }
+                else { continuation.resume(throwing: DashboardAPI.ServerError(status: 0, message: "Microsoft sign-in did not finish.")) }
+            }
+        }
+        account = result.account
+    }
+
+    func accessToken(for address: String) async throws -> String? {
+        guard applies(to: address) else { return nil }
+        let client = try client()
+        guard let current = try (account ?? client.allAccounts().first) else {
+            throw DashboardAPI.ServerError(status: 401, message: "Sign in with Microsoft in Server Settings.")
+        }
+        let parameters = MSALSilentTokenParameters(scopes: scopes, account: current)
+        let result: MSALResult = try await withCheckedThrowingContinuation { continuation in
+            client.acquireTokenSilent(with: parameters) { result, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let result { continuation.resume(returning: result) }
+                else { continuation.resume(throwing: DashboardAPI.ServerError(status: 401, message: "Sign in with Microsoft again.")) }
+            }
+        }
+        account = result.account
+        return result.accessToken
+    }
+}
 
 @main
 struct JobsApp: App {
     @UIApplicationDelegateAdaptor(NotificationsDelegate.self) private var notificationDelegate
 
     var body: some Scene {
-        WindowGroup { WorkspaceView() }
+        WindowGroup {
+            WorkspaceView().onOpenURL { url in
+                _ = MSALPublicClientApplication.handleMSALResponse(url, sourceApplication: nil)
+            }
+        }
     }
 }
 
@@ -435,6 +510,16 @@ private struct ServerSettings: View {
                     Text("Enter your Mac’s private address. A hostname or IP alone uses port 8084.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+                if let normalized = DashboardAPI.serverAddress(address), MicrosoftSession.shared.applies(to: normalized) {
+                    Section("Microsoft sign-in") {
+                        Button("Sign in with Microsoft") {
+                            Task {
+                                do { try await MicrosoftSession.shared.signIn(); failure = nil }
+                                catch { failure = error.localizedDescription }
+                            }
+                        }
+                    }
                 }
                 if checking { ProgressView("Checking workspace…") }
                 if let failure { Text(failure).foregroundStyle(.red) }

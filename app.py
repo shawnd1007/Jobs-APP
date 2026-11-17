@@ -43,7 +43,27 @@ REQUEST_SECONDS = 12
 logging.basicConfig(filename=DATA / 'errors.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 def now(): return dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
-def config(): return prototype.settings(json.loads((ROOT / 'config.json').read_text(encoding='utf-8-sig')), DATA)
+def postgres_enabled(): return bool(os.environ.get('JOBS_POSTGRES_DSN'))
+
+def config():
+    path = ROOT / ('config.example.json' if postgres_enabled() else 'config.json')
+    base = json.loads(path.read_text(encoding='utf-8-sig'))
+    if postgres_enabled():
+        import postgres_store
+        with connect() as c:
+            return prototype.settings(base, DATA, postgres_store.read_preferences(c))
+    return prototype.settings(base, DATA)
+
+def persist_preferences(saved):
+    if postgres_enabled():
+        import postgres_store
+        with connect() as c:
+            postgres_store.write_preferences(c, saved)
+    else:
+        path = DATA / 'preferences.json'
+        temp = path.with_suffix('.tmp')
+        temp.write_text(json.dumps(saved, indent=2) + '\n', encoding='utf-8')
+        os.replace(temp, path)
 
 def service(): return sys.modules[__name__]
 
@@ -55,6 +75,10 @@ class Connection(sqlite3.Connection):
         try:return super().__exit__(*args)
         finally:self.close()
 def connect():
+    if postgres_enabled():
+        import postgres_store
+        ca_file = os.environ.get('JOBS_POSTGRES_CA_FILE', '/etc/ssl/certs/ca-certificates.crt')
+        return postgres_store.Connection(postgres_store.connect_azure(os.environ['JOBS_POSTGRES_DSN'], ca_file))
     c=sqlite3.connect(DB, timeout=30, factory=Connection); c.row_factory=sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON'); c.execute('PRAGMA journal_mode=WAL'); return c
 def clean(s): return html.unescape(re.sub('<[^>]+>', ' ', s or '')).strip()
@@ -239,7 +263,13 @@ def migrate_posting_identities(connection):
 
 def init():
     with connect() as c:
-        c.executescript('''CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, identity TEXT UNIQUE NOT NULL, fallback TEXT, listing TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
+        if getattr(c, 'postgres_connection', False):
+            import postgres_store
+            postgres_store.initialize_empty_schema(c)
+            # Configuration opens a separate connection during startup.
+            c.commit()
+        else:
+            c.executescript('''CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, identity TEXT UNIQUE NOT NULL, fallback TEXT, listing TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS jobs_fallback ON jobs(fallback);
         CREATE TABLE IF NOT EXISTS tracking(job_id INTEGER PRIMARY KEY REFERENCES jobs(id),status TEXT NOT NULL DEFAULT 'Needs Verification',application_date TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',follow_up TEXT NOT NULL DEFAULT '',updated TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS runs(id INTEGER PRIMARY KEY,started TEXT NOT NULL,finished TEXT,state TEXT NOT NULL,report TEXT NOT NULL,trigger TEXT);
@@ -249,14 +279,14 @@ def init():
             state TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS reviews(job_id INTEGER PRIMARY KEY REFERENCES jobs(id),decision TEXT NOT NULL DEFAULT 'Pending',note TEXT NOT NULL DEFAULT '',reviewer TEXT NOT NULL DEFAULT '',checks TEXT NOT NULL DEFAULT '{}',updated TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 0);
         PRAGMA user_version=1;''')
-        if 'reserved' not in [r[1] for r in c.execute('PRAGMA table_info(usage)')]:c.execute('ALTER TABLE usage ADD COLUMN reserved INTEGER NOT NULL DEFAULT 0')
-        if 'trigger' not in [r[1] for r in c.execute('PRAGMA table_info(runs)')]:
-            c.execute('ALTER TABLE runs ADD COLUMN trigger TEXT')
-        c.execute('PRAGMA user_version=4')
-        prototype.init(c)
+            if 'reserved' not in [r[1] for r in c.execute('PRAGMA table_info(usage)')]:c.execute('ALTER TABLE usage ADD COLUMN reserved INTEGER NOT NULL DEFAULT 0')
+            if 'trigger' not in [r[1] for r in c.execute('PRAGMA table_info(runs)')]:
+                c.execute('ALTER TABLE runs ADD COLUMN trigger TEXT')
+            c.execute('PRAGMA user_version=4')
+            prototype.init(c)
         recruiter.init(c)
         c.execute("UPDATE runs SET state='interrupted',finished=? WHERE state='running'",(now(),))
-        if not c.execute('SELECT 1 FROM jobs LIMIT 1').fetchone():
+        if not getattr(c, 'postgres_connection', False) and not c.execute('SELECT 1 FROM jobs LIMIT 1').fetchone():
             source=SEED.read_text(encoding='utf-8-sig')
             for a in re.findall(r'<article\b.*?</article>',source,re.S):
                 def field(cls):
@@ -357,8 +387,8 @@ def add_external_application(payload):
                        external_application=True, source='Added by you',
                        availability='Needs Verification', last_verified='',
                        application_evidence='Posting details entered by you.')
-        job_id = c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?)',
-                           ('external:' + uuid4().hex, fallback, json.dumps(listing), stamp, stamp)).lastrowid
+        job_id = c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?) RETURNING id',
+                           ('external:' + uuid4().hex, fallback, json.dumps(listing), stamp, stamp)).fetchone()[0]
         c.execute("""INSERT INTO tracking(job_id,status,application_date,follow_up,notes,updated)
                      VALUES(?,?,?,?,?,?)""",
                   (job_id, status, dates['application_date'], dates['follow_up'], notes, stamp))
@@ -366,7 +396,7 @@ def add_external_application(payload):
 
 
 def upsert(c,j):
-    if not c.in_transaction:
+    if getattr(c, 'postgres_connection', False) or not c.in_transaction:
         c.execute('BEGIN IMMEDIATE')
     ident=identity(j['url']); fallback='|'.join(norm(str(j.get(k,''))) for k in ('employer','title','location'))
     row=c.execute('SELECT * FROM jobs WHERE identity=?',(ident,)).fetchone()
@@ -401,9 +431,9 @@ def upsert(c,j):
         c.execute('UPDATE jobs SET identity=?,fallback=?,listing=?,updated=? WHERE id=?',
                   (ident, fallback, json.dumps(old), stamp, row['id']))
         return row['id'],False
-    cur=c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?)',(ident,fallback,json.dumps(j),stamp,stamp))
-    c.execute('INSERT INTO tracking(job_id,updated) VALUES(?,?)',(cur.lastrowid,stamp))
-    return cur.lastrowid,True
+    job_id=c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?) RETURNING id',(ident,fallback,json.dumps(j),stamp,stamp)).fetchone()[0]
+    c.execute('INSERT INTO tracking(job_id,updated) VALUES(?,?)',(job_id,stamp))
+    return job_id,True
 def records():
     with connect() as c:
         result=[]
@@ -1357,6 +1387,10 @@ def generic_posting(url,report,key):
                  salary_type='base', salary_text=pay)
     return j
 def backup():
+    if postgres_enabled():
+        if os.environ.get('JOBS_POSTGRES_MANAGED_BACKUPS') != '1':
+            raise RuntimeError('Managed PostgreSQL backups must be verified before searching')
+        return
     folder=DATA/'backups';folder.mkdir(exist_ok=True)
     dest=folder/('jobs-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-%f')+'.sqlite3')
     with connect() as src, sqlite3.connect(dest, factory=Connection) as target:src.backup(target)
@@ -1368,7 +1402,7 @@ def firecrawl(endpoint,payload,report):
     if not key: raise ValueError('Firecrawl key not configured; public board discovery remains available')
     day=now()[:10]
     with connect() as c:
-        c.execute('INSERT OR IGNORE INTO usage(day) VALUES(?)',(day,))
+        c.execute('INSERT INTO usage(day) VALUES(?) ON CONFLICT(day) DO NOTHING',(day,))
         usage=c.execute('SELECT requests,reserved FROM usage WHERE day=?',(day,)).fetchone();count=usage[0]
         if count>=config()['max_firecrawl_requests_per_day']:raise ValueError('Daily Firecrawl request budget reached')
         reserve=2*payload.get('limit',5)+2 if endpoint=='search' else 5
@@ -1427,9 +1461,9 @@ def run_pipeline(trigger='manual', config_override=None):
 
     try:
         with connect() as c:
-            cursor = c.execute('INSERT INTO runs(started,state,report,trigger) VALUES(?,?,?,?)',
+            cursor = c.execute('INSERT INTO runs(started,state,report,trigger) VALUES(?,?,?,?) RETURNING id',
                                (now(), 'running', json.dumps(report), trigger))
-            run_id = cursor.lastrowid
+            run_id = cursor.fetchone()[0]
             searches = prototype.saved_searches(c)
         cfg = config_override if config_override is not None else config()
         backup()
@@ -1911,6 +1945,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path=up.urlsplit(self.path).path
         if path=='/api/recruiter':return self.send(200,recruiter.read(service()))
+        if path=='/api/recruiter/usage':return self.send(200,recruiter.usage_report(service()))
         if path=='/api/dashboard':return self.send(200,snapshot())
         if path=='/api/v1/health':return self.send(200,{'status':'ok','api_version':1})
         if path=='/api/v1/search-status':return self.send(200,search_status())
@@ -2031,4 +2066,4 @@ if __name__=='__main__':
         LOCK.acquire();print(json.dumps(run_pipeline(),indent=2))
     else:
         threading.Thread(target=schedule,daemon=True).start()
-        ThreadingHTTPServer((os.environ.get('JOBS_BIND_HOST', '0.0.0.0'), 8084), Handler).serve_forever()
+        ThreadingHTTPServer((os.environ.get('JOBS_BIND_HOST', '0.0.0.0'), int(os.environ.get('PORT', '8084'))), Handler).serve_forever()

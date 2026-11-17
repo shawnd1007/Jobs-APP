@@ -332,6 +332,24 @@ struct SavedApplicationDraft: Decodable {
     let updated: String
 }
 
+struct RecruiterUsage: Decodable {
+    struct Operation: Decodable {
+        let operation: Int?
+        let kind: String
+        let model: String
+        let started: String
+        let calls: Int
+        let inputTokens: Int
+        let outputTokens: Int
+        let cachedInputTokens: Int
+        let unknownCalls: Int
+        let estimatedCostUsd: Double
+    }
+    let operations: [Operation]
+    let pricingAsOf: String
+    let note: String
+}
+
 enum DashboardAPI {
     struct Snapshot {
         let dashboard: Dashboard
@@ -392,6 +410,13 @@ enum DashboardAPI {
         return try decoder.decode(SearchStatus.self, from: data)
     }
 
+    static func recruiterUsage(at address: String) async throws -> RecruiterUsage {
+        let data = try await request("/api/recruiter/usage", at: address)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(RecruiterUsage.self, from: data)
+    }
+
     static func applicationPrep(jobID: Int, at address: String) async throws -> ApplicationPrep {
         let data = try await request("/api/jobs/\(jobID)/application-prep", at: address)
         let decoder = JSONDecoder()
@@ -435,6 +460,9 @@ enum DashboardAPI {
         }
         var request = URLRequest(url: url, timeoutInterval: path.hasSuffix("/ai-review") ? 105 : (path.hasSuffix("/search-status") ? 5 : 15))
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let token = try await MicrosoftSession.shared.accessToken(for: address) {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         if let body {
             request.httpMethod = "POST"
             request.httpBody = body

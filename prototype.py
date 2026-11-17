@@ -21,9 +21,11 @@ PREFERENCE_KEYS = ('profile', 'categories', 'salary_floor', 'salary_policy',
                    'remote_hiring_locations', 'legacy_geography')
 
 
-def settings(base, data):
+def settings(base, data, stored=None):
     path = data / 'preferences.json'
-    if path.exists():
+    if stored is not None:
+        base.update(stored)
+    elif path.exists():
         base.update(json.loads(path.read_text(encoding='utf-8')))
     base.setdefault('preferred_skills', [])
     base.setdefault('target_locations', [])
@@ -115,11 +117,8 @@ def save_preferences(a, payload):
             if not isinstance(group['label'], str) or not 1 <= len(group['label']) <= 120: raise ValueError('Invalid skill label')
             if type(group['points']) is not int or not 0 <= group['points'] <= 25: raise ValueError('Invalid skill weight')
             if not isinstance(group['terms'], list) or not group['terms'] or len(group['terms']) > 30 or any(not isinstance(t, str) or not 1 <= len(t) <= 80 for t in group['terms']): raise ValueError('Invalid skill terms')
-        path = a.DATA / 'preferences.json'
         saved = {k: updated[k] for k in PREFERENCE_KEYS if k in updated}
-        temp = path.with_suffix('.tmp')
-        temp.write_text(json.dumps(saved, indent=2) + '\n', encoding='utf-8')
-        os.replace(temp, path)
+        a.persist_preferences(saved)
     return 200, {'saved': True}
 
 
@@ -129,7 +128,7 @@ def public_preferences(cfg):
 
 def source_result(a, source, state, count=0, error=''):
     with a.connect() as c:
-        c.execute('INSERT OR REPLACE INTO source_health VALUES(?,?,?,?,?)',
+        c.execute('INSERT INTO source_health VALUES(?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET checked=excluded.checked,state=excluded.state,count=excluded.count,error=excluded.error',
                   (source, a.now(), state, count, error[:300]))
 
 
@@ -184,7 +183,7 @@ def _ai_review(a, job_id):
         c.execute('BEGIN IMMEDIATE')
         cached = c.execute('SELECT * FROM ai_reviews WHERE job_id=?', (job_id,)).fetchone()
         if cached and cached['fingerprint'] == digest: return 200, {'cached': True}
-        c.execute('INSERT OR IGNORE INTO ai_usage VALUES(?,0)', (a.now()[:10],))
+        c.execute('INSERT INTO ai_usage VALUES(?,0) ON CONFLICT(day) DO NOTHING', (a.now()[:10],))
         n = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()[0]
         if not unlimited_personal_testing() and n >= cfg['ai_daily_limit']: return 429, {'error': 'Daily AI request limit reached.'}
         c.execute('UPDATE ai_usage SET attempts=attempts+1 WHERE day=?', (a.now()[:10],))
@@ -208,7 +207,7 @@ def _ai_review(a, job_id):
         if set(advice) != set(schema['required']) or not isinstance(advice['summary'], str) or any(not isinstance(advice[k], list) or any(not isinstance(v, str) for v in advice[k]) for k in schema['required'][1:]):
             raise ValueError('Invalid AI advice structure')
         with a.connect() as c:
-            c.execute('INSERT OR REPLACE INTO ai_reviews VALUES(?,?,?,?,?,?)', (job_id, digest, a.now(), cfg['ai_model'], json.dumps(advice), json.dumps(result.get('usage', {}))))
+            c.execute('INSERT INTO ai_reviews VALUES(?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET fingerprint=excluded.fingerprint,created=excluded.created,model=excluded.model,advice=excluded.advice,usage=excluded.usage', (job_id, digest, a.now(), cfg['ai_model'], json.dumps(advice), json.dumps(result.get('usage', {}))))
         return 200, {'saved': True}
     except Exception:
         # Provider bodies and keys never enter the browser or logs.
@@ -291,7 +290,7 @@ def match_alert_state(a, job, search):
 
 
 def record_match_alerts(c, job_id, search_ids, created):
-    c.executemany('INSERT OR IGNORE INTO match_alerts(search_id,job_id,created) VALUES(?,?,?)',
+    c.executemany('INSERT INTO match_alerts(search_id,job_id,created) VALUES(?,?,?) ON CONFLICT(search_id,job_id) DO NOTHING',
                   [(search_id, job_id, created) for search_id in search_ids])
 
 
