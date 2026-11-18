@@ -2,6 +2,30 @@ import XCTest
 
 final class JobsSearchUITests: XCTestCase {
     @MainActor
+    func testRecruiterProgressAndActivity() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18087"]
+        app.launch()
+
+        let forYou = app.tabBars.buttons["For You"]
+        XCTAssertTrue(forYou.waitForExistence(timeout: 20))
+        forYou.tap()
+        let search = app.buttons["Find my matches"]
+        XCTAssertTrue(search.waitForExistence(timeout: 12))
+        search.tap()
+
+        XCTAssertTrue(app.staticTexts["Checking employer boards"].waitForExistence(timeout: 12))
+        XCTAssertTrue(app.staticTexts["Comparing jobs with your experience"].waitForExistence(timeout: 18))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "of 6 complete"))
+            .firstMatch.waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 22))
+        app.buttons["Search activity"].tap()
+        XCTAssertTrue(app.navigationBars["Search activity"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 8))
+    }
+
+    @MainActor
     func testSampleBrowseFiltersAndOffersLiveConnection() {
         continueAfterFailure = false
         let app = XCUIApplication()

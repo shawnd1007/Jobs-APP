@@ -285,7 +285,7 @@ def init():
                 c.execute('ALTER TABLE runs ADD COLUMN trigger TEXT')
             c.execute('PRAGMA user_version=4')
             prototype.init(c)
-        recruiter.init(c)
+        recruiter.init(c, now)
         c.execute("UPDATE runs SET state='interrupted',finished=? WHERE state='running'",(now(),))
         if not getattr(c, 'postgres_connection', False) and not c.execute('SELECT 1 FROM jobs LIMIT 1').fetchone():
             source=SEED.read_text(encoding='utf-8-sig')
@@ -1438,18 +1438,29 @@ def release_pending_alert(connection, job_id, previous, current, searches):
         set_pending_alert(connection, job_id, False)
 
 
-def run_pipeline(trigger='manual', config_override=None):
+def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=None):
     report={'new_qualified':0,'new_review':0,'reverified':0,'newly_closed':0,'duplicates':0,'failures':[],'top_new':[],'firecrawl_requests':0,'firecrawl_credits_reported':0,'log':[]}
     run_id = None
     deadline = time.monotonic() + SEARCH_SECONDS
     token = SEARCH_DEADLINE.set(deadline)
     SEARCH_ACTIVE.set()
     report['progress'] = {'stage': 'Preparing search'}
+    if recruiter_version is not None:
+        report['recruiter_version'] = recruiter_version
 
     def progress(stage, completed=None, total=None, source=None):
         report['progress'] = dict(stage=stage, completed=completed, total=total, source=source)
         with connect() as c:
             c.execute('UPDATE runs SET report=? WHERE id=?', (json.dumps(report), run_id))
+            if recruiter_version is not None:
+                recruiter.record_activity(c, recruiter_version, now(), report['progress'])
+
+    def source_issue(stage, source, error):
+        if recruiter_version is not None:
+            with connect() as c:
+                recruiter.record_activity(c, recruiter_version, now(), {
+                    'stage': stage, 'source': source, 'reason': type(error).__name__,
+                })
 
     def time_left(remaining, kind):
         if time.monotonic() < deadline:
@@ -1489,7 +1500,8 @@ def run_pipeline(trigger='manual', config_override=None):
             for offset in range(total):
                 if not time_left(total - offset, 'public discovery queries'):
                     break
-                progress('Discovering employer sources', offset, total)
+                stage = 'Searching the web for employers' if recruiter_version is not None else 'Discovering employer sources'
+                progress(stage, offset, total)
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
                 domains=['jobs.ashbyhq.com','job-boards.greenhouse.io','jobs.lever.co','myworkdayjobs.com','jobs.smartrecruiters.com','recruitee.com']
                 regions=discovery_regions(cfg)
@@ -1504,7 +1516,9 @@ def run_pipeline(trigger='manual', config_override=None):
                         if b:boards.add(b)
                         elif url.startswith('https://') and re.search(r'(myworkdayjobs\.com|smartrecruiters\.com|/careers?/|/jobs?/)',url):discoveries.append(url)
                     report['log'].append('Public web discovery: '+category)
-                except Exception as e:report['failures'].append('Public web discovery: '+type(e).__name__)
+                except Exception as e:
+                    report['failures'].append('Public web discovery: '+type(e).__name__)
+                    source_issue('Web discovery could not finish', None, e)
                 pause()
         if cfg['firecrawl_enabled'] and key:
             regions = discovery_regions(cfg)
@@ -1514,7 +1528,8 @@ def run_pipeline(trigger='manual', config_override=None):
             for offset in range(total):
                 if not time_left(total - offset, 'provider discovery queries'):
                     break
-                progress('Discovering employer sources', offset, total)
+                stage = 'Searching additional job sources' if recruiter_version is not None else 'Discovering employer sources'
+                progress(stage, offset, total)
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
                 try:
                     hits=firecrawl('search',{'query':category+' jobs '+regions[offset % len(regions)]+' employer careers','limit':cfg['search_results'],'sources':['web'],'tbs':'qdr:w'},report)
@@ -1522,7 +1537,9 @@ def run_pipeline(trigger='manual', config_override=None):
                         b=board_identity(hit.get('url',''))
                         if b:boards.add(b)
                         elif hit.get('url'): discoveries.append(hit['url'])
-                except Exception as e:report['failures'].append('Firecrawl discovery: '+type(e).__name__+': '+str(e)[:160])
+                except Exception as e:
+                    report['failures'].append('Firecrawl discovery: '+type(e).__name__+': '+str(e)[:160])
+                    source_issue('Additional discovery could not finish', None, e)
         else:report['log'].append('Public board mode: Firecrawl is disabled or no key is configured.')
         held_keys = set()
         for job in existing:
@@ -1638,6 +1655,7 @@ def run_pipeline(trigger='manual', config_override=None):
             except Exception as e:
                 prototype.source_result(service(),platform+'/'+board,'error',error=type(e).__name__+': '+str(e))
                 report['failures'].append(platform+'/'+board+': '+type(e).__name__+': '+str(e)[:160]);logging.exception('Board failed %s/%s',platform,board)
+                source_issue('Employer board could not finish', board, e)
                 # Failures never imply closure; queue freshness expires independently.
             progress('Checking employer boards', index + 1, len(board_list))
             pause()
@@ -1702,6 +1720,7 @@ def run_pipeline(trigger='manual', config_override=None):
                     candidates[ident] = (j, matched)
             except Exception as e:
                 prototype.source_result(service(),url,'manual review',error=type(e).__name__+': '+str(e))
+                source_issue('Posting needs manual review', up.urlsplit(url).hostname, e)
                 if isinstance(e, TimeoutError) or (isinstance(e, urllib.error.URLError) and not isinstance(e, urllib.error.HTTPError)):
                     report['failures'].append('Employer page could not be reached: ' + (up.urlsplit(url).hostname or 'unknown employer'))
                 report['log'].append('Employer URL needs manual review: '+url+' ('+type(e).__name__+': '+str(e)[:100]+')')
@@ -1715,12 +1734,16 @@ def run_pipeline(trigger='manual', config_override=None):
         limit = cfg['max_new_candidates']
         new_count = 0
         report['deferred_candidates'] = 0
-        progress('Saving results', 0, min(len(ranked), limit))
+        if recruiter_version is not None:
+            progress('Saving openings')
+        else:
+            progress('Saving results', 0, min(len(ranked), limit))
         for index, (job, matched) in enumerate(ranked):
             if new_count >= limit:
                 report['deferred_candidates'] = len(ranked) - index
                 break
-            progress('Saving results', new_count, min(len(ranked), limit))
+            if recruiter_version is None:
+                progress('Saving results', new_count, min(len(ranked), limit))
             job = finalize(job, cfg, report, check_posting=bool(matched) or cfg.get('recruiter_discovery', False))
             with connect() as c:
                 job_id, added = upsert(c, job)
@@ -1733,6 +1756,8 @@ def run_pipeline(trigger='manual', config_override=None):
                 report['duplicates'] += 1
             else:
                 new_count += 1
+                if recruiter_version is not None:
+                    progress('Saving openings', new_count)
                 if job['queue'] == 'Confirmed':
                     report['new_qualified'] += 1
                     report['top_new'].append({key: job[key] for key in ('title', 'employer', 'url', 'score')})
@@ -1755,8 +1780,15 @@ def run_pipeline(trigger='manual', config_override=None):
         try:
             if run_id:
                 with connect() as c:
+                    stamp = now()
                     c.execute('UPDATE runs SET finished=?,state=?,report=? WHERE id=?',
-                              (now(), report.get('state', 'failed'), json.dumps(report), run_id))
+                              (stamp, report.get('state', 'failed'), json.dumps(report), run_id))
+                    if recruiter_version is not None:
+                        recruiter.record_activity(c, recruiter_version, stamp, {
+                            'stage': 'Employer checks finished',
+                            'issues': len(report['failures']),
+                            'reason': report.get('state', 'failed'),
+                        })
         finally:
             SEARCH_DEADLINE.reset(token)
             SEARCH_ACTIVE.clear()
@@ -1952,8 +1984,16 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
     def do_GET(self):
-        path=up.urlsplit(self.path).path
-        if path=='/api/recruiter':return self.send(200,recruiter.read(service()))
+        target=up.urlsplit(self.path)
+        path=target.path
+        if path == '/api/recruiter':
+            status_only = up.parse_qs(target.query).get('status') == ['1']
+            return self.send(200, recruiter.read(service(), status_only=status_only))
+        if path == '/api/recruiter/activity':
+            before = up.parse_qs(target.query).get('before', [''])[0]
+            if before and not re.fullmatch(r'[0-9]{1,18}', before):
+                return self.send(400, {'error': 'Invalid activity cursor.'})
+            return self.send(200, recruiter.activity(service(), int(before) if before else None))
         if path=='/api/recruiter/resume':return self.send(200,recruiter.resume(service()))
         if path=='/api/recruiter/usage':return self.send(200,recruiter.usage_report(service()))
         if path=='/api/dashboard':return self.send(200,snapshot())

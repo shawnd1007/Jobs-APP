@@ -154,6 +154,56 @@ class RecruiterTests(unittest.TestCase):
         self.assertTrue(result['skills'])
         self.assertTrue(result['roles'])
 
+    def test_interrupted_analysis_keeps_resume_for_retry(self):
+        recruiter.write(self.a, dict(version=1, stage='analyzing', resume=MARA, matches=[], error=''))
+        with self.a.connect() as c: recruiter.init(c, self.a.now)
+        self.assertEqual(recruiter.read(self.a)['stage'], 'interrupted')
+        recruiter.start(self.a, dict(action='analyze', version=1))
+        self.assertEqual(self.wait()['stage'], 'ready')
+        activity = recruiter.activity(self.a)['entries']
+        self.assertEqual([(event['operation'], event['progress']['stage']) for event in activity],
+                         [(2, 'Career profile ready'), (2, 'Understanding your experience'),
+                          (1, 'Interrupted by a server restart')])
+
+    def test_current_search_progress_and_failed_attempt_history_survive_retry(self):
+        state = self.analyze()
+        board_progress, comparison_progress = [], []
+        board_jobs = self.a.board_jobs
+        actual_match = recruiter.match
+
+        def observed_board(platform, board):
+            board_progress.append(recruiter.read(self.a)['progress'])
+            return board_jobs(platform, board)
+
+        def fail_second_comparison(a, state, job):
+            comparison_progress.append(recruiter.read(a)['progress'])
+            if len(comparison_progress) == 2:
+                raise recruiter.AIRequestError('The AI service timed out.')
+            return actual_match(a, state, job)
+
+        with patch.object(self.a, 'board_jobs', side_effect=observed_board), \
+             patch.object(recruiter, 'match', side_effect=fail_second_comparison):
+            status, _ = recruiter.start(self.a, dict(action='search', version=state['version'], preferences=PREFS))
+            self.assertEqual(status, 202)
+            failed = self.wait()
+        self.assertEqual(failed['stage'], 'failed')
+        self.assertEqual(board_progress[0]['stage'], 'Checking employer boards')
+        self.assertEqual(board_progress[0]['source'], 'fictional-clinic')
+        self.assertEqual([p['completed'] for p in comparison_progress], [0, 1])
+        self.assertEqual(comparison_progress[1]['total'], 6)
+
+        completed = self.search()
+        events = list(reversed(recruiter.activity(self.a)['entries']))
+        failed_events = [entry for entry in events if entry['operation'] == failed['version']]
+        self.assertEqual(failed_events[0]['progress']['stage'], 'Preparing search')
+        self.assertEqual(failed_events[-1]['progress']['reason'], 'The AI service timed out.')
+        self.assertEqual(events[-1]['operation'], completed['version'])
+        self.assertEqual(events[-1]['progress']['stage'], 'Search complete')
+        self.assertEqual(events[-1]['progress']['completed'], 6)
+        self.assertNotIn(MARA, json.dumps(events))
+        earlier = recruiter.activity(self.a, before=failed_events[-1]['id'])['entries']
+        self.assertEqual(earlier[0]['id'], failed_events[-2]['id'])
+
     def test_recruiter_status_loads_settings_once_for_the_shortlist(self):
         self.analyze()
         expected = self.search()
@@ -162,13 +212,10 @@ class RecruiterTests(unittest.TestCase):
             refreshed = recruiter.read(self.a)
         self.assertEqual(refreshed['matches'], expected['matches'])
         load_settings.assert_called_once_with()
-
-    def test_interrupted_analysis_keeps_resume_for_retry(self):
-        recruiter.write(self.a, dict(version=1, stage='analyzing', resume=MARA, matches=[], error=''))
-        with self.a.connect() as c: recruiter.init(c)
-        self.assertEqual(recruiter.read(self.a)['stage'], 'interrupted')
-        recruiter.start(self.a, dict(action='analyze', version=1))
-        self.assertEqual(self.wait()['stage'], 'ready')
+        with patch.object(self.a, 'records', side_effect=AssertionError('Status must not load jobs')), \
+             patch.object(self.a, 'config', side_effect=AssertionError('Status must not load settings')):
+            status = recruiter.read(self.a, status_only=True)
+        self.assertEqual(status, {key: expected.get(key) for key in ('version', 'stage', 'progress')})
 
     def test_pay_and_geography_constraints_override_ai(self):
         self.analyze(); self.search()

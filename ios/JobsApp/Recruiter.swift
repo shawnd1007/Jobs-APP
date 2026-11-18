@@ -4,6 +4,25 @@ import MapKit
 import QuickLook
 
 struct RecruiterState: Decodable {
+    struct Status: Decodable {
+        let version: Int
+        let stage: String
+        let progress: Progress?
+    }
+
+    struct Progress: Decodable {
+        let stage: String
+        let completed, total, issues: Int?
+        let source, reason: String?
+
+        var countLabel: String? {
+            guard let completed else { return nil }
+            if let total, total > 0 { return "\(completed) of \(total) complete" }
+            if total == nil { return "\(completed) saved" }
+            return nil
+        }
+    }
+
     struct Evidence: Decodable { let label, evidence, kind: String }
     struct Role: Decodable { let title, reason, evidence: String }
     struct Strategy: Decodable {
@@ -35,6 +54,7 @@ struct RecruiterState: Decodable {
     let coverage: String?
     let deferred: Int?
     let updated: String?
+    var progress: Progress?
     var busy: Bool { ["analyzing", "discovering", "matching"].contains(stage) }
 }
 
@@ -69,7 +89,7 @@ struct RecruiterHome: View {
     @State private var preferences = RecruiterPreferences()
     @State private var importing = false
     @State private var reading = false
-    @State private var sending = false
+    @State private var submissionTitle: String?
     @State private var error: String?
     @State private var selectedGroup = "recommended"
     @State private var editingPreferences = false
@@ -79,14 +99,21 @@ struct RecruiterHome: View {
     @State private var lastVersion = -1
     @State private var showingStrategy = false
     @State private var showingResume = false
+    @State private var showingActivity = false
+    @State private var latestLoad = UUID()
+    @State private var lastStatusCheck: Date?
+    @State private var lastRecruiterLoad: Date?
+    @State private var statusUnavailable = false
 
-    private var busy: Bool { reading || sending || state?.busy == true }
+    private var busy: Bool { reading || submissionTitle != nil || state?.busy == true }
     private var stageTitle: String {
+        if state?.busy == true, let progress = state?.progress { return progress.stage }
+        if let submissionTitle { return submissionTitle }
         switch state?.stage {
-        case "analyzing": "Understanding your experience"
-        case "discovering": "Finding and checking openings"
-        case "matching": "Comparing jobs with your experience"
-        default: "Reading your résumé"
+        case "analyzing": return "Understanding your experience"
+        case "discovering": return "Finding and checking openings"
+        case "matching": return "Comparing jobs with your experience"
+        default: return "Reading your résumé"
         }
     }
 
@@ -118,6 +145,10 @@ struct RecruiterHome: View {
                             }.buttonStyle(.bordered)
                         }
                     }.jobCardSurface()
+                }
+                if state != nil {
+                    Button("Search activity", systemImage: "clock.arrow.circlepath") { showingActivity = true }
+                        .buttonStyle(.bordered)
                 }
                 if let strategy = state?.strategy {
                     if state?.stage == "ready" || editingPreferences {
@@ -196,10 +227,11 @@ struct RecruiterHome: View {
         }
         .onDisappear { workspace.choosingRecruiterFile = false }
         .sheet(isPresented: $showingResume) { MasterResumeView(workspace: workspace) }
+        .sheet(isPresented: $showingActivity) { RecruiterActivityView(address: workspace.address) }
         .task(id: workspace.address) {
             while !Task.isCancelled {
-                if !workspace.choosingRecruiterFile { await reload() }
-                do { try await Task.sleep(for: .seconds(state?.busy == true ? 1 : 5)) }
+                if !workspace.choosingRecruiterFile { await reload(polling: true) }
+                do { try await Task.sleep(for: .seconds(state?.busy == true ? 3 : 10)) }
                 catch { return }
             }
         }
@@ -226,9 +258,33 @@ struct RecruiterHome: View {
     }
 
     private var progress: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ProgressView(stageTitle).font(.headline)
-            Text("You can leave this screen. Your progress is saved, and your matches will be here when you return.")
+        VStack(alignment: .leading, spacing: 10) {
+            if let current = state?.progress, state?.busy == true,
+               let completed = current.completed, let total = current.total, total > 0 {
+                ProgressView(value: Double(min(completed, total)), total: Double(total)) {
+                    Text(current.stage).font(.headline)
+                } currentValueLabel: {
+                    Text(current.countLabel ?? "")
+                }
+            } else {
+                ProgressView(stageTitle).font(.headline)
+                if state?.busy == true, let count = state?.progress?.countLabel {
+                    Text(count).font(.subheadline)
+                }
+            }
+            if state?.busy == true, let source = state?.progress?.source {
+                Text(source).font(.subheadline).foregroundStyle(.secondary)
+            }
+            if statusUnavailable {
+                Label("Can’t reach Jobs for an update. The search may still be running.",
+                      systemImage: "wifi.exclamationmark")
+                    .font(.footnote)
+            }
+            if state?.busy == true, let lastStatusCheck {
+                Text("Status checked at \(lastStatusCheck.formatted(date: .omitted, time: .standard))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("You can leave this screen and come back to your results.")
                 .font(.subheadline).foregroundStyle(.secondary)
         }.jobCardSurface()
     }
@@ -345,6 +401,10 @@ struct RecruiterHome: View {
     private var results: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Your shortlist").font(.title.bold())
+            if state?.stage == "complete", state?.error.isEmpty == true {
+                Label("Search complete", systemImage: "checkmark.circle")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
             if state?.coverage != nil && state?.coverage != "success" {
                 Label("Some sources couldn’t finish. Coverage is partial.", systemImage: "wifi.exclamationmark")
                     .font(.footnote).foregroundStyle(.secondary)
@@ -404,24 +464,53 @@ struct RecruiterHome: View {
         importing = true
     }
 
-    @MainActor private func reload() async {
+    @MainActor private func reload(polling: Bool = false) async {
         guard !workspace.address.isEmpty, !workspace.choosingRecruiterFile else { return }
+        let address = workspace.address
+        let load = UUID()
+        latestLoad = load
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
-            let data = try await DashboardAPI.request("/api/recruiter", at: workspace.address)
-            guard !workspace.choosingRecruiterFile else { return }
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            if polling, let current = state, let lastRecruiterLoad,
+               Date.now.timeIntervalSince(lastRecruiterLoad) < 45 {
+                let statusData = try await DashboardAPI.request("/api/recruiter", at: address,
+                                                               query: [URLQueryItem(name: "status", value: "1")])
+                guard latestLoad == load, workspace.address == address,
+                      !Task.isCancelled, !workspace.choosingRecruiterFile else { return }
+                let status = try decoder.decode(RecruiterState.Status.self, from: statusData)
+                if current.version == status.version && current.stage == status.stage {
+                    state?.progress = status.progress
+                    if statusUnavailable { error = nil }
+                    statusUnavailable = false
+                    lastStatusCheck = .now
+                    return
+                }
+            }
+            let data = try await DashboardAPI.request("/api/recruiter", at: address)
+            guard latestLoad == load, workspace.address == address,
+                  !Task.isCancelled, !workspace.choosingRecruiterFile else { return }
             let next = try decoder.decode(RecruiterState.self, from: data)
             if lastVersion != next.version {
                 if let saved = next.preferences { preferences = saved }
                 lastVersion = next.version
             }
             let finished = state?.busy == true && !next.busy
-            if state?.version != next.version || state == nil { error = nil }
+            if state?.version != next.version || state == nil || statusUnavailable { error = nil }
+            lastStatusCheck = .now
+            lastRecruiterLoad = .now
+            statusUnavailable = false
             state = next
             if finished { await workspace.refresh() }
         } catch is CancellationError { } catch {
-            if !workspace.choosingRecruiterFile { self.error = error.localizedDescription }
+            guard latestLoad == load, workspace.address == address,
+                  !Task.isCancelled, !workspace.choosingRecruiterFile else { return }
+            if state?.busy == true {
+                statusUnavailable = true
+                self.error = nil
+            } else {
+                self.error = error.localizedDescription
+            }
         }
     }
 
@@ -442,9 +531,9 @@ struct RecruiterHome: View {
     }
 
     @MainActor private func submit(_ payload: [String: Any]) async {
-        guard !sending else { return }
-        sending = true
-        defer { sending = false }
+        guard submissionTitle == nil else { return }
+        submissionTitle = payload["action"] as? String == "search" ? "Starting your search" : "Sending your résumé"
+        defer { submissionTitle = nil }
         error = nil
         do {
             let body = try JSONSerialization.data(withJSONObject: payload)
@@ -452,6 +541,97 @@ struct RecruiterHome: View {
             editingPreferences = false
             await reload()
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+private struct RecruiterActivityView: View {
+    struct Entry: Decodable, Identifiable {
+        let id, operation: Int
+        let recordedAt: Date
+        let progress: RecruiterState.Progress
+    }
+
+    struct Page: Decodable {
+        let entries: [Entry]
+        let nextBefore: Int?
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    let address: String
+    @State private var entries: [Entry] = []
+    @State private var nextBefore: Int?
+    @State private var loading = false
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let error { Text(error).foregroundStyle(.secondary) }
+                if loading && entries.isEmpty {
+                    ProgressView("Loading search activity")
+                } else if entries.isEmpty && error == nil {
+                    Text("No search activity has been recorded yet.").foregroundStyle(.secondary)
+                }
+                ForEach(Set(entries.map(\.operation)).sorted(by: >), id: \.self) { attempt in
+                    Section("Attempt \(attempt)") {
+                        ForEach(entries.filter { $0.operation == attempt }) { entry in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(entry.progress.stage).font(.headline)
+                                if let count = entry.progress.countLabel { Text(count).font(.subheadline) }
+                                if let source = entry.progress.source { Text(source).font(.subheadline) }
+                                if let issues = entry.progress.issues, issues > 0 {
+                                    Text(issues == 1 ? "1 issue recorded" : "\(issues) issues recorded").font(.subheadline)
+                                }
+                                if let reason = entry.progress.reason {
+                                    Text("Status: \(reason)").font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text(entry.recordedAt.formatted(date: .abbreviated, time: .standard))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                if let nextBefore {
+                    Button("Load earlier activity") { Task { await load(before: nextBefore) } }
+                        .disabled(loading)
+                }
+            }
+            .navigationTitle("Search activity")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Refresh activity", systemImage: "arrow.clockwise") { Task { await load() } }
+                        .disabled(loading)
+                }
+            }
+            .task { await load() }
+            .refreshable { await load() }
+        }
+    }
+
+    @MainActor private func load(before: Int? = nil) async {
+        guard !loading else { return }
+        loading = true
+        defer { loading = false }
+        do {
+            let query = before.map { [URLQueryItem(name: "before", value: String($0))] }
+            let data = try await DashboardAPI.request("/api/recruiter/activity", at: address, query: query)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            decoder.dateDecodingStrategy = .iso8601
+            let page = try decoder.decode(Page.self, from: data)
+            if before == nil { entries = page.entries }
+            else { entries.append(contentsOf: page.entries) }
+            nextBefore = page.nextBefore
+            error = nil
+        } catch is CancellationError { } catch {
+            if (error as? DashboardAPI.ServerError)?.status == 404 {
+                self.error = "Search activity needs a newer Jobs server."
+            } else {
+                self.error = DashboardAPI.connectionMessage(for: error)
+            }
+        }
     }
 }
 

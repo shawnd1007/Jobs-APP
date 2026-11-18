@@ -375,12 +375,13 @@ enum DashboardAPI {
         return parts.url
     }
 
-    static func endpoint(_ path: String, at address: String) -> URL? {
+    static func endpoint(_ path: String, at address: String, query: [URLQueryItem]? = nil) -> URL? {
         guard let base = webURL(address),
               var parts = URLComponents(url: base, resolvingAgainstBaseURL: false),
               parts.query == nil, parts.fragment == nil else { return nil }
         let prefix = parts.percentEncodedPath
         parts.percentEncodedPath = (prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix) + path
+        parts.queryItems = query
         return parts.url
     }
 
@@ -456,11 +457,24 @@ enum DashboardAPI {
         _ = try await request(path, at: address, body: encoder.encode(body))
     }
 
-    static func request(_ path: String, at address: String, body: Data? = nil) async throws -> Data {
-        guard let url = endpoint(path, at: address) else {
+    static func request(_ path: String, at address: String, body: Data? = nil,
+                        query: [URLQueryItem]? = nil) async throws -> Data {
+        guard let url = endpoint(path, at: address, query: query) else {
             throw ServerError(status: 0, message: "Check the URL in Server Settings.")
         }
-        var request = URLRequest(url: url, timeoutInterval: path.hasSuffix("/ai-review") || path.hasSuffix("/tailored-resume") || path == "/api/recruiter" && body != nil ? 105 : (path.hasSuffix("/search-status") ? 5 : 15))
+        let timeout: TimeInterval
+        switch path {
+        case _ where path.hasSuffix("/ai-review") || path.hasSuffix("/tailored-resume"),
+             "/api/recruiter" where body != nil:
+            timeout = 105
+        case "/api/v1/dashboard":
+            timeout = 30
+        case "/api/v1/search-status":
+            timeout = 5
+        default:
+            timeout = 15
+        }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let token = try await MicrosoftSession.shared.accessToken(for: address) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

@@ -12,6 +12,7 @@ import os
 import re
 import threading
 import unicodedata
+import urllib.error
 import urllib.request
 from difflib import SequenceMatcher
 from contextvars import ContextVar
@@ -22,7 +23,13 @@ BUSY = {'analyzing', 'discovering', 'matching'}
 OPERATION = ContextVar('recruiter_operation', default=None)
 
 
-def init(c):
+class AIRequestError(ValueError):
+    def __init__(self, diagnostic):
+        super().__init__('AI analysis could not finish. Your progress is saved. A retry may use another AI request.')
+        self.diagnostic = diagnostic
+
+
+def init(c, now):
     c.execute('CREATE TABLE IF NOT EXISTS recruiter_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
     c.execute('CREATE TABLE IF NOT EXISTS recruiter_match_cache (fingerprint TEXT PRIMARY KEY, value TEXT NOT NULL)')
     c.execute('CREATE TABLE IF NOT EXISTS recruiter_resume_file (id INTEGER PRIMARY KEY CHECK(id=1), name TEXT NOT NULL, data TEXT NOT NULL)')
@@ -33,18 +40,47 @@ def init(c):
         id INTEGER PRIMARY KEY, operation INTEGER, kind TEXT NOT NULL, model TEXT NOT NULL,
         started TEXT NOT NULL, status TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER,
         cached_input_tokens INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS recruiter_activity (
+        id INTEGER PRIMARY KEY, operation INTEGER NOT NULL, recorded_at TEXT NOT NULL, progress TEXT NOT NULL)''')
     row = c.execute('SELECT value FROM recruiter_state WHERE id=1').fetchone()
     if row:
         state = json.loads(row[0])
         if state['stage'] in BUSY:
             state.update(stage='interrupted', error='The service restarted. Your inputs are saved. Retry when ready.')
             c.execute('UPDATE recruiter_state SET value=? WHERE id=1', (json.dumps(state),))
+            record_activity(c, state['version'], now(), {'stage': 'Interrupted by a server restart'})
 
 
-def read(a, private=False):
+def record_activity(c, operation, stamp, progress):
+    c.execute('INSERT INTO recruiter_activity(operation, recorded_at, progress) VALUES(?,?,?)',
+              (operation, stamp, json.dumps(progress)))
+
+
+def activity(a, before=None):
+    query = 'SELECT id, operation, recorded_at, progress FROM recruiter_activity'
+    params = ()
+    if before is not None:
+        query += ' WHERE id < ?'
+        params = (before,)
+    with a.connect() as c:
+        rows = c.execute(query + ' ORDER BY id DESC LIMIT 101', params).fetchall()
+    entries = [dict(id=row[0], operation=row[1], recorded_at=row[2], progress=json.loads(row[3]))
+               for row in rows[:100]]
+    return dict(entries=entries, next_before=entries[-1]['id'] if len(rows) > 100 else None)
+
+
+def read(a, private=False, *, status_only=False):
     with a.connect() as c:
         row = c.execute('SELECT value FROM recruiter_state WHERE id=1').fetchone()
-    state = json.loads(row[0]) if row else dict(version=0, stage='empty', matches=[], error='')
+        state = json.loads(row[0]) if row else dict(version=0, stage='empty', matches=[], error='')
+        if not private and state['stage'] == 'discovering':
+            run = c.execute("SELECT report FROM runs WHERE trigger='recruiter' ORDER BY id DESC LIMIT 1").fetchone()
+            if run:
+                report = json.loads(run[0])
+                if report.get('recruiter_version') == state['version']:
+                    state['progress'] = report.get('progress')
+    if status_only:
+        return {key: state.get(key) for key in ('version', 'stage', 'progress')}
     if not private:
         matches = state.get('matches', [])
         current = {j['id']: j for j in a.records()} if matches else {}
@@ -68,10 +104,12 @@ def read(a, private=False):
     return state
 
 
-def write(a, state):
+def write(a, state, *, event=None):
     state['updated'] = a.now()
     with a.connect() as c:
         c.execute('INSERT INTO recruiter_state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', (json.dumps(state),))
+        if event is not None:
+            record_activity(c, state['version'], state['updated'], event)
 
 
 def resume(a):
@@ -273,8 +311,16 @@ def ai(a, name, inputs, schema):
         value = json.loads(text)
         validate(value, schema)
         return value
-    except Exception:
-        raise ValueError('AI analysis could not finish. Your progress is saved. A retry may use another AI request.') from None
+    except Exception as error:
+        if isinstance(error, TimeoutError) or (
+            isinstance(error, urllib.error.URLError) and isinstance(error.reason, TimeoutError)
+        ):
+            diagnostic = 'The AI service timed out.'
+        elif isinstance(error, urllib.error.HTTPError):
+            diagnostic = f'The AI service returned HTTP {error.code}.'
+        else:
+            diagnostic = f'AI request failed ({type(error).__name__}).'
+        raise AIRequestError(diagnostic) from None
 
 
 def quote_in(quote, source):
@@ -440,36 +486,47 @@ def match(a, state, job):
 
 def work(a, state, action):
     token = OPERATION.set(state['version'])
+    outcome = {}
     try:
         if action == 'analyze':
             state['strategy'] = strategy(a, state['resume'])
             state.update(stage='ready', error='')
+            outcome = {'stage': 'Career profile ready'}
         else:
+            cfg = search_config(a, state)
             if not a.LOCK.acquire(False):
                 raise ValueError('Another employer search is running. Your preferences are saved; retry shortly.')
-            report = a.run_pipeline('recruiter', config_override=search_config(a, state))
-            state.update(stage='matching', coverage=report.get('state', 'partial'), matches=[])
-            write(a, state)
+            report = a.run_pipeline('recruiter', config_override=cfg, recruiter_version=state['version'])
             jobs = [j for j in a.records() if not j.get('external_application') and j.get('availability') != 'Closed']
             # Keep the normal cap unless the operator explicitly enables personal testing.
             jobs.sort(key=lambda j: j.get('updated', ''), reverse=True)
             selected = jobs if prototype.unlimited_personal_testing() else jobs[:12]
-            state['deferred'] = len(jobs) - len(selected)
+            state.update(stage='matching', coverage=report.get('state', 'partial'), matches=[],
+                         deferred=len(jobs) - len(selected),
+                         progress=dict(stage='Comparing jobs with your experience', completed=0,
+                                       total=len(selected)))
+            write(a, state, event=state['progress'])
             for job in selected:
                 state['matches'].append(match(a, state, job))
-                write(a, state)
+                state['progress']['completed'] = len(state['matches'])
+                write(a, state, event=state['progress'])
             state['matches'].sort(key=lambda m: ['close', 'adjacent', 'review', 'avoid'].index(m['group']))
             state.update(stage='complete', error='')
+            outcome = {'stage': 'Search complete' if jobs else 'No openings found',
+                       'completed': len(state['matches']), 'total': len(selected)}
             if not jobs:
                 state['error'] = 'No openings were retrieved. Jobs needs working discovery coverage for these roles. Your profile is ready.'
     except ValueError as e:
         state.update(stage='failed', error=str(e))
-    except Exception:
+        outcome = {'stage': 'Could not finish',
+                   'reason': e.diagnostic if isinstance(e, AIRequestError) else type(e).__name__}
+    except Exception as e:
         state.update(stage='failed', error='The recruiter could not finish. Your progress is saved. Please retry.')
+        outcome = {'stage': 'Could not finish', 'reason': type(e).__name__}
     finally:
         OPERATION.reset(token)
         try:
-            write(a, state)
+            write(a, state, event=outcome or None)
         finally:
             LOCK.release()
 
@@ -495,6 +552,7 @@ def start(a, payload):
                 c.execute('DELETE FROM recruiter_resume_file')
             return 200, {'reset': True}
         state = dict(old, error='', version=old['version'] + 1)
+        state.pop('progress', None)
         if action == 'analyze':
             resume = payload.get('resume', old.get('resume'))
             if not isinstance(resume, str) or not 80 <= len(resume.strip()) <= 30000:
@@ -506,6 +564,7 @@ def start(a, payload):
             if not state.get('strategy'):
                 raise ValueError('Upload a résumé so Jobs can build your search first.')
             state.update(preferences=preferences(payload), stage='discovering', matches=[])
+        event = {'stage': 'Understanding your experience' if action == 'analyze' else 'Preparing search'}
         if action == 'analyze' and 'resume' in payload:
             state['updated'] = a.now()
             with a.connect() as c:
@@ -514,8 +573,9 @@ def start(a, payload):
                 c.execute('DELETE FROM recruiter_resume_file')
                 if file:
                     c.execute('INSERT INTO recruiter_resume_file(id,name,data) VALUES(1,?,?)', file)
+                record_activity(c, state['version'], state['updated'], event)
         else:
-            write(a, state)
+            write(a, state, event=event)
         thread = threading.Thread(target=work, args=(a, state, action), daemon=True)
         thread.start()
         started = True
