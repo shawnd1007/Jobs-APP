@@ -470,6 +470,34 @@ class RecruiterTests(unittest.TestCase):
         self.assertIn('Experience managing managers or team leads needs confirmation.', saved[director['id']]['checks'])
         self.assertIn('Leadership at the scale described by the employer needs confirmation.', saved[director['id']]['checks'])
 
+    def test_search_rechecks_the_employer_posting_for_a_strong_match(self):
+        self.analyze()
+        self.search()
+        job = next(j for j in self.a.records() if j['requisition'] == 'billing')
+        job.update(availability='Needs Verification', posting_check_failed=True)
+        job.pop('posting_verified', None)
+        with self.a.connect() as c:
+            self.a.upsert(c, job)
+
+        def pipeline(*_args, **_kwargs):
+            self.a.LOCK.release()
+            return {'state': 'success'}
+
+        def recheck(job_ids, _cfg, *, should_stop):
+            self.assertIn(job['id'], job_ids)
+            self.assertFalse(should_stop())
+            checked = dict(job, availability='Open', posting_verified=self.a.now(), posting_check_failed=False)
+            with self.a.connect() as c:
+                self.a.upsert(c, checked)
+            return {job['id']: checked}
+
+        with patch.object(self.a, 'run_pipeline', side_effect=pipeline), \
+             patch.object(self.a, 'recheck_recruiter_postings', side_effect=recheck):
+            results = self.search()
+        saved = next(item for item in results['matches'] if item['job_id'] == job['id'])
+        self.assertEqual(saved['group'], 'close')
+        self.assertNotIn('The exact employer posting needs verification.', saved['checks'])
+
     def test_exact_posting_can_supply_missing_remote_restrictions(self):
         title = 'Fictional Support Coordinator'
         job = dict(title=title, url='https://jobs.lever.co/fictional-clinic/regional', requisition='regional',

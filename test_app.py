@@ -288,6 +288,71 @@ class PersistenceTests(unittest.TestCase):
   self.assertTrue(checked.get('posting_verified'))
   self.assertEqual(report['posting_checks'], 9)
   self.assertEqual(report['new_posting_checks'], 1)
+
+ def test_deferred_form_check_preserves_still_current_posting_verification(self):
+  cfg = dict(app.config(), request_delay_seconds=0, categories=['Fictional Analyst'],
+             preferred_skills=['Excel', 'SQL'], skill_groups=[])
+  job = dict(title='Fictional Analyst', employer='Fictional', location='Remote - United States',
+             url='https://jobs.lever.co/fictional/prior', description='Use Excel and SQL.',
+             availability='Open', salary_min=100000, salary_max=110000,
+             salary_currency='USD', salary_period='year', salary_type='base')
+  previous = dict(job, posting_verified=app.now(), application_evidence='Exact employer posting checked',
+                  posting_location_terms=['Remote restricted to Florida'])
+  report = {'log': [], 'retained_posting_checks': app.RETAINED_POSTING_CHECKS}
+  self.assertEqual(app.assess(dict(job), cfg)['queue'], 'Confirmed')
+  with patch.object(app, 'verify_application') as verify:
+   checked = app.finalize(dict(job), cfg, report, previous=previous)
+  verify.assert_not_called()
+  self.assertEqual(checked['posting_verified'], previous['posting_verified'])
+  self.assertEqual(checked['posting_location_terms'], previous['posting_location_terms'])
+  self.assertEqual(checked['queue'], 'Review')
+
+ def test_recruiter_recheck_preserves_tracking_and_applies_remote_restrictions(self):
+  cfg = dict(app.config(), us_postings_only=True, remote_hiring_locations=['Florida, United States'])
+  job = dict(title='Fictional Support Analyst', employer='Fictional', location='Remote - United States',
+             url='https://jobs.lever.co/fictional/qa-123', description='Support customers.',
+             availability='Needs Verification', posting_check_failed=True)
+  with app.connect() as c:
+   job_id, _ = app.upsert(c, job)
+   c.execute("UPDATE tracking SET status='Applied', notes=? WHERE job_id=?", ('Keep this note', job_id))
+  def verify(listing, **_kwargs):
+   listing.update(posting_verified=app.now(), posting_location_terms=['Remote restricted to California'])
+  with patch.object(app, 'verify_application', side_effect=verify):
+   checked = app.recheck_recruiter_postings([job_id], cfg)
+  self.assertEqual(checked[job_id]['availability'], 'Open')
+  self.assertFalse(app.discovery_location_allowed(checked[job_id], cfg))
+  current = next(item for item in app.records() if item['id'] == job_id)
+  self.assertEqual((current['status'], current['notes']), ('Applied', 'Keep this note'))
+
+ def test_recruiter_recheck_handles_failure_stop_and_concurrent_changes(self):
+  cfg = dict(app.config(), us_postings_only=True, remote_hiring_locations=['Florida, United States'])
+  job = dict(title='Fictional Support Analyst', employer='Fictional', location='Remote - United States',
+             url='https://jobs.lever.co/fictional/qa-456', description='Support customers.',
+             availability='Needs Verification')
+  with app.connect() as c: job_id, _ = app.upsert(c, job)
+  with patch.object(app, 'verify_application', side_effect=TimeoutError):
+   failed = app.recheck_recruiter_postings([job_id], cfg)
+  self.assertTrue(failed[job_id]['posting_check_failed'])
+  with patch.object(app, 'verify_application') as verify:
+   self.assertEqual(app.recheck_recruiter_postings([job_id], cfg, should_stop=lambda: True), {})
+   verify.assert_not_called()
+  def change_listing(listing, **_kwargs):
+   with app.connect() as c:
+    c.execute('UPDATE jobs SET listing=? WHERE id=?', (json.dumps(dict(job, description='Updated duties.')), job_id))
+   listing['posting_verified'] = app.now()
+  with patch.object(app, 'verify_application', side_effect=change_listing):
+   self.assertEqual(app.recheck_recruiter_postings([job_id], cfg), {})
+  self.assertEqual(next(item for item in app.records() if item['id'] == job_id)['description'], 'Updated duties.')
+
+ def test_recruiter_recheck_skips_foreign_listings(self):
+  cfg = dict(app.config(), us_postings_only=True, remote_hiring_locations=['Florida, United States'])
+  job = dict(title='Fictional Support Analyst', employer='Fictional', location='Bogotá, Colombia',
+             url='https://jobs.lever.co/fictional/qa-foreign', description='Support customers.',
+             availability='Needs Verification')
+  with app.connect() as c: job_id, _ = app.upsert(c, job)
+  with patch.object(app, 'verify_application') as verify:
+   self.assertEqual(app.recheck_recruiter_postings([job_id], cfg), {})
+   verify.assert_not_called()
  def test_distinct_requisitions_do_not_share_application_history(self):
   first = dict(title='Billing Analyst', employer='Fictional Employer',
                location='Remote - United States',

@@ -877,6 +877,27 @@ def work(a, state, action):
                     if error is not None:
                         raise error
             by_id = {job['id']: job for job in selected}
+            job_order = {job['id']: index for index, job in enumerate(selected)}
+            posting_matches = [item for item in state['matches']
+                               if item['group'] == 'review'
+                               and item['fit_group'] in ('close', 'adjacent')
+                               and 'The exact employer posting needs verification.' in item['checks']]
+            posting_matches.sort(key=lambda item: (item['fit_group'] != 'close', job_order[item['job_id']]))
+            posting_candidates = [item['job_id'] for item in posting_matches]
+            if posting_candidates:
+                state['progress'] = dict(stage='Checking employer postings for strong matches',
+                                         completed=0, total=min(len(posting_candidates), 20))
+                write(a, state, event=state['progress'])
+                verified = a.recheck_recruiter_postings(
+                    posting_candidates, cfg,
+                    should_stop=lambda: stop_requested(a, state['version']),
+                )
+                by_id.update(verified)
+                if stop_requested(a, state['version']):
+                    raise SearchStopped()
+                if verified:
+                    refresh_saved_matches(a, state)
+                write(a, state, event={'stage': 'Employer posting checks complete'})
             pay_candidates = []
             for item in state['matches']:
                 if item['group'] == 'avoid' or not item['market_pay_available']:
@@ -914,7 +935,6 @@ def work(a, state, action):
                                          total=len(pay_candidates))
             if stop_requested(a, state['version']):
                 raise SearchStopped()
-            job_order = {job['id']: index for index, job in enumerate(selected)}
             state['matches'].sort(key=lambda m: (
                 ['close', 'adjacent', 'review', 'avoid'].index(m['group']), job_order[m['job_id']]
             ))

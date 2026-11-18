@@ -1335,11 +1335,13 @@ def finalize(job, cfg, report, *, check_posting=False, previous=None):
     ):
         return job
 
+    valid_prior = False
     if previous and not previous.get('pending_match_alert') and previous.get('availability') == 'Open':
         expiry = posting_check_expiration(previous, cfg)
         same_posting = previous.get('url') == job['url'] and previous.get('title') == job['title']
-        if (same_posting and expiry and expiry >= dt.datetime.now(dt.timezone.utc)
-                and (not wants_form or previous.get('application_verified'))):
+        valid_prior = bool(same_posting and expiry and expiry >= dt.datetime.now(dt.timezone.utc)
+                           and not previous.get('posting_check_failed'))
+        if valid_prior and (not wants_form or previous.get('application_verified')):
             for field in ('posting_verified', 'application_verified', 'application_evidence', 'posting_location_terms'):
                 if previous.get(field):
                     job[field] = previous[field]
@@ -1353,6 +1355,13 @@ def finalize(job, cfg, report, *, check_posting=False, previous=None):
     try:
         if (report.get(counter, 0) >= limit or host in report.get('throttled_posting_hosts', [])):
             report['posting_checks_deferred'] = report.get('posting_checks_deferred', 0) + 1
+            if valid_prior:
+                for field in ('posting_verified', 'application_evidence', 'posting_location_terms'):
+                    if previous.get(field):
+                        job[field] = previous[field]
+                job['posting_check_failed'] = False
+                job['queue'] = 'Review'
+                return job
             raise ValueError('Direct posting check deferred until a later search')
         attempted = True
         report[counter] = report.get(counter, 0) + 1
@@ -1386,6 +1395,50 @@ def finalize(job, cfg, report, *, check_posting=False, previous=None):
     if wants_form and not job.get('application_verified'):
         job['queue'] = 'Review'
     return job
+
+
+def recheck_recruiter_postings(job_ids, cfg, *, should_stop=None):
+    """Verify promising saved postings without changing owner tracking records."""
+    if not LOCK.acquire(False):
+        return {}
+    checked = {}
+    try:
+        cfg = dict(cfg, us_postings_only=True)
+        for job_id in list(dict.fromkeys(job_ids))[:POSTING_CHECKS_PER_RUN]:
+            if should_stop and should_stop():
+                break
+            with connect() as c:
+                row = c.execute('SELECT listing FROM jobs WHERE id=?', (job_id,)).fetchone()
+            if not row:
+                continue
+            raw = row['listing']
+            job = json.loads(raw)
+            if (job.get('external_application') or job.get('identity_review')
+                    or job.get('availability') == 'Closed' or not discovery_location_allowed(job, cfg)):
+                continue
+            expires = posting_check_expiration(job, cfg)
+            if (expires and expires >= dt.datetime.now(dt.timezone.utc)
+                    and not job.get('posting_check_failed') and job.get('availability') == 'Open'):
+                continue
+            job['posting_check_attempted'] = now()
+            try:
+                verify_application(job, render_form=False)
+                job.update(availability='Open', posting_check_failed=False)
+            except (ValueError, OSError):
+                job.update(availability='Needs Verification', posting_check_failed=True,
+                           application_evidence='The employer posting could not be verified.')
+                job.pop('posting_verified', None)
+                job.pop('application_verified', None)
+            with connect() as c:
+                c.execute('BEGIN IMMEDIATE')
+                changed = c.execute('UPDATE jobs SET listing=?,updated=? WHERE id=? AND listing=? RETURNING id',
+                                    (json.dumps(job), now(), job_id, raw)).fetchone()
+            if changed:
+                job['id'] = job_id
+                checked[job_id] = job
+        return checked
+    finally:
+        LOCK.release()
 
 
 class PostingParser(HTMLParser):
