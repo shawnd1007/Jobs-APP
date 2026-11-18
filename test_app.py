@@ -18,6 +18,12 @@ class PersistenceTests(unittest.TestCase):
  def tearDown(self):app.DB=self.old;app.DATA=self.olddata;app.SEED=self.oldseed;self.tmp.cleanup()
  def test_import_and_reimport(self):
   self.assertEqual(len(app.records()),50);app.init();self.assertEqual(len(app.records()),50)
+ def test_snapshot_reuses_location_assessment_for_review(self):
+  with patch.object(app, 'location_eligibility', wraps=app.location_eligibility) as eligibility:
+   snapshot = app.snapshot()
+  self.assertEqual(eligibility.call_count, len(snapshot['jobs']))
+  for job in snapshot['jobs']:
+   self.assertEqual(job['review_blockers'], app.review_blockers(job, app.config()))
  def test_tracking_survives_closed_and_reopened(self):
   j=app.records()[0]
   note='Fictional fixture application note'

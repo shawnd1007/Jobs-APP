@@ -4,6 +4,11 @@ Azure connections require managed identity and verified TLS. The Azure path
 still requires end-to-end deployment and recovery verification before use.
 """
 
+import threading
+
+_credential_lock = threading.Lock()
+_managed_identity_credential = None
+
 class Row:
     """Support the named and positional access used by the existing store."""
 
@@ -60,8 +65,13 @@ def connect_azure(dsn, ca_file):
             ',' in host or not options.get('user') or not options.get('dbname') or
             options.get('sslmode') != 'verify-full' or not Path(ca_file).is_file()):
         raise ValueError('Azure PostgreSQL needs a server name, database user, verified TLS, and a trusted CA file')
-    credential = ManagedIdentityCredential()
-    token = credential.get_token('https://ossrdbms-aad.database.windows.net/.default').token
+    # The credential owns an in-memory token cache and refreshes expiring tokens.
+    # Reuse it across connections, serializing access to its underlying client.
+    global _managed_identity_credential
+    with _credential_lock:
+        if _managed_identity_credential is None:
+            _managed_identity_credential = ManagedIdentityCredential()
+        token = _managed_identity_credential.get_token('https://ossrdbms-aad.database.windows.net/.default').token
     import psycopg
     return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows)
 

@@ -879,6 +879,8 @@ struct JobDetail: View {
                 } message: {
                     Text("Your profile and posting details will be sent to OpenAI. A new request may incur charges.")
                 }
+            } else if workspace.dashboard == nil && workspace.loading {
+                ProgressView("Loading job details…")
             } else {
                 ContentUnavailableView("Job Unavailable", systemImage: "briefcase")
             }

@@ -33,8 +33,13 @@ class AIRequestError(ValueError):
         self.diagnostic = diagnostic
 
 
+class SearchStopped(Exception):
+    pass
+
+
 def init(c, now):
     c.execute('CREATE TABLE IF NOT EXISTS recruiter_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)')
+    c.execute('CREATE TABLE IF NOT EXISTS recruiter_stop (operation INTEGER PRIMARY KEY)')
     c.execute('CREATE TABLE IF NOT EXISTS recruiter_match_cache (fingerprint TEXT PRIMARY KEY, value TEXT NOT NULL)')
     c.execute('CREATE TABLE IF NOT EXISTS recruiter_resume_file (id INTEGER PRIMARY KEY CHECK(id=1), name TEXT NOT NULL, data TEXT NOT NULL)')
     c.execute('''CREATE TABLE IF NOT EXISTS tailored_resumes (
@@ -83,13 +88,36 @@ def read(a, private=False, *, status_only=False):
                 report = json.loads(run[0])
                 if report.get('recruiter_version') == state['version']:
                     state['progress'] = report.get('progress')
+    if state['stage'] in ('discovering', 'matching'):
+        state['stop_requested'] = stop_requested(a, state['version'])
     if status_only:
-        return {key: state.get(key) for key in ('version', 'stage', 'progress')}
+        status = {key: state.get(key) for key in ('version', 'stage', 'progress')}
+        if 'stop_requested' in state:
+            status['stop_requested'] = state['stop_requested']
+        return status
     if not private:
         refresh_saved_matches(a, state)
         state.pop('resume', None)
         state.pop('operation', None)
     return state
+
+
+def stop_requested(a, operation):
+    with a.connect() as c:
+        return bool(c.execute('SELECT 1 FROM recruiter_stop WHERE operation=?', (operation,)).fetchone())
+
+
+def stop(a, payload):
+    if type(payload.get('version')) is not int:
+        raise ValueError('Refresh your search and try again.')
+    with a.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row = c.execute('SELECT value FROM recruiter_state WHERE id=1').fetchone()
+        state = json.loads(row[0]) if row else {}
+        if state.get('version') != payload['version'] or state.get('stage') not in ('discovering', 'matching'):
+            return 409, {'error': 'This search is no longer running. Refresh for its latest status.'}
+        c.execute('INSERT INTO recruiter_stop(operation) VALUES(?) ON CONFLICT(operation) DO NOTHING', (payload['version'],))
+    return 202, {'stopping': True}
 
 
 def saved_preferences(connection):
@@ -427,6 +455,7 @@ def researched_pay(output):
                 if part.get('type') != 'output_text' or not text.strip() or len(text) > 2000:
                     continue
                 citations = []
+                citation_spans = []
                 for note in part.get('annotations', []):
                     if note.get('type') != 'url_citation':
                         continue
@@ -437,14 +466,22 @@ def researched_pay(output):
                             and type(start) is int and type(end) is int and 0 <= start <= end <= len(text):
                         citations.append(dict(url=url, title=(note.get('title') or parsed.hostname)[:160],
                                               end=end))
-                fields = re.match(
-                    r'Geography: ([^\n]+)\nData period: ([^\n]*\b(?:19|20)\d{2}[^\n]*)\n'
-                    r'Range: USD ([\d,.]+)\s*[–-]\s*([\d,.]+) per (year|hour)\b', text, re.I
+                        citation_spans.append((start, end))
+                geography_field = re.search(r'^\s*Geography:\s*([^\n]+)', text, re.I | re.M)
+                date_field = re.search(r'^\s*Data period:\s*([^\n]*\b(?:19|20)\d{2}[^\n]*)', text, re.I | re.M)
+                range_field = re.search(
+                    r'^\s*Range:\s*(?:USD\s*\$?|\$)\s*([\d,.]+)\s*(?:[–—-]|to)\s*'
+                    r'(?:USD\s*)?\$?\s*([\d,.]+)\s*(?:per\s+|/\s*)'
+                    r'(year|hour)\b', text, re.I | re.M
                 )
-                if not fields or not any(fields.start(3) < citation['end'] <= min(len(text), fields.end() + 4)
-                                         for citation in citations):
+                if not geography_field or not date_field or not range_field or not any(
+                    start <= range_field.end() + 4 and end > range_field.start(1)
+                    and end <= min(len(text), range_field.end() + 4)
+                    for start, end in citation_spans
+                ):
                     continue
-                geography, data_period, low, high, period = fields.groups()
+                geography, data_period = geography_field.group(1), date_field.group(1)
+                low, high, period = range_field.groups()
                 try:
                     low, high = float(low.replace(',', '')), float(high.replace(',', ''))
                 except ValueError:
@@ -758,6 +795,7 @@ def match(a, state, job):
 def work(a, state, action):
     token = OPERATION.set(state['version'])
     outcome = {}
+    previous_matches = list(state.get('matches', [])) if action == 'search' else []
     try:
         if action == 'analyze':
             state['strategy'] = strategy(a, state['resume'])
@@ -768,6 +806,8 @@ def work(a, state, action):
             if not a.LOCK.acquire(False):
                 raise ValueError('Another employer search is running. Your preferences are saved; retry shortly.')
             report = a.run_pipeline('recruiter', config_override=cfg, recruiter_version=state['version'])
+            if stop_requested(a, state['version']):
+                raise SearchStopped()
             jobs = [j for j in a.records() if not j.get('external_application') and j.get('availability') != 'Closed']
             jobs = [job for job in jobs if a.discovery_location_allowed(job, cfg)]
             # Keep the normal cap unless the operator explicitly enables personal testing.
@@ -790,6 +830,8 @@ def work(a, state, action):
             with ThreadPoolExecutor(max_workers=MATCH_WORKERS) as executor:
                 pending = list(selected)
                 while pending:
+                    if stop_requested(a, state['version']):
+                        raise SearchStopped()
                     batch, remaining, batch_keys = [], [], set()
                     for job in pending:
                         key = match_cache_key(state['strategy'], match_facts(job), cfg['ai_model'], state['resume'])
@@ -811,15 +853,27 @@ def work(a, state, action):
                             state['matches'].append(result)
                             state['progress']['completed'] = len(state['matches'])
                             write(a, state, event=state['progress'])
+                    if stop_requested(a, state['version']):
+                        raise SearchStopped()
                     if error is not None:
                         raise error
             by_id = {job['id']: job for job in selected}
-            pay_candidates = [item for item in state['matches']
-                              if item['group'] != 'avoid' and item['fit_group'] in ('close', 'adjacent')
-                              and item['market_pay_available']]
+            pay_candidates = []
+            for item in state['matches']:
+                if item['group'] == 'avoid' or not item['market_pay_available']:
+                    continue
+                job = by_id[item['job_id']]
+                potential, _ = fit_assessment(
+                    a, dict(item, group=item['fit_group']), item.get('evidence_checks', []), job, state,
+                    market_reaches_target=True,
+                )
+                if potential in ('close', 'adjacent'):
+                    pay_candidates.append(item)
             researched = set()
             pay_failures = 0
             for index, item in enumerate(pay_candidates):
+                if stop_requested(a, state['version']):
+                    raise SearchStopped()
                 state['progress'] = dict(stage='Researching market pay', completed=index,
                                          total=len(pay_candidates))
                 write(a, state, event=state['progress'])
@@ -839,6 +893,8 @@ def work(a, state, action):
             if pay_candidates:
                 state['progress'] = dict(stage='Researching market pay', completed=len(pay_candidates),
                                          total=len(pay_candidates))
+            if stop_requested(a, state['version']):
+                raise SearchStopped()
             job_order = {job['id']: index for index, job in enumerate(selected)}
             state['matches'].sort(key=lambda m: (
                 ['close', 'adjacent', 'review', 'avoid'].index(m['group']), job_order[m['job_id']]
@@ -848,6 +904,11 @@ def work(a, state, action):
                        'completed': len(state['matches']), 'total': len(selected)}
             if not jobs:
                 state['error'] = 'No openings were retrieved. Jobs needs working discovery coverage for these roles. Your profile is ready.'
+    except SearchStopped:
+        current_ids = {item['job_id'] for item in state.get('matches', [])}
+        state['matches'].extend(item for item in previous_matches if item['job_id'] not in current_ids)
+        state.update(stage='stopped', error='', progress=dict(stage='Search stopped'))
+        outcome = {'stage': 'Search stopped', 'completed': len(state['matches'])}
     except ValueError as e:
         state.update(stage='failed', error=str(e))
         outcome = {'stage': 'Could not finish',
@@ -858,12 +919,31 @@ def work(a, state, action):
     finally:
         OPERATION.reset(token)
         try:
-            write(a, state, event=outcome or None)
+            if action == 'search':
+                # Serialize completion with stop requests, including a request
+                # arriving as the last provider call finishes.
+                with a.connect() as c:
+                    c.execute('BEGIN IMMEDIATE')
+                    stopped = c.execute('SELECT 1 FROM recruiter_stop WHERE operation=?', (state['version'],)).fetchone()
+                    if stopped:
+                        current_ids = {item['job_id'] for item in state.get('matches', [])}
+                        state['matches'].extend(item for item in previous_matches if item['job_id'] not in current_ids)
+                        state.update(stage='stopped', error='', progress=dict(stage='Search stopped'))
+                        outcome = {'stage': 'Search stopped', 'completed': len(state['matches'])}
+                    state['updated'] = a.now()
+                    c.execute('INSERT INTO recruiter_state VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value',
+                              (json.dumps(state),))
+                    if outcome:
+                        record_activity(c, state['version'], state['updated'], outcome)
+            else:
+                write(a, state, event=outcome or None)
         finally:
             LOCK.release()
 
 
 def start(a, payload):
+    if isinstance(payload, dict) and payload.get('action') == 'stop':
+        return stop(a, payload)
     if not isinstance(payload, dict) or payload.get('action') not in ('analyze', 'search', 'reset'):
         raise ValueError('Choose résumé analysis or job search.')
     if not LOCK.acquire(False):
@@ -895,7 +975,7 @@ def start(a, payload):
         else:
             if not state.get('strategy'):
                 raise ValueError('Upload a résumé so Jobs can build your search first.')
-            state.update(preferences=preferences(payload), stage='discovering', matches=[])
+            state.update(preferences=preferences(payload), stage='discovering')
         event = {'stage': 'Understanding your experience' if action == 'analyze' else 'Preparing search'}
         if action == 'analyze' and 'resume' in payload:
             state['updated'] = a.now()

@@ -337,7 +337,7 @@ private struct WorkspaceView: View {
         Group {
             if let sample {
                 tabs(sample)
-            } else if workspace.dashboard != nil {
+            } else if workspace.dashboard != nil || !workspace.address.isEmpty {
                 tabs(workspace)
             } else {
                 NavigationStack {
@@ -474,7 +474,8 @@ extension View {
                     .background(.regularMaterial)
             } else if !current.connected {
                 VStack(spacing: 3) {
-                    Label("Offline · Read-only", systemImage: "wifi.slash")
+                    Label(current.loading && current.lastSyncedAt == nil ? "Connecting…" : "Offline · Read-only",
+                          systemImage: current.loading && current.lastSyncedAt == nil ? "wifi" : "wifi.slash")
                         .font(.footnote.weight(.semibold))
                     if let synced = current.lastSyncedAt {
                         Text("Last synced \(synced.formatted(date: .abbreviated, time: .shortened))")

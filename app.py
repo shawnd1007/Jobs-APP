@@ -445,8 +445,10 @@ def records(*, connection=None):
         return result
 
 UNAPPLIED={'Needs Verification','Not Applied','Planning to Apply'}
-def review_blockers(j, cfg=None):
-    cfg=config() if cfg is None else cfg;geo=location_eligibility(j,cfg)[0];problems=[]
+def review_blockers(j, cfg=None, *, location_status=None):
+    cfg=config() if cfg is None else cfg
+    geo = location_status if location_status is not None else location_eligibility(j, cfg)[0]
+    problems=[]
     if j.get('identity_review'):problems.append(IDENTITY_REVIEW)
     if j.get('recruitee_offer_changed'):
         problems.append('The employer reused this link for a different job.')
@@ -1499,6 +1501,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
         report['recruiter_version'] = recruiter_version
 
     def progress(stage, completed=None, total=None, source=None):
+        if recruiter_version is not None and recruiter.stop_requested(service(), recruiter_version):
+            raise recruiter.SearchStopped()
         report['progress'] = dict(stage=stage, completed=completed, total=total, source=source)
         with connect() as c:
             c.execute('UPDATE runs SET report=? WHERE id=?', (json.dumps(report), run_id))
@@ -1879,6 +1883,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
         if not successful and not report['failures']:
             report['failures'].append('No configured employer sources returned usable postings.')
         report['state'] = ('partial' if report['failures'] else 'success') if successful else 'failed'
+    except recruiter.SearchStopped:
+        report['state'] = 'stopped'
     except Exception as e:
         logging.exception('Search failed');report['failures'].append(type(e).__name__+': '+str(e)[:180]);report['state']='failed'
     finally:
@@ -1976,9 +1982,8 @@ def snapshot():
             j['market_pay_available'] = not j['hidden_from_discovery'] and j.get('availability') != 'Closed' \
                 and recruiter.market_pay_needed(service(), j, recruiter_preferences)
             if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
-            eligible,reason,area=location_eligibility(j,cfg)
-            j.update(location_eligibility=eligible,location_reason=reason,area=area)
-            j['review_blockers']=review_blockers(j,cfg)
+            eligible = j['location_eligibility']
+            j['review_blockers']=review_blockers(j,cfg,location_status=eligible)
             if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
             if j.get('queue')=='Confirmed':
                 verified=j.get('application_verified')

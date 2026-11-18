@@ -262,6 +262,61 @@ class RecruiterTests(unittest.TestCase):
         self.assertTrue(all(operation == result['version'] for _, operation in started))
         self.assertEqual(result['progress']['completed'], len(result['matches']))
 
+    def test_stop_during_comparison_preserves_completed_and_previous_results(self):
+        self.analyze(); previous = self.search()
+        entered = threading.Event()
+        release = threading.Event()
+        actual_match = recruiter.match
+        calls = []
+        lock = threading.Lock()
+
+        def delayed_match(a, state, job):
+            with lock:
+                calls.append(job['id'])
+                should_fail = len(calls) == 1
+                if len(calls) == recruiter.MATCH_WORKERS:
+                    entered.set()
+            if not release.wait(5):
+                raise AssertionError('Test timed out waiting for release')
+            if should_fail:
+                raise recruiter.AIRequestError('Fictional provider error')
+            return actual_match(a, state, job)
+
+        with patch.object(recruiter, 'match', side_effect=delayed_match):
+            self.assertEqual(recruiter.start(self.a, dict(action='search', version=previous['version'], preferences=PREFS))[0], 202)
+            self.assertTrue(entered.wait(5))
+            current = recruiter.read(self.a, True)
+            self.assertEqual(recruiter.start(self.a, dict(action='stop', version=current['version']))[0], 202)
+            self.assertTrue(recruiter.read(self.a, status_only=True)['stop_requested'])
+            self.assertEqual(recruiter.start(self.a, dict(action='stop', version=previous['version']))[0], 409)
+            release.set()
+            stopped = self.wait()
+        self.assertEqual(stopped['stage'], 'stopped')
+        self.assertEqual(len(calls), recruiter.MATCH_WORKERS)
+        self.assertEqual({m['job_id'] for m in stopped['matches']}, {m['job_id'] for m in previous['matches']})
+        self.assertEqual(self.search()['stage'], 'complete')
+
+    def test_stop_during_discovery_retains_prior_shortlist(self):
+        self.analyze(); previous = self.search()
+        entered, release = threading.Event(), threading.Event()
+        original_board_jobs = self.a.board_jobs
+
+        def delayed_board(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError('Test timed out waiting for release')
+            return original_board_jobs(*args, **kwargs)
+
+        with patch.object(self.a, 'board_jobs', side_effect=delayed_board):
+            self.assertEqual(recruiter.start(self.a, dict(action='search', version=previous['version'], preferences=PREFS))[0], 202)
+            self.assertTrue(entered.wait(5))
+            current = recruiter.read(self.a, True)
+            self.assertEqual(recruiter.start(self.a, dict(action='stop', version=current['version']))[0], 202)
+            release.set()
+            stopped = self.wait()
+        self.assertEqual(stopped['stage'], 'stopped')
+        self.assertEqual([m['job_id'] for m in stopped['matches']], [m['job_id'] for m in previous['matches']])
+
     def test_recruiter_status_loads_settings_once_for_the_shortlist(self):
         self.analyze()
         expected = self.search()
@@ -504,6 +559,20 @@ class RecruiterTests(unittest.TestCase):
         body['output'][1]['content'][0]['annotations'] = []
         self.assertEqual(recruiter.researched_pay(body['output']), {'summary': None, 'citations': []})
 
+    def test_market_pay_accepts_common_cited_range_formats_without_inventing_sources(self):
+        text = 'Market research\nGeography: Virginia, U.S.\nData period: May 2025\nRange: $55,000 to $78,000 per year.'
+        note = dict(type='url_citation', url='https://example.com/wages', title='Fictional data',
+                    start_index=text.index('$55,000'), end_index=len(text))
+        output = [dict(type='web_search_call', status='completed', action={'type': 'search'}),
+                  dict(type='message', content=[dict(type='output_text', text=text, annotations=[note])])]
+        result = recruiter.researched_pay(output)
+        self.assertEqual((result['salary_min'], result['salary_max']), (55000, 78000))
+        self.assertEqual(result['citations'][0]['url'], 'https://example.com/wages')
+        note.update(start_index=0, end_index=text.index('Range:'))
+        self.assertEqual(recruiter.researched_pay(output), {'summary': None, 'citations': []})
+        note.update(start_index=text.index('$55,000'), end_index=len(text), url='http://example.com/wages')
+        self.assertEqual(recruiter.researched_pay(output), {'summary': None, 'citations': []})
+
     def test_search_researches_comparable_pay_once_and_keeps_matches_on_failure(self):
         self.analyze(); self.search()
         job = next(j for j in self.a.records() if j['requisition'] == 'billing')
@@ -550,6 +619,39 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(len([m for m in result['matches'] if m['job_id'] in (job['id'], twin['id'])]), 2)
         self.assertTrue(any(entry['progress']['stage'] == 'Some market pay research could not finish'
                             for entry in recruiter.activity(self.a)['entries']))
+
+    def test_search_researches_pay_for_review_match_eligible_for_promotion(self):
+        self.analyze(); self.search()
+        state = recruiter.read(self.a, True)
+        state['resume'] += ' Reviewed medical billing records.'
+        recruiter.write(self.a, state)
+        job = next(j for j in self.a.records() if j['requisition'] == 'billing')
+        job.update(salary_min=None, salary_max=None, salary_text='Pay not disclosed',
+                   description='Responsibilities\nReview medical billing records.')
+        with self.a.connect() as c:
+            self.a.upsert(c, job)
+        comparison = dict(group='review', reason='Related billing experience.', gaps=[],
+                          resume_evidence='Reviewed medical billing records.',
+                          job_evidence='Review medical billing records.', emphasis=[])
+        estimate = dict(summary='Fictional estimate', geography='Oregon', data_period='2025',
+                        salary_min=70000, salary_max=90000, salary_period='year',
+                        citations=[dict(title='Wages', url='https://example.com/wages', end=1)])
+        def pipeline(*args, **kwargs):
+            self.a.LOCK.release()
+            return {'state': 'complete'}
+        def provider(a, name, inputs, schema):
+            if name == 'market_pay':
+                return estimate
+            if inputs['job']['title'] == job['title']:
+                return comparison
+            return fake_ai(a, name, inputs, schema)
+        with patch.object(self.a, 'run_pipeline', side_effect=pipeline), \
+             patch.object(recruiter, 'ai', side_effect=provider) as mock:
+            result = self.search()
+        found = next(m for m in result['matches'] if m['job_id'] == job['id'])
+        self.assertEqual(found['group'], 'adjacent')
+        self.assertTrue(found['market_pay_target_match'])
+        self.assertEqual(sum(call.args[1] == 'market_pay' for call in mock.call_args_list), 1)
 
     def test_market_pay_promotes_only_qualified_saved_matches_at_the_target(self):
         self.analyze()

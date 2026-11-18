@@ -8,6 +8,7 @@ struct RecruiterState: Decodable {
         let version: Int
         let stage: String
         let progress: Progress?
+        let stopRequested: Bool?
     }
 
     struct Progress: Decodable {
@@ -56,6 +57,7 @@ struct RecruiterState: Decodable {
     let deferred: Int?
     let updated: String?
     var progress: Progress?
+    var stopRequested: Bool?
     var busy: Bool { ["analyzing", "discovering", "matching"].contains(stage) }
 }
 
@@ -107,6 +109,7 @@ struct RecruiterHome: View {
     @State private var lastStatusCheck: Date?
     @State private var lastRecruiterLoad: Date?
     @State private var statusUnavailable = false
+    @State private var stoppingSearch = false
 
     private var busy: Bool { reading || submissionTitle != nil || state?.busy == true }
     private var stageTitle: String {
@@ -163,7 +166,7 @@ struct RecruiterHome: View {
                     if !busy && (state?.stage == "ready" || editingPreferences) {
                         preferenceForm
                     }
-                    if state?.stage == "complete" || state?.stage == "failed" || state?.stage == "matching" {
+                    if state?.stage == "complete" || state?.stage == "failed" || state?.stage == "matching" || state?.stage == "stopped" {
                         results
                     }
                 }
@@ -294,6 +297,14 @@ struct RecruiterHome: View {
             }
             Text("You can leave this screen and come back to your results.")
                 .font(.subheadline).foregroundStyle(.secondary)
+            if ["discovering", "matching"].contains(state?.stage ?? "") {
+                Button(state?.stopRequested == true || stoppingSearch ? "Stopping search…" : "Stop search") {
+                    Task { await stopSearch() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(stoppingSearch || state?.stopRequested == true)
+                .accessibilityIdentifier("stopRecruiterSearch")
+            }
         }.jobCardSurface()
     }
 
@@ -513,6 +524,7 @@ struct RecruiterHome: View {
                 let status = try decoder.decode(RecruiterState.Status.self, from: statusData)
                 if current.version == status.version && current.stage == status.stage {
                     state?.progress = status.progress
+                    state?.stopRequested = status.stopRequested
                     if statusUnavailable { error = nil }
                     statusUnavailable = false
                     lastStatusCheck = .now
@@ -559,6 +571,17 @@ struct RecruiterHome: View {
         do {
             let value = try JSONSerialization.jsonObject(with: encoder.encode(preferences))
             await submit(["action": "search", "version": state?.version ?? 0, "preferences": value])
+        } catch { self.error = error.localizedDescription }
+    }
+
+    @MainActor private func stopSearch() async {
+        guard let version = state?.version else { return }
+        stoppingSearch = true
+        defer { stoppingSearch = false }
+        do {
+            let body = try JSONSerialization.data(withJSONObject: ["action": "stop", "version": version])
+            _ = try await DashboardAPI.request("/api/recruiter", at: workspace.address, body: body)
+            await reload()
         } catch { self.error = error.localizedDescription }
     }
 

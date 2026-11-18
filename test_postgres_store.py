@@ -11,6 +11,31 @@ import postgres_store
 
 
 class RowTests(unittest.TestCase):
+    def test_managed_identity_credential_reused_and_token_requested_each_time(self):
+        identity = types.ModuleType('azure.identity')
+        credential = MagicMock()
+        credential.get_token.side_effect = [types.SimpleNamespace(token='first'),
+                                            types.SimpleNamespace(token='renewed')]
+        identity.ManagedIdentityCredential = MagicMock(return_value=credential)
+        azure = types.ModuleType('azure')
+        azure.identity = identity
+        psycopg = types.ModuleType('psycopg')
+        psycopg.connect = MagicMock()
+        conninfo = types.ModuleType('psycopg.conninfo')
+        conninfo.conninfo_to_dict = MagicMock(return_value={
+            'host': 'example.postgres.database.azure.com', 'dbname': 'jobs',
+            'user': 'identity', 'sslmode': 'verify-full'})
+        with tempfile.NamedTemporaryFile() as root, \
+             patch.object(postgres_store, '_managed_identity_credential', None), \
+             patch.dict('sys.modules', {'azure': azure, 'azure.identity': identity,
+                                       'psycopg': psycopg, 'psycopg.conninfo': conninfo}):
+            postgres_store.connect_azure('fictional', root.name)
+            postgres_store.connect_azure('fictional', root.name)
+        identity.ManagedIdentityCredential.assert_called_once_with()
+        self.assertEqual(credential.get_token.call_count, 2)
+        self.assertEqual([call.kwargs['password'] for call in psycopg.connect.call_args_list],
+                         ['first', 'renewed'])
+
     def test_row_supports_named_and_positional_access(self):
         row = postgres_store.Row(('id', 'note'), (12, 'fictional note'))
         self.assertEqual((row[0], row['note']), (12, 'fictional note'))
