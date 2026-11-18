@@ -37,6 +37,7 @@ struct RecruiterState: Decodable {
         let title, employer, location, salary, group, reason, resumeEvidence, jobEvidence: String
         let gaps, emphasis, checks: [String]
         let payNotes: [String]?
+        let marketPayAvailable: Bool?
         var label: String {
             switch group {
             case "close": "Close match"
@@ -438,7 +439,9 @@ struct RecruiterHome: View {
                     Text(match.label.uppercased()).font(.caption.weight(.bold)).foregroundStyle(JobsTheme.accent)
                     Text(match.title).font(.title3.bold())
                     Text(match.employer).font(.subheadline.weight(.medium))
-                    Text(match.location + " · " + match.salary).font(.footnote).foregroundStyle(.secondary)
+                    Text(match.location).font(.footnote).foregroundStyle(.secondary)
+                    LabeledContent("Employer pay", value: match.salary)
+                        .font(.footnote).foregroundStyle(.secondary)
                     if match.group != "close" {
                         ForEach(match.checks, id: \.self) { check in
                             Text(check).font(.subheadline.weight(.medium))
@@ -448,9 +451,10 @@ struct RecruiterHome: View {
                             Text(note).font(.subheadline.weight(.medium))
                         }
                     }
-                    if selectedGroup == "recommended", match.payNotes?.isEmpty == false {
+                    if selectedGroup != "avoid", match.marketPayAvailable == true {
                         Button("Market pay estimate", systemImage: "magnifyingglass") { researchingPay = match }
                             .buttonStyle(.bordered)
+                            .accessibilityIdentifier("shortlistMarketPay")
                     }
                     Text(match.reason).font(.subheadline)
                     DisclosureGroup("Why this match?") {
@@ -769,6 +773,8 @@ struct MarketPayView: View {
         let summary: String?
         let citations: [Citation]
         let researchedAt: String
+        let geography, dataPeriod: String?
+        let stale: Bool?
     }
 
     private struct Response: Decodable {
@@ -779,18 +785,23 @@ struct MarketPayView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Estimate for comparable roles. Employer pay may differ.")
+                    Text("Salary check needed. Confirm base pay with the employer.")
                         .font(.subheadline).foregroundStyle(.secondary)
                     if let report {
                         if let summary = report.summary {
+                            if report.geography == nil || report.dataPeriod == nil {
+                                Text("Earlier research").font(.subheadline.bold())
+                            }
                             Text(citedText(summary, citations: report.citations))
+                                .accessibilityIdentifier("marketPayEstimate")
                         } else {
                             Text("The research didn’t find enough reliable pay data for this role.")
                         }
                         Text("Researched \(displayTimestamp(report.researchedAt))")
                             .font(.footnote).foregroundStyle(.secondary)
-                    } else if !loading {
-                        Button("Research market pay", systemImage: "magnifyingglass") {
+                    }
+                    if !loading && (report == nil || report?.stale == true) {
+                        Button(report == nil ? "Research market pay" : "Refresh market pay", systemImage: "magnifyingglass") {
                             Task { await load(research: true) }
                         }
                     }
@@ -805,7 +816,7 @@ struct MarketPayView: View {
                     }
                 }
             }
-            .navigationTitle("Market Pay Estimate")
+            .navigationTitle("Market pay estimate")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
             .task { await load(research: false) }

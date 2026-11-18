@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from us_locations import is_us_location
 import re
 import threading
 import urllib.request
@@ -258,8 +257,6 @@ def search_title_matches(title, search):
 def matching_searches(a, job, searches, *, us_only=False):
     if job.get('availability') != 'Open':
         return []
-    if us_only and not is_us_location(a.clean(job.get('location'))):
-        return []
     title = job.get('title', '').lower()
     text = title + ' ' + a.clean(job.get('description')).lower()
     matches = []
@@ -271,7 +268,10 @@ def matching_searches(a, job, searches, *, us_only=False):
         if not any(re.search(r'(?<![\w+#])' + re.escape(skill.lower()) + r'(?![\w+#])', text)
                    for skill in search['skills']):
             continue
-        geography = {'target_locations': search['locations'], 'workplace_types': search['workplace_types']}
+        geography = {'target_locations': search['locations'], 'workplace_types': search['workplace_types'],
+                     'us_postings_only': us_only}
+        if us_only and not a.discovery_location_allowed(job, dict(geography, remote_hiring_locations=search['locations'])):
+            continue
         if a.location_eligibility(job, geography)[0] != 'Eligible':
             continue
         low, high = a.annual_base_bounds(job)

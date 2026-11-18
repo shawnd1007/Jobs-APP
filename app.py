@@ -21,7 +21,7 @@ from uuid import uuid4
 import prototype
 import recruiter
 import usajobs
-from us_locations import is_us_location, remote_eligibility, state_code
+from us_locations import foreign_location, is_us_location, location_clauses, office_locations, remote_eligibility
 from contextvars import ContextVar
 from contextlib import nullcontext
 from queue import Empty, Queue
@@ -612,7 +612,7 @@ def preferred_location(loc, desc, mode, cfg):
         return 'Review', 'Employer work arrangement is not published clearly', area
     if modes and mode not in modes:
         return 'Rejected', 'Work arrangement is outside your preferences', area
-    if split and mode == 'remote':
+    if mode == 'remote' and targets:
         decisions = [remote_eligibility(loc, desc, target) for target in targets]
         if decisions and all(decision is not None for decision in decisions):
             order = {'pass': 0, 'review': 1, 'avoid': 2}
@@ -639,11 +639,8 @@ def preferred_location(loc, desc, mode, cfg):
         phrase = location_words(target)
         if phrase and phrase != 'remote' and f' {phrase} ' in published:
             return 'Eligible', f'Published location matches {target}', area
-        if mode in ('onsite', 'hybrid') and ',' in target and ',' in loc:
-            city, region, *_ = [part.strip() for part in target.split(',')]
-            office, state, *_ = [part.strip() for part in loc.split(',')]
-            if state_code(region) and state_code(region) == state_code(state) and location_words(city) == location_words(office):
-                return 'Eligible', f'Published location matches {target}', area
+        if mode in ('onsite', 'hybrid', 'unknown') and office_locations(target) & office_locations(loc):
+            return 'Eligible', f'Published location matches {target}', area
     if mode == 'remote':
         return 'Review', 'Confirm where the employer can hire remote workers', area
     if split and targets:
@@ -677,11 +674,17 @@ def discovery_regions(cfg):
             + (offices if 'hybrid' in modes or 'onsite' in modes else [])) or ['']
 
 
+def location_description(job):
+    return '\n'.join([clean(job.get('description')), *job.get('posting_location_terms', [])])
+
+
 def location_eligibility(j,cfg):
     loc=clean(j.get('location','')).lower()
     loc=re.sub(r'\bu\.s\.(?:a\.)?', 'us',loc)
-    desc=clean(j.get('description','')).lower()
-    mode = work_arrangement(j, loc, desc)
+    desc=location_description(j)
+    mode = work_arrangement(j, loc)
+    if cfg.get('us_postings_only') and foreign_location(loc) and not is_us_location(loc, desc, remote=mode == 'remote'):
+        return 'Rejected', 'Published work location is outside the United States', 'Other'
     if mode == 'conflict':
         return 'Review', 'Employer details disagree about the work arrangement', 'Other'
     if not uses_legacy_geography(cfg):
@@ -695,7 +698,12 @@ def location_eligibility(j,cfg):
     abbreviations='al ak az ar ca co ct de hi id il in ia ks ky la me md ma mi mn ms mo mt ne nv nh nj nm ny nc nd oh ok or pa ri sc sd tn tx ut vt va wa wv wi wy'.split()
     restricted_state=any(re.search(r'\b'+s+r'\b',loc) for s in state_names) or bool(re.search(r'(?:,|remote\s*[-:/]?)\s*(?:'+ '|'.join(abbreviations)+r')\b',loc))
     if remote and not hybrid:
-        for sentence in re.split(r'[\n.!?;]',desc):
+        decisions = [remote_eligibility(loc, desc, region) for region in ('Florida', 'Georgia')]
+        if all(decision and decision[0] == 'avoid' for decision in decisions):
+            return 'Rejected', decisions[0][1], 'Other'
+        if any(decision and decision[0] == 'review' for decision in decisions):
+            return 'Review', 'Confirm remote hiring restrictions for Florida or Georgia', 'Other'
+        for sentence in re.split(r'[\n.!?;]',desc.lower()):
             if re.search(r'(?:cannot|not|unable to|do not).{0,25}(?:hire|employ|accept).{0,70}\b(?:florida|georgia)\b|\b(?:excluding|except|excludes)\s+(?:florida|georgia)\b',sentence):
                 return 'Rejected','Remote excludes Florida or Georgia','Other'
             if re.search(r'(?:must (?:reside|live|be based|be located)|residency (?:is )?required|(?:hiring|eligible|approved) states(?: are|:)|remote.{0,15}(?:only in|restricted to))',sentence):
@@ -715,6 +723,24 @@ def location_eligibility(j,cfg):
             return 'Review','Local city found; state needs confirmation','Other'
     if hybrid and not loc:return 'Review','Hybrid or office attendance requirement: confirm the office is in an approved local area','Other'
     return 'Rejected' if loc else 'Review','Office location is outside Jacksonville or the Buford area' if loc else 'Office location missing','Other'
+def discovery_location_allowed(job, cfg, *, remote_region=None):
+    if not cfg.get('us_postings_only'):
+        return True
+    location = clean(job.get('location'))
+    description = location_description(job)
+    mode = work_arrangement(job)
+    remote = mode == 'remote' or (mode == 'conflict' and re.search(r'\bremote\b', location, re.I))
+    if not is_us_location(location, description, remote=remote):
+        return False
+    if not remote:
+        return True
+    regions = [remote_region] if remote_region else cfg.get('remote_hiring_locations', [])
+    if not regions:
+        regions = ('Florida', 'Georgia') if uses_legacy_geography(cfg) else ('United States',)
+    decisions = [remote_eligibility(location, description, target) for target in regions]
+    return any(not decision or decision[0] != 'avoid' for decision in decisions)
+
+
 def discovery_locations(cfg):
     if not uses_legacy_geography(cfg):
         return ('Eligible', 'Review')
@@ -774,7 +800,7 @@ def employer_duties(description):
 
 PROFILE_ACTION = re.compile(
     r'^(?:I\s+)?(?:analy[sz]ed|audited|automated|built|coordinated|created|designed|developed|'
-    r'documented|handled|implemented|investigated|led|maintained|managed|monitored|owned|'
+    r'coached|configured|documented|handled|implemented|investigated|led|maintained|managed|monitored|owned|supervised|'
     r'prepared|processed|reconciled|reported|resolved|reviewed|supported|tracked|trained|'
     r'troubleshot|used|validated|verified|worked\s+with)\b', re.I
 )
@@ -1228,7 +1254,15 @@ def verify_application(job, report=None, *, render_form=True):
     personio = (board_identity(url) or ('', ''))[0] == 'personio'
     raw, final = read_response(request, opener=PERSONIO_OPENER if personio else POSTING_OPENER,
                                max_bytes=1_000_000 if personio else 3_000_000)
-    has_form = application_form_visible(job, raw.decode('utf-8', errors='replace'), final)
+    posting_html = raw.decode('utf-8', errors='replace')
+    has_form = application_form_visible(job, posting_html, final)
+    if work_arrangement(job) in ('remote', 'conflict'):
+        # Use the checked requisition's residence terms even when an ATS feed only supplies a summary.
+        terms = list(dict.fromkeys(
+            ('Remote restricted to ' if kind == 'only' else 'Cannot hire in ') + place
+            for kind, place in location_clauses(posting_text(posting_html)) if len(place) <= 300
+        ))
+        job['posting_location_terms'] = terms[:12]
     if (not has_form and render_form and not personio and report is not None
             and config()['firecrawl_enabled'] and firecrawl_key()):
         try:
@@ -1277,7 +1311,7 @@ def finalize(job, cfg, report, *, check_posting=False, previous=None):
         same_posting = previous.get('url') == job['url'] and previous.get('title') == job['title']
         if (same_posting and expiry and expiry >= dt.datetime.now(dt.timezone.utc)
                 and (not wants_form or previous.get('application_verified'))):
-            for field in ('posting_verified', 'application_verified', 'application_evidence'):
+            for field in ('posting_verified', 'application_verified', 'application_evidence', 'posting_location_terms'):
                 if previous.get(field):
                     job[field] = previous[field]
             job['posting_check_failed'] = False
@@ -1592,7 +1626,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 successful += 1
                 report['log'].append(f'USAJOBS returned {len(found)} public announcements')
                 for job in found:
-                    if cfg.get('us_postings_only') and not is_us_location(clean(job['location'])):
+                    if not discovery_location_allowed(job, cfg):
                         report['skipped_location'] = report.get('skipped_location', 0) + 1
                         continue
                     ident = identity(job['url'])
@@ -1693,10 +1727,14 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                         if ident in seen:report['duplicates']+=1;continue
                         seen.add(ident)
                         if ident in known_identities:continue
-                        if cfg.get('us_postings_only') and not is_us_location(clean(j.get('location'))):
+                        # ATS summaries can omit residence restrictions included in the employer detail.
+                        if cfg.get('us_postings_only') and foreign_location(clean(j.get('location'))) and not is_us_location(clean(j.get('location'))):
                             report['skipped_location'] = report.get('skipped_location', 0) + 1
                             continue
                         j = assess(hydrate_board_listing(board, j), cfg)
+                        if not discovery_location_allowed(j, cfg):
+                            report['skipped_location'] = report.get('skipped_location', 0) + 1
+                            continue
                         matched = prototype.matching_searches(service(), j, searches, us_only=cfg.get('us_postings_only'))
                         if not cfg.get('recruiter_discovery') and not matched and not profile_candidate(j, cfg, report):
                             continue
@@ -1761,7 +1799,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                     report['reverified'] += 1
                     continue
                 j = assess(j, cfg)
-                if cfg.get('us_postings_only') and not is_us_location(clean(j.get('location'))):
+                if not discovery_location_allowed(j, cfg):
                     report['skipped_location'] = report.get('skipped_location', 0) + 1
                     continue
                 matched = prototype.matching_searches(service(), j, searches, us_only=cfg.get('us_postings_only'))
@@ -1798,6 +1836,11 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
             if recruiter_version is None:
                 progress('Saving results', new_count, min(len(ranked), limit))
             job = finalize(job, cfg, report, check_posting=bool(matched) or cfg.get('recruiter_discovery', False))
+            if not discovery_location_allowed(job, cfg):
+                report['skipped_location'] = report.get('skipped_location', 0) + 1
+                continue
+            if matched and job['availability'] == 'Open':
+                matched = prototype.matching_searches(service(), job, searches, us_only=cfg.get('us_postings_only'))
             with connect() as c:
                 job_id, added = upsert(c, job)
                 if added and matched:
@@ -1908,18 +1951,21 @@ def snapshot():
         cfg = config(connection=c)
         jobs = records(connection=c)
         stamp = dt.datetime.now(dt.timezone.utc)
+        recruiter_preferences = recruiter.saved_preferences(c)
+        remote_region = recruiter_preferences.get('remote_region')
         for j in jobs:
             if j.get('external_application'):
                 j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
                 continue
-            if cfg.get('us_postings_only') and not is_us_location(clean(j.get('location'))):
-                j['hidden_from_discovery'] = True
+            j['hidden_from_discovery'] = not discovery_location_allowed(j, cfg, remote_region=remote_region)
             expires = posting_check_expiration(j, cfg)
             j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
             if expires:
                 j['posting_verification_expires'] = expires.isoformat(timespec='seconds')
             previous_queue=j.get('queue');previous_application=j.get('application_verified')
             assess(j,cfg)
+            j['market_pay_available'] = not j['hidden_from_discovery'] and j.get('availability') != 'Closed' \
+                and recruiter.market_pay_needed(service(), j, recruiter_preferences)
             if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
             eligible,reason,area=location_eligibility(j,cfg)
             j.update(location_eligibility=eligible,location_reason=reason,area=area)

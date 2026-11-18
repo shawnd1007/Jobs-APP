@@ -34,7 +34,10 @@ if __name__ == '__main__':
                 jobs = board_jobs(*args)
                 if pay_test:
                     for job in jobs:
-                        if job['requisition'] == 'unknown':
+                        if job['requisition'] == 'lab':
+                            job.update(title='Fictional Revenue Cycle Director',
+                                       description='Review denial queues. Manage managers and lead multiple teams.')
+                        if job['requisition'] in ('unknown', 'lab'):
                             for key in ('salary_min', 'salary_max', 'salary_currency', 'salary_period', 'salary_type'):
                                 job.pop(key, None)
                             job['salary_text'] = 'Salary Not Published'
@@ -50,8 +53,9 @@ if __name__ == '__main__':
                 def fictional_pay(a, name, inputs, schema):
                     if name != 'market_pay':
                         return fake_ai(a, name, inputs, schema)
-                    summary = 'Comparable fictional roles pay $75,000 to $95,000 a year.'
-                    return dict(summary=summary, citations=[
+                    summary = 'Geography: Oregon\nData period: May 2025\nRange: USD 75,000–95,000 per year.'
+                    return dict(summary=summary, geography='Oregon', data_period='May 2025',
+                                salary_min=75000, salary_max=95000, salary_period='year', citations=[
                         dict(url='https://example.com/fictional-wages', title='Fictional wage data', end=len(summary))])
                 fixtures.enter_context(patch.object(recruiter, 'ai', side_effect=fictional_pay))
         with ThreadingHTTPServer(('127.0.0.1', 18087), app.Handler) as server:

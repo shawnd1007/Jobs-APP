@@ -245,6 +245,98 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(self.a.location_eligibility(job, cfg)[0], 'Eligible')
         self.assertEqual(self.a.location_eligibility(dict(job, location='Dallas, TX'), cfg)[0], 'Rejected')
 
+    def test_saved_discovery_and_alerts_filter_location_without_touching_tracking(self):
+        self.analyze()
+        self.search()
+        state = recruiter.read(self.a, True)
+        template = next(job for job in self.a.records() if job['requisition'] == 'unknown')
+        examples = (
+            ('foreign', 'Bogotá, CO', 'onsite', 'Review denial queues.', 'review'),
+            ('regional', 'Remote – US', 'remote', 'Location\nThis role will be remote and based in the Bay Area.', 'close'),
+            ('domestic', 'Remote – US', 'remote', 'Review denial queues.', 'avoid'),
+        )
+        ids = {}
+        with self.a.connect() as c:
+            search_id = c.execute('INSERT INTO saved_searches(criteria,version) VALUES(?,0) RETURNING id',
+                                  (json.dumps(dict(name='Fictional search', enabled=True, skills=['billing'],
+                                   locations=['Oregon, United States'], workplace_types=['remote'],
+                                   salary_min=70000, salary_max=None)),)).fetchone()[0]
+            for key, location, mode, description, group in examples:
+                job = dict(template, title='Fictional Billing ' + key.title(), requisition=key,
+                           url='https://jobs.lever.co/fictional-clinic/' + key, location=location,
+                           description=description, workplace_type=mode, remote=mode == 'remote')
+                job_id, _ = self.a.upsert(c, job)
+                ids[key] = job_id
+                c.execute("UPDATE tracking SET notes='Keep the fictional application',status='Applied' WHERE job_id=?", (job_id,))
+                self.a.prototype.record_match_alerts(c, job_id, [search_id], self.a.now())
+                state['matches'].append(dict(state['matches'][0], job_id=job_id, fit_group=group, group=group,
+                                             listing_fingerprint=recruiter.listing_fingerprint(job)))
+        recruiter.write(self.a, state)
+        with patch.object(self.a, 'config', return_value=dict(self.a.config(), us_postings_only=True)), \
+             patch.object(recruiter, 'ai', side_effect=AssertionError('Existing results require no AI call')):
+            matches = {item['job_id'] for item in recruiter.read(self.a)['matches']}
+            snapshot = self.a.snapshot()
+            jobs = {item['id']: item for item in snapshot['jobs']}
+            for key in ('foreign', 'regional'):
+                self.assertNotIn(ids[key], matches)
+                self.assertTrue(jobs[ids[key]]['hidden_from_discovery'])
+                self.assertEqual(jobs[ids[key]]['status'], 'Applied')
+                self.assertEqual(jobs[ids[key]]['notes'], 'Keep the fictional application')
+                self.assertFalse(any(alert['job_id'] == ids[key] for alert in snapshot['match_alerts']))
+            self.assertIn(ids['domestic'], matches)
+            self.assertFalse(jobs[ids['domestic']]['hidden_from_discovery'])
+            self.assertEqual(snapshot['unread_match_count'], 1)
+        self.assertEqual(recruiter.remote_eligibility('Remote – US', examples[1][3], 'California')[0], 'review')
+        self.assertEqual(recruiter.remote_eligibility('Remote – US', examples[1][3], 'San Francisco Bay Area, CA')[0], 'pass')
+        self.assertEqual(recruiter.remote_eligibility('Remote – US',
+            'Compensation\nBased in the Bay Area: $110,000 to $125,000.', 'Oregon')[0], 'pass')
+
+    def test_saved_adjacent_duty_evidence_is_reused_and_director_stays_in_review(self):
+        self.analyze()
+        self.search()
+        state = recruiter.read(self.a, True)
+        state['resume'] += ' Reconciled billing records for multiple clinics. Documented reports for supervisors.'
+        state['strategy']['skills'] += [dict(label='billing'), dict(label='reports')]
+        job = next(job for job in self.a.records() if job['requisition'] == 'unknown')
+        job['description'] = 'Responsibilities\nReconcile billing records.\nDocument reports for supervisors.'
+        result = dict(group='review', reason='Transferable billing duties.', gaps=['The vendor tool is preferred.'],
+                      resume_evidence='Reconciled billing records for multiple clinics.',
+                      job_evidence='Reconcile billing records.', emphasis=[])
+        director = dict(job, title='Director of Billing Experience', requisition='director',
+                        url='https://jobs.lever.co/fictional-clinic/director',
+                        description=job['description'] + '\nManage managers and lead multiple teams.')
+        with self.a.connect() as c:
+            self.a.upsert(c, job)
+            director['id'], _ = self.a.upsert(c, director)
+        with patch.object(recruiter, 'ai', side_effect=[result, dict(result, group='close', gaps=[])]):
+            adjacent = recruiter.match(self.a, state, job)
+            senior = recruiter.match(self.a, state, director)
+        self.assertEqual(adjacent['group'], 'adjacent')
+        self.assertEqual(senior['group'], 'review')
+        # Simulate a pre-upgrade shortlist with the original comparison retained.
+        state['matches'] = [dict(adjacent, group='review', fit_group='review'), senior]
+        recruiter.write(self.a, state)
+        with patch.object(recruiter, 'ai', side_effect=AssertionError('Existing results require no AI call')), \
+             patch.object(self.a, 'run_pipeline', side_effect=AssertionError('Existing results require no search')):
+            saved = {item['job_id']: item for item in recruiter.read(self.a)['matches']}
+        self.assertEqual(saved[job['id']]['group'], 'adjacent')
+        self.assertEqual(saved[director['id']]['group'], 'review')
+        self.assertIn('Experience managing managers or team leads needs confirmation.', saved[director['id']]['checks'])
+        self.assertIn('Leadership at the scale described by the employer needs confirmation.', saved[director['id']]['checks'])
+
+    def test_exact_posting_can_supply_missing_remote_restrictions(self):
+        title = 'Fictional Support Coordinator'
+        job = dict(title=title, url='https://jobs.lever.co/fictional-clinic/regional', requisition='regional',
+                   location='Remote - USA', description='Help clients troubleshoot.', workplace_type='remote')
+        html = b'<h1>Fictional Support Coordinator</h1><h2>Location</h2><p>This role will be remote and based in the Bay Area.</p>'
+        with patch.object(self.a, 'read_response', return_value=(html, job['url'])):
+            self.a.verify_application(job, render_form=False)
+        self.assertEqual(self.a.location_description(job),
+                         'Help clients troubleshoot.\nRemote restricted to the Bay Area')
+        self.assertFalse(self.a.discovery_location_allowed(job, dict(us_postings_only=True), remote_region='Florida'))
+        self.assertTrue(self.a.discovery_location_allowed(job, dict(us_postings_only=True),
+                                                        remote_region='San Francisco Bay Area, CA'))
+
     def test_usajobs_search_uses_official_posting_and_keeps_credentials_on_api_host(self):
         import usajobs
         from urllib.parse import parse_qs, urlsplit
@@ -313,7 +405,15 @@ class RecruiterTests(unittest.TestCase):
         self.analyze(); self.search()
         job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
         cfg = dict(self.a.config(), ai_enabled=True, ai_daily_limit=10)
-        text = 'Fictional state wage data shows an annual market range of $75,000 to $95,000.'
+        self.assertEqual(recruiter.market_pay(self.a, job['id'])[0], 400)
+        with self.a.connect() as c:
+            job.update(salary_min=None, salary_max=None, salary_text='Salary not published')
+            self.a.upsert(c, job)
+            comparable = dict(job, url='https://jobs.lever.co/fictional-clinic/comparable',
+                              requisition='comparable', employer='Second Fictional Clinic',
+                              title='revenue cycle supervisor', location='Oregon, United States')
+            comparable_id, _ = self.a.upsert(c, comparable)
+        text = 'Geography: Oregon, U.S.\nData period: May 2025\nRange: USD 75,000–95,000 per year.'
         body = {'status': 'completed', 'output': [
             {'type': 'web_search_call', 'status': 'completed', 'action': {'type': 'search'}},
             {'type': 'message', 'content': [{'type': 'output_text', 'text': text, 'annotations': [
@@ -332,11 +432,15 @@ class RecruiterTests(unittest.TestCase):
             self.assertEqual(result['research']['summary'], text)
             self.assertTrue(result['research']['citations'][0]['url'].startswith('https://'))
             self.assertEqual(recruiter.market_pay(self.a, job['id'], research=True), (200, result))
+            self.assertEqual(recruiter.market_pay(self.a, comparable_id, research=True), (200, result))
+            self.assertEqual(result['research']['geography'], 'Oregon, U.S.')
+            self.assertEqual(result['research']['data_period'], 'May 2025')
+            self.assertEqual(result['research']['salary_min'], 75000)
             network.assert_called_once()
             payload = json.loads(network.call_args.args[0].data)
             self.assertEqual(payload['tools'][0]['type'], 'web_search')
             self.assertFalse(payload['store'])
-            self.assertEqual(set(json.loads(payload['input'])), {'title', 'location', 'work_arrangement'})
+            self.assertEqual(set(json.loads(payload['input'])), {'title', 'location', 'work_arrangement', 'period'})
         self.assertEqual(recruiter.market_pay(self.a, job['id']), (200, result))
         self.assertEqual(recruiter.researched_pay(body['output'][1:]), {'summary': None, 'citations': []})
         body['output'][1]['content'][0]['annotations'] = []

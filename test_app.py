@@ -477,9 +477,9 @@ class PersistenceTests(unittest.TestCase):
  def test_unknown_salary_not_qualified(self):
   j={'title':'Financial Analyst','location':'Remote - United States','remote':True,'description':'Excel financial reconciliation','availability':'Open'}
   self.assertEqual(app.assess(j,app.config())['queue'],'Review')
- def test_restricted_remote_needs_review(self):
+ def test_restricted_remote_rejects_out_of_state_preferences(self):
   j={'title':'Financial Analyst','location':'Remote United States','remote':True,'description':'Must reside in California only','availability':'Open','salary_min':85000,'salary_max':100000,'salary_currency':'USD','salary_period':'year','salary_type':'base'}
-  self.assertEqual(app.assess(j,app.config())['eligibility'],'Review')
+  self.assertEqual(app.assess(j,app.config())['eligibility'],'Rejected')
  def test_below_floor_excluded(self):
   j={'title':'Financial Analyst','location':'Remote - United States','description':'Excel financial','availability':'Open','salary_max':65000,'salary_currency':'USD','salary_period':'year','salary_type':'base'}
   self.assertEqual(app.assess(j,app.config())['queue'],'Excluded')

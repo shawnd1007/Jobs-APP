@@ -42,6 +42,7 @@ struct Job: Decodable, Identifiable {
     var postingVerificationExpires: String? = nil
     var externalApplication: Bool? = nil
     var hiddenFromDiscovery: Bool? = nil
+    var marketPayAvailable: Bool? = nil
     var interest: Interest?
     var matchedSkills: [String]?
     let matchedGroups: [String]?
