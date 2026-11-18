@@ -669,6 +669,7 @@ OPTIONAL_GAP = re.compile(r'\b(?:prefer(?:red|ence)|optional|nice.to.have|bonus|
 ESSENTIAL_GAP = re.compile(
     r'\b(?:required|must have|minimum|essential|mandatory|licen[cs]e|clearance|manage[sd]? managers)\b', re.I
 )
+NOT_REQUIRED = re.compile(r"\b(?:not|never|isn['’]t|aren['’]t)\s+(?:explicitly\s+)?required\b", re.I)
 LEADERSHIP_TITLE = re.compile(r'\b(?:director|head of|vice president|vp|chief)\b', re.I)
 LEADERSHIP_SCOPE = (
     (re.compile(r'\b(?:manag\w*|lead\w*|supervis\w*) (?:a team of )?(?:managers|team leads|supervisors)\b', re.I),
@@ -703,7 +704,7 @@ def fit_assessment(a, result, evidence_checks, job, state, *, market_reaches_tar
     if scope_checks or evidence_checks:
         return 'review', scope_checks
 
-    if any(not OPTIONAL_GAP.search(gap) or ESSENTIAL_GAP.search(gap) for gap in gaps):
+    if any(not OPTIONAL_GAP.search(gap) or ESSENTIAL_GAP.search(NOT_REQUIRED.sub('', gap)) for gap in gaps):
         return 'review', ['The comparison flags a requirement or scope gap. Check it before applying.']
     if group == 'review' and (gaps or market_reaches_target):
         # Quotes alone do not establish transferability. Require documented duty overlap

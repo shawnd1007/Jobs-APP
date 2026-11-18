@@ -74,6 +74,19 @@ class RecruiterTests(unittest.TestCase):
         self.assertFalse(recruiter.quote_in('managed billing projects and hired staff', source))
         self.assertFalse(recruiter.quote_in('""', source))
 
+    def test_preferred_gap_saying_not_required_does_not_become_essential(self):
+        self.analyze()
+        state = recruiter.read(self.a, True)
+        job = dict(title='Billing Specialist', description='Review billing records.')
+        optional = dict(group='close', gaps=['Preferred: CRM experience is not required.'])
+        self.assertEqual(recruiter.fit_assessment(self.a, optional, [], job, state)[0], 'adjacent')
+        for gap in ('Required: CRM experience is preferred but a license is required.',
+                    'Preferred: CRM experience is not required, but clearance is mandatory.',
+                    'Preferred: The posting lists this as a minimum qualification.'):
+            with self.subTest(gap=gap):
+                self.assertEqual(recruiter.fit_assessment(self.a, dict(group='close', gaps=[gap]),
+                                                          [], job, state)[0], 'review')
+
     def test_comparison_uses_complete_resume_and_invalidates_cache_when_it_changes(self):
         self.analyze()
         self.search()
