@@ -46,13 +46,16 @@ def read(a, private=False):
         row = c.execute('SELECT value FROM recruiter_state WHERE id=1').fetchone()
     state = json.loads(row[0]) if row else dict(version=0, stage='empty', matches=[], error='')
     if not private:
-        current = {j['id']: j for j in a.records()} if state.get('matches') else {}
-        for item in state.get('matches', []):
+        matches = state.get('matches', [])
+        current = {j['id']: j for j in a.records()} if matches else {}
+        cfg = a.config() if current else None
+        checked_at = a.dt.datetime.now(a.dt.timezone.utc)
+        for item in matches:
             job = current.get(item['job_id'])
             if job is None:
                 item.update(group='review', checks=['This opening is no longer available in the current workspace.'])
                 continue
-            checks = constraints(a, job, state['preferences'])
+            checks = constraints(a, job, state['preferences'], cfg, checked_at)
             if item.get('listing_fingerprint') != listing_fingerprint(job):
                 checks.append(('review', 'The employer details changed after this analysis. Refresh matches.'))
             item['checks'] = [c[1] for c in checks] + item.get('evidence_checks', [])
@@ -348,7 +351,7 @@ def search_config(a, state):
     return cfg
 
 
-def constraints(a, job, p):
+def constraints(a, job, p, cfg, checked_at):
     checks = []
     mode = a.work_arrangement(job)
     if mode in ('unknown', 'conflict'):
@@ -368,8 +371,8 @@ def constraints(a, job, p):
         else:
             checks.append(('review', 'Confirm the employer can hire in ' + p['remote_region'] + '.'))
     elif mode in ('hybrid', 'onsite'):
-        cfg = dict(target_locations=[p['commute']], remote_hiring_locations=[], workplace_types=p['modes'])
-        status, reason, _ = a.location_eligibility(job, cfg)
+        location_config = dict(target_locations=[p['commute']], remote_hiring_locations=[], workplace_types=p['modes'])
+        status, reason, _ = a.location_eligibility(job, location_config)
         checks.append(({'Eligible': 'pass', 'Rejected': 'avoid'}.get(status, 'review'), reason))
         if mode == 'hybrid':
             checks.append(('review', 'Confirm hybrid attendance and hiring eligibility.'))
@@ -382,10 +385,15 @@ def constraints(a, job, p):
         checks.append(('review', 'Pay at your target needs confirmation.'))
     else:
         checks.append(('pass', 'Published base pay meets your target.'))
-    if job.get('availability') == 'Closed':
+    availability = job.get('availability')
+    if availability == 'Closed':
         checks.append(('avoid', 'This posting is closed.'))
-    elif not job.get('posting_verified') or (a.posting_check_expiration(job, a.config()) is None or a.posting_check_expiration(job, a.config()) < a.dt.datetime.now(a.dt.timezone.utc)) or job.get('availability') != 'Open' or job.get('posting_check_failed'):
-        checks.append(('review', 'The exact employer posting needs verification.'))
+    else:
+        expiration = a.posting_check_expiration(job, cfg) if (
+            availability == 'Open' and job.get('posting_verified') and not job.get('posting_check_failed')
+        ) else None
+        if expiration is None or expiration < checked_at:
+            checks.append(('review', 'The exact employer posting needs verification.'))
     return checks
 
 
@@ -398,7 +406,8 @@ def listing_fingerprint(job):
 def match(a, state, job):
     fields = ('title', 'employer', 'description', 'location', 'salary_text')
     facts = {k: job.get(k, '') for k in fields}
-    digest = hashlib.sha256(json.dumps([state['strategy'], facts, a.config()['ai_model']], sort_keys=True).encode()).hexdigest()
+    cfg = a.config()
+    digest = hashlib.sha256(json.dumps([state['strategy'], facts, cfg['ai_model']], sort_keys=True).encode()).hexdigest()
     with a.connect() as c:
         cached = c.execute('SELECT value FROM recruiter_match_cache WHERE fingerprint=?', (digest,)).fetchone()
     result = json.loads(cached[0]) if cached else ai(a, 'candidate_match', {'candidate': state['strategy'], 'job': facts}, MATCH)
@@ -414,7 +423,7 @@ def match(a, state, job):
     if not cached:
         with a.connect() as c:
             c.execute('INSERT INTO recruiter_match_cache VALUES(?,?) ON CONFLICT(fingerprint) DO UPDATE SET value=excluded.value', (digest, json.dumps(result)))
-    checks = constraints(a, job, state['preferences'])
+    checks = constraints(a, job, state['preferences'], cfg, a.dt.datetime.now(a.dt.timezone.utc))
     if any(c[0] == 'avoid' for c in checks):
         result['group'] = 'avoid'
     elif any(c[0] == 'review' for c in checks) and result['group'] in ('close', 'adjacent'):

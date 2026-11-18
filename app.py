@@ -21,6 +21,7 @@ from uuid import uuid4
 import prototype
 import recruiter
 from contextvars import ContextVar
+from contextlib import nullcontext
 from queue import Empty, Queue
 import sys
 from html.parser import HTMLParser
@@ -45,12 +46,12 @@ logging.basicConfig(filename=DATA / 'errors.log', level=logging.INFO, format='%(
 def now(): return dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
 def postgres_enabled(): return bool(os.environ.get('JOBS_POSTGRES_DSN'))
 
-def config():
+def config(*, connection=None):
     path = ROOT / ('config.example.json' if postgres_enabled() else 'config.json')
     base = json.loads(path.read_text(encoding='utf-8-sig'))
     if postgres_enabled():
         import postgres_store
-        with connect() as c:
+        with (connect() if connection is None else nullcontext(connection)) as c:
             return prototype.settings(base, DATA, postgres_store.read_preferences(c))
     return prototype.settings(base, DATA)
 
@@ -434,8 +435,8 @@ def upsert(c,j):
     job_id=c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?) RETURNING id',(ident,fallback,json.dumps(j),stamp,stamp)).fetchone()[0]
     c.execute('INSERT INTO tracking(job_id,updated) VALUES(?,?)',(job_id,stamp))
     return job_id,True
-def records():
-    with connect() as c:
+def records(*, connection=None):
+    with (connect() if connection is None else nullcontext(connection)) as c:
         result=[]
         for row in c.execute("SELECT jobs.*,tracking.status,tracking.application_date,tracking.notes,tracking.follow_up,tracking.updated tracking_updated,tracking.version,COALESCE(reviews.decision,'Pending') review_decision,COALESCE(reviews.note,'') review_note,COALESCE(reviews.reviewer,'') review_reviewer,COALESCE(reviews.checks,'{}') review_checks,COALESCE(reviews.updated,'') review_updated,COALESCE(reviews.version,0) review_version FROM jobs JOIN tracking ON jobs.id=tracking.job_id LEFT JOIN reviews ON reviews.job_id=jobs.id"):
             d=dict(row);d['review_checks']=json.loads(d['review_checks']);j=json.loads(d.pop('listing')); j.update(d); result.append(j)
@@ -1818,33 +1819,41 @@ def search_status():
 
 
 def snapshot():
-    cfg=config();jobs=records();stamp=dt.datetime.now(dt.timezone.utc)
-    for j in jobs:
-        if j.get('external_application'):
-            j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
-            continue
-        expires = posting_check_expiration(j, cfg)
-        j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
-        if expires:
-            j['posting_verification_expires'] = expires.isoformat(timespec='seconds')
-        previous_queue=j.get('queue');previous_application=j.get('application_verified')
-        assess(j,cfg)
-        if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
-        eligible,reason,area=location_eligibility(j,cfg)
-        j.update(location_eligibility=eligible,location_reason=reason,area=area)
-        j['review_blockers']=review_blockers(j,cfg)
-        if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
-        if j.get('queue')=='Confirmed':
-            verified=j.get('application_verified')
-            if not verified or (stamp-dt.datetime.fromisoformat(verified)).total_seconds()>cfg['verification_valid_hours']*3600:j['queue']='Review';j['stale']=True
-        j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
     with connect() as c:
+        cfg = config(connection=c)
+        jobs = records(connection=c)
+        stamp = dt.datetime.now(dt.timezone.utc)
+        for j in jobs:
+            if j.get('external_application'):
+                j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
+                continue
+            expires = posting_check_expiration(j, cfg)
+            j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
+            if expires:
+                j['posting_verification_expires'] = expires.isoformat(timespec='seconds')
+            previous_queue=j.get('queue');previous_application=j.get('application_verified')
+            assess(j,cfg)
+            if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
+            eligible,reason,area=location_eligibility(j,cfg)
+            j.update(location_eligibility=eligible,location_reason=reason,area=area)
+            j['review_blockers']=review_blockers(j,cfg)
+            if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
+            if j.get('queue')=='Confirmed':
+                verified=j.get('application_verified')
+                if not verified or (stamp-dt.datetime.fromisoformat(verified)).total_seconds()>cfg['verification_valid_hours']*3600:j['queue']='Review';j['stale']=True
+            j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
         interests = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM job_interests')}
         for job in jobs:
             job['interest'] = interests.get(job['id'])
         runs=[dict(r) for r in c.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 30')]
         for r in runs:r['report']=json.loads(r['report'])
-    return prototype.enrich_snapshot(service(),{'jobs':jobs,'runs':runs,'statuses':STATUSES,'running':SEARCH_ACTIVE.is_set(),'external_application_tracking':True,'application_prep_available':True,'firecrawl_configured':bool(cfg['firecrawl_enabled'] and firecrawl_key()),'schedule_hour_utc':cfg['schedule_hour_utc']})
+        result = {
+            'jobs': jobs, 'runs': runs, 'statuses': STATUSES, 'running': SEARCH_ACTIVE.is_set(),
+            'external_application_tracking': True, 'application_prep_available': True,
+            'firecrawl_configured': bool(cfg['firecrawl_enabled'] and firecrawl_key()),
+            'schedule_hour_utc': cfg['schedule_hour_utc'],
+        }
+        return prototype.enrich_snapshot(service(), result, cfg, c)
 def application_prep(job_id):
     with connect() as connection:
         row = connection.execute(

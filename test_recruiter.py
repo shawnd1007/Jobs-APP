@@ -154,6 +154,15 @@ class RecruiterTests(unittest.TestCase):
         self.assertTrue(result['skills'])
         self.assertTrue(result['roles'])
 
+    def test_recruiter_status_loads_settings_once_for_the_shortlist(self):
+        self.analyze()
+        expected = self.search()
+        self.assertGreater(len(expected['matches']), 1)
+        with patch.object(self.a, 'config', wraps=self.a.config) as load_settings:
+            refreshed = recruiter.read(self.a)
+        self.assertEqual(refreshed['matches'], expected['matches'])
+        load_settings.assert_called_once_with()
+
     def test_interrupted_analysis_keeps_resume_for_retry(self):
         recruiter.write(self.a, dict(version=1, stage='analyzing', resume=MARA, matches=[], error=''))
         with self.a.connect() as c: recruiter.init(c)

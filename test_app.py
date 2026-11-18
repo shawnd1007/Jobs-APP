@@ -11,7 +11,7 @@ import app
 class PersistenceTests(unittest.TestCase):
  def setUp(self):
   base = json.loads((Path(__file__).resolve().parent / "config.example.json").read_text())
-  config = patch.object(app, "config", side_effect=lambda: app.prototype.settings(dict(base), app.DATA))
+  config = patch.object(app, "config", side_effect=lambda **_: app.prototype.settings(dict(base), app.DATA))
   config.start()
   self.addCleanup(config.stop)
   self.tmp=tempfile.TemporaryDirectory();self.old=app.DB;self.olddata=app.DATA;self.oldseed=app.SEED;app.SEED=Path(__file__).resolve().parent/'fixtures'/'seed.html';app.DATA=Path(self.tmp.name);app.DB=app.DATA/'test.sqlite3';app.init()

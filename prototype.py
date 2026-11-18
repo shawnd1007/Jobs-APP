@@ -132,7 +132,7 @@ def source_result(a, source, state, count=0, error=''):
                   (source, a.now(), state, count, error[:300]))
 
 
-def source_snapshot(a, jobs, cfg):
+def source_snapshot(a, jobs, cfg, connection):
     sources = set()
     for j in jobs:
         if j.get('external_application') or j.get('identity_review'):
@@ -142,8 +142,7 @@ def source_snapshot(a, jobs, cfg):
     for platform, names in cfg['additional_boards'].items():
         sources.update(platform + '/' + n.lower() for n in names)
     sources.update(cfg['additional_employer_urls'])
-    with a.connect() as c:
-        health = {r['source']: dict(r) for r in c.execute('SELECT * FROM source_health')}
+    health = {r['source']: dict(r) for r in connection.execute('SELECT * FROM source_health')}
     sources.update(health)
     return [dict(health.get(s, {'source': s, 'state': 'not checked', 'checked': '', 'count': 0, 'error': ''}),
                  disabled=s in cfg['disabled_sources'], kind='Employer page' if s.startswith('https:') else 'Public ATS feed')
@@ -214,19 +213,17 @@ def _ai_review(a, job_id):
         return 502, {'error': 'AI review failed or was incomplete. Check provider access and usage before retrying; the attempt counts toward the daily limit.'}
 
 
-def enrich_snapshot(a, result):
-    cfg = a.config()
+def enrich_snapshot(a, result, cfg, connection):
     prefs = public_preferences(cfg)
     result.update(api_version=1, preferences=prefs,
                   preferences_revision=hashlib.sha256(json.dumps(prefs, sort_keys=True).encode()).hexdigest(),
-                  sources=source_snapshot(a, result['jobs'], cfg), ai_configured=bool(ai_key(a)))
-    with a.connect() as c:
-        searches = saved_searches(c)
-        result['saved_searches'] = searches
-        result['unread_match_count'] = c.execute('SELECT COUNT(*) FROM match_alerts WHERE unread=1').fetchone()[0]
-        alert_rows = c.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200').fetchall()
-        advice = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM ai_reviews')}
-        usage = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
+                  sources=source_snapshot(a, result['jobs'], cfg, connection), ai_configured=bool(ai_key(a)))
+    searches = saved_searches(connection)
+    result['saved_searches'] = searches
+    result['unread_match_count'] = connection.execute('SELECT COUNT(*) FROM match_alerts WHERE unread=1').fetchone()[0]
+    alert_rows = connection.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200').fetchall()
+    advice = {r['job_id']: dict(r) for r in connection.execute('SELECT * FROM ai_reviews')}
+    usage = connection.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
     searches_by_id = {search['id']: search for search in searches}
     jobs_by_id = {job['id']: job for job in result['jobs']}
     result['match_alerts'] = [

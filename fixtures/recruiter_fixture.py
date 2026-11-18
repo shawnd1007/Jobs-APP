@@ -66,7 +66,7 @@ def environment():
         stack.enter_context(patch.object(app, 'DATA', root))
         stack.enter_context(patch.object(app, 'DB', root / 'qa.sqlite3'))
         stack.enter_context(patch.object(app, 'SEED', source / 'seed.empty.html'))
-        stack.enter_context(patch.object(app, 'config', side_effect=lambda: dict(cfg)))
+        stack.enter_context(patch.object(app, 'config', side_effect=lambda **_: dict(cfg)))
         stack.enter_context(patch.object(recruiter, 'ai', side_effect=fake_ai))
         feed = [dict(id=key, text=title, applyUrl=f'https://jobs.lever.co/fictional-clinic/{key}',
                      categories={'location': location}, workplaceType=mode,
