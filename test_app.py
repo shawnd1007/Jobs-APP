@@ -9,6 +9,20 @@ from pathlib import Path
 import app
 
 class PersistenceTests(unittest.TestCase):
+ def test_large_malformed_text_and_geographic_pay_tiers(self):
+  tail = '<' * 50000
+  self.assertEqual(app.clean('<p>Example</p>' + tail), 'Example ' + tail)
+  description = 'Annual base salary $100,000 - $120,000 annually. ' + ('geographic ' * 4000)
+  job = {}
+  app.normalize_salary_evidence(job, description)
+  self.assertEqual((job['salary_min'], job['salary_max']), (100000, 120000))
+  tiered = {}
+  app.normalize_salary_evidence(tiered, description + 'range')
+  self.assertNotIn('salary_min', tiered)
+  next_line = {}
+  app.normalize_salary_evidence(next_line, description + '\nrange')
+  self.assertEqual(next_line['salary_max'], 120000)
+
  def setUp(self):
   base = json.loads((Path(__file__).resolve().parent / "config.example.json").read_text())
   config = patch.object(app, "config", side_effect=lambda **_: app.prototype.settings(dict(base), app.DATA))

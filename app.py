@@ -92,7 +92,12 @@ def connect():
         return postgres_store.Connection(postgres_store.connect_azure(os.environ['JOBS_POSTGRES_DSN'], ca_file))
     c=sqlite3.connect(DB, timeout=30, factory=Connection); c.row_factory=sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON'); c.execute('PRAGMA journal_mode=WAL'); return c
-def clean(s): return html.unescape(re.sub('<[^>]+>', ' ', s or '')).strip()
+def clean(s):
+    text = s or ''
+    # No tag can end after the final closing bracket. Excluding that suffix
+    # prevents repeated rescans of malformed text containing many '<' chars.
+    prefix, closing, suffix = text.rpartition('>')
+    return html.unescape(re.sub('<[^>]+>', ' ', prefix + closing) + suffix).strip()
 
 def posting_text(value):
     """Keep section and bullet boundaries from employer HTML."""
@@ -563,7 +568,11 @@ def normalize_salary_evidence(job, description):
     if not (re.search(r'\b' + annual_period, match['label'] + match['qualifier'], re.I)
             or re.match(r'[ \t]*(?:USD[ \t]+)?' + annual_period, description[match.end():], re.I)):
         return
-    if re.search(r'tier [123]|geographic.*(?:range|band)|per hour|hourly|\bCAD\b|Canadian dollars', description, re.I):
+    geographic_tiers = any(
+        (geo_match := re.search(r'geographic', line, re.I)) and re.search(r'range|band', line[geo_match.end():], re.I)
+        for line in description.split('\n')
+    )
+    if geographic_tiers or re.search(r'tier [123]|per hour|hourly|\bCAD\b|Canadian dollars', description, re.I):
         return
     low, high = (int(match[bound].replace(',', '')) for bound in ('low', 'high'))
     if 30000 <= low <= high <= 500000:
@@ -1979,28 +1988,41 @@ def snapshot():
         remote_region = recruiter_preferences.get('remote_region')
         postgres_store.record_timing('dashboard_load', time.monotonic() - stage_start)
         stage_start = time.monotonic()
+        location_time = fit_time = market_time = review_time = 0.0
         for j in jobs:
             if j.get('external_application'):
                 j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
                 continue
+            item_start = time.monotonic()
             j['hidden_from_discovery'] = not discovery_location_allowed(j, cfg, remote_region=remote_region)
+            location_time += time.monotonic() - item_start
             expires = posting_check_expiration(j, cfg)
             j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
             if expires:
                 j['posting_verification_expires'] = expires.isoformat(timespec='seconds')
             previous_queue=j.get('queue');previous_application=j.get('application_verified')
+            item_start = time.monotonic()
             assess(j,cfg)
+            fit_time += time.monotonic() - item_start
+            item_start = time.monotonic()
             j['market_pay_available'] = not j['hidden_from_discovery'] and j.get('availability') != 'Closed' \
                 and recruiter.market_pay_needed(service(), j, recruiter_preferences)
+            market_time += time.monotonic() - item_start
             if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
             eligible = j['location_eligibility']
+            item_start = time.monotonic()
             j['review_blockers']=review_blockers(j,cfg,location_status=eligible)
+            review_time += time.monotonic() - item_start
             if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
             if j.get('queue')=='Confirmed':
                 verified=j.get('application_verified')
                 if not verified or (stamp-dt.datetime.fromisoformat(verified)).total_seconds()>cfg['verification_valid_hours']*3600:j['queue']='Review';j['stale']=True
             j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
         postgres_store.record_timing('dashboard_assess', time.monotonic() - stage_start)
+        postgres_store.record_timing('dashboard_location', location_time)
+        postgres_store.record_timing('dashboard_fit', fit_time)
+        postgres_store.record_timing('dashboard_market', market_time)
+        postgres_store.record_timing('dashboard_review', review_time)
         interests = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM job_interests')}
         for job in jobs:
             job['interest'] = interests.get(job['id'])

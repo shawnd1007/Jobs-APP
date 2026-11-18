@@ -14,7 +14,8 @@ _managed_identity_credential = None
 _timing_lock = threading.Lock()
 _timings = {name: deque(maxlen=100) for name in (
     'identity', 'postgres_connect', 'recruiter', 'recruiter_status', 'dashboard', 'search_status',
-    'sql_select', 'sql_write', 'sql_other', 'dashboard_load', 'dashboard_assess', 'dashboard_enrich')}
+    'sql_select', 'sql_write', 'sql_other', 'dashboard_load', 'dashboard_assess', 'dashboard_enrich',
+    'dashboard_location', 'dashboard_fit', 'dashboard_market', 'dashboard_review')}
 
 
 def record_timing(name, seconds):
