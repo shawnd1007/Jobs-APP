@@ -17,6 +17,7 @@ import urllib.request
 from urllib.parse import urlsplit
 from difflib import SequenceMatcher
 from contextvars import ContextVar
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import prototype
 from us_locations import office_locations, remote_eligibility, remote_restrictions, STATES
@@ -88,22 +89,22 @@ def read(a, private=False, *, status_only=False):
                 report = json.loads(run[0])
                 if report.get('recruiter_version') == state['version']:
                     state['progress'] = report.get('progress')
-    if state['stage'] in ('discovering', 'matching'):
-        state['stop_requested'] = stop_requested(a, state['version'])
-    if status_only:
-        status = {key: state.get(key) for key in ('version', 'stage', 'progress')}
-        if 'stop_requested' in state:
-            status['stop_requested'] = state['stop_requested']
-        return status
-    if not private:
-        refresh_saved_matches(a, state)
-        state.pop('resume', None)
-        state.pop('operation', None)
+        if state['stage'] in ('discovering', 'matching'):
+            state['stop_requested'] = stop_requested(a, state['version'], connection=c)
+        if status_only:
+            status = {key: state.get(key) for key in ('version', 'stage', 'progress')}
+            if 'stop_requested' in state:
+                status['stop_requested'] = state['stop_requested']
+            return status
+        if not private:
+            refresh_saved_matches(a, state, connection=c)
+            state.pop('resume', None)
+            state.pop('operation', None)
     return state
 
 
-def stop_requested(a, operation):
-    with a.connect() as c:
+def stop_requested(a, operation, *, connection=None):
+    with (a.connect() if connection is None else nullcontext(connection)) as c:
         return bool(c.execute('SELECT 1 FROM recruiter_stop WHERE operation=?', (operation,)).fetchone())
 
 
@@ -125,11 +126,11 @@ def saved_preferences(connection):
     return json.loads(row[0]).get('preferences', {}) if row else {}
 
 
-def refresh_saved_matches(a, state):
+def refresh_saved_matches(a, state, *, connection=None):
     if not state.get('matches'):
         return
-    current = {job['id']: job for job in a.records()}
-    cfg = a.config()
+    current = {job['id']: job for job in a.records(connection=connection)}
+    cfg = a.config(connection=connection)
     preferences = state['preferences']
     matches = [item for item in state['matches']
                if item['job_id'] in current and a.discovery_location_allowed(
@@ -143,7 +144,8 @@ def refresh_saved_matches(a, state):
     market_keys = {item['job_id']: market_pay_key(market_pay_facts(a, current[item['job_id']], preferences))
                    for item in matches if market_pay_needed(a, current[item['job_id']], preferences)
                    and item.get('fit_group', item['group']) != 'avoid'}
-    comparisons = saved_comparisons(a, list(dict.fromkeys([*keys.values(), *legacy_keys.values(), *market_keys.values()])))
+    comparisons = saved_comparisons(a, list(dict.fromkeys([*keys.values(), *legacy_keys.values(), *market_keys.values()])),
+                                    connection=connection)
     for item in matches:
         job = current[item['job_id']]
         checks = constraints(a, job, preferences, cfg, checked_at)
@@ -177,10 +179,10 @@ def refresh_saved_matches(a, state):
     ))
 
 
-def saved_comparisons(a, keys):
+def saved_comparisons(a, keys, *, connection=None):
     comparisons = {}
     if keys:
-        with a.connect() as c:
+        with (a.connect() if connection is None else nullcontext(connection)) as c:
             for start in range(0, len(keys), 200):
                 batch = keys[start:start + 200]
                 placeholders = ','.join('?' for _ in batch)

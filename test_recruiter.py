@@ -324,11 +324,28 @@ class RecruiterTests(unittest.TestCase):
         with patch.object(self.a, 'config', wraps=self.a.config) as load_settings:
             refreshed = recruiter.read(self.a)
         self.assertEqual(refreshed['matches'], expected['matches'])
-        load_settings.assert_called_once_with()
+        load_settings.assert_called_once()
+        self.assertIn('connection', load_settings.call_args.kwargs)
         with patch.object(self.a, 'records', side_effect=AssertionError('Status must not load jobs')), \
              patch.object(self.a, 'config', side_effect=AssertionError('Status must not load settings')):
             status = recruiter.read(self.a, status_only=True)
         self.assertEqual(status, {key: expected.get(key) for key in ('version', 'stage', 'progress')})
+
+    def test_recruiter_reads_reuse_one_database_connection(self):
+        self.analyze()
+        expected = self.search()
+        with patch.object(self.a, 'connect', wraps=self.a.connect) as connect:
+            refreshed = recruiter.read(self.a)
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(refreshed['matches'], expected['matches'])
+        state = recruiter.read(self.a, True)
+        state['stage'] = 'matching'
+        recruiter.write(self.a, state)
+        with patch.object(self.a, 'connect', wraps=self.a.connect) as connect:
+            status = recruiter.read(self.a, status_only=True)
+        self.assertEqual(connect.call_count, 1)
+        self.assertEqual(status['stage'], 'matching')
+        self.assertFalse(status['stop_requested'])
 
     def test_us_location_is_portable_across_customer_regions(self):
         from us_locations import is_us_location, remote_eligibility
