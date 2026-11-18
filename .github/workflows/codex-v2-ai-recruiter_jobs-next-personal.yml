@@ -13,6 +13,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      package-id: ${{ steps.package.outputs.artifact-id }}
     permissions:
       contents: read #This is required for actions/checkout
 
@@ -34,6 +36,7 @@ jobs:
                 
       # By default, when you enable GitHub CI/CD integration through the Azure portal, the platform automatically sets the SCM_DO_BUILD_DURING_DEPLOYMENT application setting to true. This triggers the use of Oryx, a build engine that handles application compilation and dependency installation (e.g., pip install) directly on the platform during deployment. Hence, we exclude the antenv virtual environment directory from the deployment artifact to reduce the payload size. 
       - name: Upload artifact for deployment jobs
+        id: package
         uses: actions/upload-artifact@v4
         with:
           name: python-app
@@ -52,14 +55,9 @@ jobs:
     needs: build
     permissions:
       id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
+      actions: read # Get a short-lived download URL for this run's package.
 
     steps:
-      - name: Download artifact from build job
-        uses: actions/download-artifact@v4
-        with:
-          name: python-app
-      
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -67,10 +65,20 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_EBDE06031D254592B96F549FB107F436 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_9E68C2FE65C74C9F9F82C057FEA2B5AE }}
 
-      - name: 'Deploy to Azure Web App'
-        uses: azure/webapps-deploy@v3
-        id: deploy-to-webapp
-        with:
-          app-name: 'jobs-next-personal'
-          slot-name: 'Production'
-          
+      - name: Deploy to Azure Web App from the build artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_ID: ${{ needs.build.outputs.package-id }}
+        run: |
+          set -euo pipefail
+          [[ "$PACKAGE_ID" =~ ^[0-9]+$ ]]
+          package_url=$(curl --fail --silent --show-error --max-time 20 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            --output /dev/null --write-out '%{redirect_url}' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$PACKAGE_ID/zip")
+          [[ "$package_url" == https://* ]]
+          printf '::add-mask::%s\n' "$package_url"
+          # Remote deployment uses Azure Resource Manager and works with restricted SCM ingress.
+          az webapp deploy --resource-group rg-jobs-next --name jobs-next-personal \
+            --src-url "$package_url" --type zip --track-status false --only-show-errors --output none
