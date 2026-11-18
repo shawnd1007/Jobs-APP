@@ -15,6 +15,8 @@ The matching follow-up adds [distinct duty evidence](COMPLETE-GUIDE.md#7-how-mat
 
 ## Ideas from personal testing
 
+- Add a Stop search control that preserves completed results, profile, applications and notes. Handle in-flight provider requests, concurrent operations and retry safely, and verify with fictional data on a separate simulator.
+
 - Local implementation in progress: recruiter pay selection, Apple Maps location suggestions, a stored master résumé and job-specific editable AI drafts. Verify the original file upload and preview on a signed phone, live location suggestions, PostgreSQL persistence and recovery, and a separately authorized live AI request before treating these as deployed or production-ready. Existing résumé text does not include the original file; it must be selected again to store that copy. Tailored drafts currently share as text, not a formatted PDF.
 
 

@@ -17,12 +17,14 @@ import urllib.request
 from urllib.parse import urlsplit
 from difflib import SequenceMatcher
 from contextvars import ContextVar
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import prototype
 from us_locations import office_locations, remote_eligibility, remote_restrictions, STATES
 
 LOCK = threading.Lock()
 BUSY = {'analyzing', 'discovering', 'matching'}
 OPERATION = ContextVar('recruiter_operation', default=None)
+MATCH_WORKERS = 4
 
 
 class AIRequestError(ValueError):
@@ -247,8 +249,9 @@ def market_pay_matches_target(a, estimate, preferences, checked_at):
     return high >= preferences['salary'] if low is not None and high is not None else None
 
 
-def market_pay(a, job_id, *, research=False):
-    if research and not LOCK.acquire(False):
+def market_pay(a, job_id, *, research=False, _search_holds_lock=False):
+    acquired = research and not _search_holds_lock
+    if acquired and not LOCK.acquire(False):
         return 409, {'error': 'Wait for the current recruiter task to finish before researching pay.'}
     try:
         with a.connect() as c:
@@ -284,7 +287,7 @@ def market_pay(a, job_id, *, research=False):
         target_match = market_pay_matches_target(a, estimate, preferences, a.dt.datetime.now(a.dt.timezone.utc))
         return 200, {'research': dict(estimate, stale=False, target_match=target_match)}
     finally:
-        if research:
+        if acquired:
             LOCK.release()
 
 
@@ -774,11 +777,71 @@ def work(a, state, action):
                          progress=dict(stage='Comparing jobs with your experience', completed=0,
                                        total=len(selected)))
             write(a, state, event=state['progress'])
-            for job in selected:
-                state['matches'].append(match(a, state, job))
-                state['progress']['completed'] = len(state['matches'])
+            def compare(job):
+                worker_token = OPERATION.set(state['version'])
+                try:
+                    return match(a, state, job)
+                finally:
+                    OPERATION.reset(worker_token)
+
+            # Limit in-flight requests and stop scheduling new work on failure.
+            # Drain the current batch so successful paid calls are retained.
+            with ThreadPoolExecutor(max_workers=MATCH_WORKERS) as executor:
+                pending = list(selected)
+                while pending:
+                    batch, remaining, batch_keys = [], [], set()
+                    for job in pending:
+                        key = match_cache_key(state['strategy'], match_facts(job), cfg['ai_model'], state['resume'])
+                        if len(batch) < MATCH_WORKERS and key not in batch_keys:
+                            batch.append(job)
+                            batch_keys.add(key)
+                        else:
+                            remaining.append(job)
+                    pending = remaining
+                    futures = [executor.submit(compare, job) for job in batch]
+                    error = None
+                    for future in as_completed(futures):
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            if error is None:
+                                error = exc
+                        else:
+                            state['matches'].append(result)
+                            state['progress']['completed'] = len(state['matches'])
+                            write(a, state, event=state['progress'])
+                    if error is not None:
+                        raise error
+            by_id = {job['id']: job for job in selected}
+            pay_candidates = [item for item in state['matches']
+                              if item['group'] != 'avoid' and item['fit_group'] in ('close', 'adjacent')
+                              and item['market_pay_available']]
+            researched = set()
+            pay_failures = 0
+            for index, item in enumerate(pay_candidates):
+                state['progress'] = dict(stage='Researching market pay', completed=index,
+                                         total=len(pay_candidates))
                 write(a, state, event=state['progress'])
-            state['matches'].sort(key=lambda m: ['close', 'adjacent', 'review', 'avoid'].index(m['group']))
+                key = market_pay_key(market_pay_facts(a, by_id[item['job_id']], state['preferences']))
+                if key in researched:
+                    continue
+                researched.add(key)
+                try:
+                    status, _ = market_pay(a, item['job_id'], research=True, _search_holds_lock=True)
+                    if status != 200:
+                        pay_failures += 1
+                except Exception:
+                    pay_failures += 1
+            if pay_failures:
+                write(a, state, event={'stage': 'Some market pay research could not finish',
+                                       'count': pay_failures})
+            if pay_candidates:
+                state['progress'] = dict(stage='Researching market pay', completed=len(pay_candidates),
+                                         total=len(pay_candidates))
+            job_order = {job['id']: index for index, job in enumerate(selected)}
+            state['matches'].sort(key=lambda m: (
+                ['close', 'adjacent', 'review', 'avoid'].index(m['group']), job_order[m['job_id']]
+            ))
             state.update(stage='complete', error='')
             outcome = {'stage': 'Search complete' if jobs else 'No openings found',
                        'completed': len(state['matches']), 'total': len(selected)}

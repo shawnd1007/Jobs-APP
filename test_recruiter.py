@@ -210,8 +210,10 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(failed['stage'], 'failed')
         self.assertEqual(board_progress[0]['stage'], 'Checking employer boards')
         self.assertEqual(board_progress[0]['source'], 'fictional-clinic')
-        self.assertEqual([p['completed'] for p in comparison_progress], [0, 1])
-        self.assertEqual(comparison_progress[1]['total'], 6)
+        self.assertGreaterEqual(len(comparison_progress), 2)
+        self.assertTrue(all(p['stage'] == 'Comparing jobs with your experience' for p in comparison_progress))
+        self.assertTrue(all(p['total'] == 6 for p in comparison_progress))
+        self.assertEqual(failed['progress']['completed'], len(failed['matches']))
 
         completed = self.search()
         events = list(reversed(recruiter.activity(self.a)['entries']))
@@ -224,6 +226,28 @@ class RecruiterTests(unittest.TestCase):
         self.assertNotIn(MARA, json.dumps(events))
         earlier = recruiter.activity(self.a, before=failed_events[-1]['id'])['entries']
         self.assertEqual(earlier[0]['id'], failed_events[-2]['id'])
+
+    def test_search_compares_in_parallel_with_operation_context(self):
+        state = self.analyze()
+        barrier = threading.Barrier(recruiter.MATCH_WORKERS, timeout=5)
+        lock = threading.Lock()
+        started = []
+        actual_match = recruiter.match
+
+        def observed_match(a, search_state, job):
+            with lock:
+                started.append((job['id'], recruiter.OPERATION.get()))
+                initial_batch = len(started) <= recruiter.MATCH_WORKERS
+            if initial_batch:
+                barrier.wait()
+            return actual_match(a, search_state, job)
+
+        with patch.object(recruiter, 'match', side_effect=observed_match):
+            result = self.search()
+        self.assertEqual(len(started), len(result['matches']))
+        self.assertEqual(len({job_id for job_id, _ in started}), len(started))
+        self.assertTrue(all(operation == result['version'] for _, operation in started))
+        self.assertEqual(result['progress']['completed'], len(result['matches']))
 
     def test_recruiter_status_loads_settings_once_for_the_shortlist(self):
         self.analyze()
@@ -466,6 +490,53 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(recruiter.researched_pay(body['output'][1:]), {'summary': None, 'citations': []})
         body['output'][1]['content'][0]['annotations'] = []
         self.assertEqual(recruiter.researched_pay(body['output']), {'summary': None, 'citations': []})
+
+    def test_search_researches_comparable_pay_once_and_keeps_matches_on_failure(self):
+        self.analyze(); self.search()
+        job = next(j for j in self.a.records() if j['requisition'] == 'billing')
+        job.update(salary_min=None, salary_max=None, salary_text='Pay not disclosed')
+        with self.a.connect() as c:
+            self.a.upsert(c, job)
+            twin = dict(job, requisition='billing-twin',
+                        url='https://jobs.lever.co/fictional-clinic/billing-twin')
+            twin['id'], _ = self.a.upsert(c, twin)
+
+        def pipeline(*args, **kwargs):
+            self.a.LOCK.release()
+            return {'state': 'complete'}
+
+        estimate = dict(summary='Fictional estimate', geography='Oregon', data_period='2025',
+                        salary_min=70000, salary_max=90000, salary_period='year',
+                        citations=[dict(title='Wages', url='https://example.com/wages', end=1)])
+
+        def provider(a, name, inputs, schema):
+            if name == 'market_pay':
+                return estimate
+            return fake_ai(a, name, inputs, schema)
+
+        with patch.object(self.a, 'run_pipeline', side_effect=pipeline), \
+             patch.object(recruiter, 'ai', side_effect=provider) as mock:
+            result = self.search()
+        self.assertEqual(sum(call.args[1] == 'market_pay' for call in mock.call_args_list), 1)
+        matched = [m for m in result['matches'] if m['job_id'] in (job['id'], twin['id'])]
+        self.assertEqual(len(matched), 2)
+        self.assertTrue(all(m['market_pay_target_match'] for m in matched))
+
+        with self.a.connect() as c:
+            c.execute("DELETE FROM recruiter_match_cache WHERE fingerprint LIKE 'market-pay:%'")
+
+        def failure(a, name, inputs, schema):
+            if name == 'market_pay':
+                raise recruiter.AIRequestError('Fictional outage')
+            return fake_ai(a, name, inputs, schema)
+
+        with patch.object(self.a, 'run_pipeline', side_effect=pipeline), \
+             patch.object(recruiter, 'ai', side_effect=failure):
+            result = self.search()
+        self.assertEqual(result['stage'], 'complete')
+        self.assertEqual(len([m for m in result['matches'] if m['job_id'] in (job['id'], twin['id'])]), 2)
+        self.assertTrue(any(entry['progress']['stage'] == 'Some market pay research could not finish'
+                            for entry in recruiter.activity(self.a)['entries']))
 
     def test_market_pay_promotes_only_qualified_saved_matches_at_the_target(self):
         self.analyze()
