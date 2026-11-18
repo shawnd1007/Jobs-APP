@@ -7,9 +7,29 @@ still requires end-to-end deployment and recovery verification before use.
 import logging
 import threading
 import time
+from collections import deque
 
 _credential_lock = threading.Lock()
 _managed_identity_credential = None
+_timing_lock = threading.Lock()
+_timings = {name: deque(maxlen=100) for name in (
+    'identity', 'postgres_connect', 'recruiter', 'recruiter_status', 'dashboard', 'search_status')}
+
+
+def record_timing(name, seconds):
+    """Retain only bounded durations for known service operations."""
+    if name not in _timings:
+        raise ValueError('Unknown timing category')
+    with _timing_lock:
+        _timings[name].append(seconds)
+
+
+def timing_summary():
+    with _timing_lock:
+        return {name: {'samples': len(values),
+                       'mean_seconds': round(sum(values) / len(values), 3) if values else None,
+                       'max_seconds': round(max(values), 3) if values else None}
+                for name, values in _timings.items()}
 
 class Row:
     """Support the named and positional access used by the existing store."""
@@ -82,8 +102,11 @@ def connect_azure(dsn, ca_file):
         return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows)
     finally:
         finished = time.monotonic()
+        identity_end = token_finished if token_finished is not None else finished
+        record_timing('identity', identity_end - started)
+        if token_finished is not None:
+            record_timing('postgres_connect', finished - token_finished)
         if finished - started >= 1:
-            identity_end = token_finished if token_finished is not None else finished
             logging.getLogger('jobs.timing').warning(
                 'Slow PostgreSQL connection: identity=%.2fs connect=%.2fs',
                 identity_end - started, finished - identity_end)

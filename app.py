@@ -21,6 +21,7 @@ from uuid import uuid4
 import prototype
 import recruiter
 import usajobs
+import postgres_store
 from us_locations import foreign_location, is_us_location, location_clauses, office_locations, remote_eligibility
 from contextvars import ContextVar
 from contextlib import nullcontext
@@ -2107,9 +2108,14 @@ def timed_request(method):
             elapsed = time.monotonic() - started
             path = up.urlsplit(handler.path).path
             labels = {'/api/recruiter': 'recruiter', '/api/v1/dashboard': 'dashboard',
-                      '/api/dashboard': 'dashboard', '/api/v1/search-status': 'search-status'}
-            if elapsed >= 1 and path in labels:
-                timing_logger.warning('Slow request: route=%s elapsed=%.2fs', labels[path], elapsed)
+                      '/api/dashboard': 'dashboard', '/api/v1/search-status': 'search_status'}
+            label = labels.get(path)
+            if path == '/api/recruiter' and up.parse_qs(up.urlsplit(handler.path).query).get('status') == ['1']:
+                label = 'recruiter_status'
+            if label:
+                postgres_store.record_timing(label, elapsed)
+                if elapsed >= 1:
+                    timing_logger.warning('Slow request: route=%s elapsed=%.2fs', label, elapsed)
     return wrapped
 
 
@@ -2137,6 +2143,7 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/recruiter/usage':return self.send(200,recruiter.usage_report(service()))
         if path=='/api/dashboard':return self.send(200,snapshot())
         if path=='/api/v1/health':return self.send(200,{'status':'ok','api_version':1})
+        if path=='/api/v1/diagnostics/timing':return self.send(200,postgres_store.timing_summary())
         if path=='/api/v1/search-status':return self.send(200,search_status())
         if path=='/api/v1/dashboard':return self.send(200,snapshot())
         pay_match = re.fullmatch(r'/api/jobs/(\d+)/market-pay', path)

@@ -11,6 +11,23 @@ import postgres_store
 
 
 class RowTests(unittest.TestCase):
+    def test_timing_summary_is_bounded_and_uses_fixed_labels(self):
+        from collections import deque
+        import app
+        timings = {name: deque(maxlen=100) for name in postgres_store._timings}
+        with patch.object(postgres_store, '_timings', timings):
+            for seconds in range(101):
+                postgres_store.record_timing('identity', seconds)
+            handler = types.SimpleNamespace(path='/api/recruiter?status=1&private=fictional')
+            with patch.object(app.time, 'monotonic', side_effect=[2, 2.5]):
+                app.timed_request(lambda _: None)(handler)
+            summary = postgres_store.timing_summary()
+            self.assertEqual(summary['identity'], {'samples': 100, 'mean_seconds': 50.5, 'max_seconds': 100})
+            self.assertEqual(summary['recruiter_status']['samples'], 1)
+            self.assertNotIn('fictional', str(summary))
+            with self.assertRaises(ValueError):
+                postgres_store.record_timing('private', 1)
+
     def test_immediate_transaction_acquires_transaction_scoped_lock(self):
         raw = MagicMock()
         connection = postgres_store.Connection(raw)
