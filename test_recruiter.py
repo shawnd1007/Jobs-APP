@@ -347,6 +347,22 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(status['stage'], 'matching')
         self.assertFalse(status['stop_requested'])
 
+    def test_saved_match_refresh_reads_only_referenced_listings(self):
+        self.analyze()
+        expected = self.search()
+        job = self.a.records()[0]
+        with self.a.connect() as c:
+            selected = recruiter.saved_match_listings(self.a, [job['id'], *range(10000, 10210)], connection=c)
+        self.assertEqual(list(selected), [job['id']])
+        self.assertEqual(selected[job['id']]['title'], job['title'])
+        with patch.object(self.a, 'records', side_effect=AssertionError('Unrelated jobs should not be loaded')):
+            refreshed = recruiter.read(self.a)
+        self.assertEqual(refreshed['matches'], expected['matches'])
+        with self.a.connect() as c:
+            c.execute('DELETE FROM tracking WHERE job_id=?', (job['id'],))
+        self.assertNotIn(job['id'], recruiter.saved_match_listings(self.a, [job['id']]))
+        self.assertNotIn(job['id'], [match['job_id'] for match in recruiter.read(self.a)['matches']])
+
     def test_us_location_is_portable_across_customer_regions(self):
         from us_locations import is_us_location, remote_eligibility
 

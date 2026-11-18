@@ -1971,11 +1971,14 @@ def search_status():
 
 def snapshot():
     with connect() as c:
+        stage_start = time.monotonic()
         cfg = config(connection=c)
         jobs = records(connection=c)
         stamp = dt.datetime.now(dt.timezone.utc)
         recruiter_preferences = recruiter.saved_preferences(c)
         remote_region = recruiter_preferences.get('remote_region')
+        postgres_store.record_timing('dashboard_load', time.monotonic() - stage_start)
+        stage_start = time.monotonic()
         for j in jobs:
             if j.get('external_application'):
                 j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
@@ -1997,6 +2000,7 @@ def snapshot():
                 verified=j.get('application_verified')
                 if not verified or (stamp-dt.datetime.fromisoformat(verified)).total_seconds()>cfg['verification_valid_hours']*3600:j['queue']='Review';j['stale']=True
             j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
+        postgres_store.record_timing('dashboard_assess', time.monotonic() - stage_start)
         interests = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM job_interests')}
         for job in jobs:
             job['interest'] = interests.get(job['id'])
@@ -2008,7 +2012,10 @@ def snapshot():
             'firecrawl_configured': bool(cfg['firecrawl_enabled'] and firecrawl_key()),
             'schedule_hour_utc': cfg['schedule_hour_utc'],
         }
-        return prototype.enrich_snapshot(service(), result, cfg, c)
+        stage_start = time.monotonic()
+        enriched = prototype.enrich_snapshot(service(), result, cfg, c)
+        postgres_store.record_timing('dashboard_enrich', time.monotonic() - stage_start)
+        return enriched
 def application_prep(job_id):
     with connect() as connection:
         row = connection.execute(

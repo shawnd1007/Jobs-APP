@@ -27,6 +27,11 @@ class RowTests(unittest.TestCase):
             self.assertNotIn('fictional', str(summary))
             with self.assertRaises(ValueError):
                 postgres_store.record_timing('private', 1)
+            raw = MagicMock()
+            postgres_store.Connection(raw).execute("SELECT 'fictional secret'")
+            summary = postgres_store.timing_summary()
+            self.assertEqual(summary['sql_select']['samples'], 1)
+            self.assertNotIn('fictional secret', str(summary))
 
     def test_immediate_transaction_acquires_transaction_scoped_lock(self):
         raw = MagicMock()

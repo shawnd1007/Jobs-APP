@@ -13,7 +13,8 @@ _credential_lock = threading.Lock()
 _managed_identity_credential = None
 _timing_lock = threading.Lock()
 _timings = {name: deque(maxlen=100) for name in (
-    'identity', 'postgres_connect', 'recruiter', 'recruiter_status', 'dashboard', 'search_status')}
+    'identity', 'postgres_connect', 'recruiter', 'recruiter_status', 'dashboard', 'search_status',
+    'sql_select', 'sql_write', 'sql_other', 'dashboard_load', 'dashboard_assess', 'dashboard_enrich')}
 
 
 def record_timing(name, seconds):
@@ -234,12 +235,19 @@ class Connection:
         return self.raw.info.transaction_status != TransactionStatus.IDLE
 
     def execute(self, statement, params=None):
-        if statement.strip().upper() == 'BEGIN IMMEDIATE':
-            # All app writers using this connection share the same transaction lock.
-            return self.raw.execute('SELECT pg_advisory_xact_lock(754086278)')
-        if params is None:
-            return self.raw.execute(statement)
-        return self.raw.execute(parameterize(statement), params)
+        keyword = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ''
+        category = 'sql_select' if keyword == 'SELECT' else 'sql_write' if keyword in (
+            'INSERT', 'UPDATE', 'DELETE') else 'sql_other'
+        started = time.monotonic()
+        try:
+            if statement.strip().upper() == 'BEGIN IMMEDIATE':
+                # All app writers using this connection share the same transaction lock.
+                return self.raw.execute('SELECT pg_advisory_xact_lock(754086278)')
+            if params is None:
+                return self.raw.execute(statement)
+            return self.raw.execute(parameterize(statement), params)
+        finally:
+            record_timing(category, time.monotonic() - started)
 
     def executemany(self, statement, params):
         with self.raw.cursor() as cursor:

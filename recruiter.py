@@ -126,10 +126,27 @@ def saved_preferences(connection):
     return json.loads(row[0]).get('preferences', {}) if row else {}
 
 
+def saved_match_listings(a, job_ids, *, connection=None):
+    """Read only listing facts needed to recheck the saved shortlist."""
+    jobs = {}
+    with (a.connect() if connection is None else nullcontext(connection)) as c:
+        for start in range(0, len(job_ids), 200):
+            batch = job_ids[start:start + 200]
+            placeholders = ','.join('?' for _ in batch)
+            for row in c.execute(f'SELECT jobs.id, jobs.listing FROM jobs '
+                                 f'JOIN tracking ON jobs.id=tracking.job_id '
+                                 f'WHERE jobs.id IN ({placeholders})', batch):
+                job = json.loads(row['listing'])
+                job['id'] = row['id']
+                jobs[job['id']] = job
+    return jobs
+
+
 def refresh_saved_matches(a, state, *, connection=None):
     if not state.get('matches'):
         return
-    current = {job['id']: job for job in a.records(connection=connection)}
+    ids = list(dict.fromkeys(item['job_id'] for item in state['matches']))
+    current = saved_match_listings(a, ids, connection=connection)
     cfg = a.config(connection=connection)
     preferences = state['preferences']
     matches = [item for item in state['matches']
