@@ -55,6 +55,7 @@ struct RecruiterState: Decodable {
     let error: String
     let coverage: String?
     let deferred: Int?
+    let payResearchFailures: Int?
     let updated: String?
     var progress: Progress?
     var stopRequested: Bool?
@@ -166,7 +167,7 @@ struct RecruiterHome: View {
                     if !busy && (state?.stage == "ready" || editingPreferences) {
                         preferenceForm
                     }
-                    if state?.stage == "complete" || state?.stage == "failed" || state?.stage == "matching" || state?.stage == "stopped" {
+                    if state?.stage == "complete" || state?.stage == "failed" || state?.stage == "matching" || state?.stage == "stopped" || state?.stage == "interrupted" || (state?.stage == "discovering" && state?.matches.isEmpty == false) {
                         results
                     }
                 }
@@ -429,6 +430,10 @@ struct RecruiterHome: View {
                 Label("Some sources couldn’t finish. Coverage is partial.", systemImage: "wifi.exclamationmark")
                     .font(.footnote).foregroundStyle(.secondary)
             }
+            if let count = state?.payResearchFailures, count > 0 {
+                Text("Market pay research couldn’t finish for \(count) roles. Your matches are saved; pay remains unconfirmed.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             if let count = state?.deferred, count > 0 {
                 Text("\(count) additional openings are awaiting analysis.").font(.footnote).foregroundStyle(.secondary)
             }
@@ -445,6 +450,12 @@ struct RecruiterHome: View {
                     Text(selectedGroup == "recommended" ? "No close matches yet" : "Nothing in this group").font(.headline)
                     Text("We won’t relax your requirements to fill this list. Check roles needing confirmation or adjust your preferences.")
                         .font(.subheadline).foregroundStyle(.secondary)
+                    if selectedGroup == "recommended" {
+                        let count = state?.matches.filter { $0.group == "review" }.count ?? 0
+                        if count > 0 {
+                            Button("View \(count) jobs needing confirmation") { selectedGroup = "review" }
+                        }
+                    }
                     Button("Adjust preferences") { editingPreferences = true }
                 }.jobCardSurface()
             }

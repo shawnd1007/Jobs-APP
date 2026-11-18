@@ -102,7 +102,8 @@ def connect_azure(dsn, ca_file):
             token = _managed_identity_credential.get_token('https://ossrdbms-aad.database.windows.net/.default').token
         token_finished = time.monotonic()
         import psycopg
-        return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows)
+        return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows,
+                               connect_timeout=5, options='-c statement_timeout=10000 -c lock_timeout=3000')
     finally:
         finished = time.monotonic()
         identity_end = token_finished if token_finished is not None else finished

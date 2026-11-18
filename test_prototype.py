@@ -245,6 +245,7 @@ class PrototypeTests(unittest.TestCase):
         with patch.object(app, 'ROOT', app.DATA):
             self.assertEqual(app.firecrawl_key(), '')
 
+    @patch.dict('os.environ', {'JOBS_PERSONAL_UNLIMITED_AI': '0'})
     def test_ai_cached_separate_and_budgeted(self):
         cfg = app.config();cfg.update(ai_enabled=True, ai_daily_limit=1)
         advice = dict(summary='Consider this role', strengths=['Customer ownership'], gaps=[], questions=['Confirm location'], next_steps=['Review posting'])

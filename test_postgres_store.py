@@ -59,6 +59,9 @@ class RowTests(unittest.TestCase):
                                        'psycopg': psycopg, 'psycopg.conninfo': conninfo}):
             postgres_store.connect_azure('fictional', root.name)
             postgres_store.connect_azure('fictional', root.name)
+        self.assertEqual(psycopg.connect.call_args.kwargs['connect_timeout'], 5)
+        self.assertIn('statement_timeout=10000', psycopg.connect.call_args.kwargs['options'])
+        self.assertIn('lock_timeout=3000', psycopg.connect.call_args.kwargs['options'])
         identity.ManagedIdentityCredential.assert_called_once_with()
         self.assertEqual(credential.get_token.call_count, 2)
         self.assertEqual([call.kwargs['password'] for call in psycopg.connect.call_args_list],

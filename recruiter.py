@@ -56,7 +56,8 @@ def init(c, now):
     if row:
         state = json.loads(row[0])
         if state['stage'] in BUSY:
-            state.update(stage='interrupted', error='The service restarted. Your inputs are saved. Retry when ready.')
+            state.update(stage='interrupted', progress=dict(stage='Interrupted by a server restart'),
+                         error='The service restarted. Your inputs and completed matches are saved. Retry when ready.')
             c.execute('UPDATE recruiter_state SET value=? WHERE id=1', (json.dumps(state),))
             record_activity(c, state['version'], now(), {'stage': 'Interrupted by a server restart'})
 
@@ -91,6 +92,8 @@ def read(a, private=False, *, status_only=False):
                     state['progress'] = report.get('progress')
         if state['stage'] in ('discovering', 'matching'):
             state['stop_requested'] = stop_requested(a, state['version'], connection=c)
+            if state['stop_requested']:
+                state['progress'] = dict(stage='Stopping search; finishing in-flight requests')
         if status_only:
             status = {key: state.get(key) for key in ('version', 'stage', 'progress')}
             if 'stop_requested' in state:
@@ -811,6 +814,19 @@ def match(a, state, job):
                 analyzed=a.now(), listing_fingerprint=listing_fingerprint(job), fit_fingerprint=fit_fingerprint(job))
 
 
+def candidate_priority(a, state, job, cfg, checked_at):
+    """Prioritize the bounded AI queue, without claiming a heuristic is AI fit."""
+    checks = constraints(a, job, state['preferences'], cfg, checked_at)
+    roles = state['strategy']['roles'] + state['strategy']['adjacent_roles']
+    title = set(a.norm(job.get('title', '')).split())
+    overlap = max((len(title & set(a.norm(role['title']).split())) /
+                   max(1, len(title | set(a.norm(role['title']).split()))) for role in roles), default=0)
+    duties = a.experience_evidence(job.get('description', ''), state['resume'],
+                                   [entry['label'] for entry in state['strategy']['skills']])
+    return (not any(status == 'avoid' for status, _ in checks),
+            len({item['duty'] for item in duties}), overlap, job.get('updated', ''))
+
+
 def work(a, state, action):
     token = OPERATION.set(state['version'])
     outcome = {}
@@ -829,9 +845,10 @@ def work(a, state, action):
                 raise SearchStopped()
             jobs = [j for j in a.records() if not j.get('external_application') and j.get('availability') != 'Closed']
             jobs = [job for job in jobs if a.discovery_location_allowed(job, cfg)]
-            # Keep the normal cap unless the operator explicitly enables personal testing.
-            jobs.sort(key=lambda j: j.get('updated', ''), reverse=True)
-            selected = jobs if prototype.unlimited_personal_testing() else jobs[:12]
+            # Analyze every retained opening in the personal trial.
+            checked_at = a.dt.datetime.now(a.dt.timezone.utc)
+            jobs.sort(key=lambda job: candidate_priority(a, state, job, cfg, checked_at), reverse=True)
+            selected = jobs
             state.update(stage='matching', coverage=report.get('state', 'partial'), matches=[],
                          deferred=len(jobs) - len(selected),
                          progress=dict(stage='Comparing jobs with your experience', completed=0,
@@ -927,6 +944,7 @@ def work(a, state, action):
                         pay_failures += 1
                 except Exception:
                     pay_failures += 1
+            state['pay_research_failures'] = pay_failures
             if pay_failures:
                 write(a, state, event={'stage': 'Some market pay research could not finish',
                                        'count': pay_failures})
@@ -949,10 +967,14 @@ def work(a, state, action):
         state.update(stage='stopped', error='', progress=dict(stage='Search stopped'))
         outcome = {'stage': 'Search stopped', 'completed': len(state['matches'])}
     except ValueError as e:
+        current_ids = {item['job_id'] for item in state.get('matches', [])}
+        state.setdefault('matches', []).extend(item for item in previous_matches if item['job_id'] not in current_ids)
         state.update(stage='failed', error=str(e))
         outcome = {'stage': 'Could not finish',
                    'reason': e.diagnostic if isinstance(e, AIRequestError) else type(e).__name__}
     except Exception as e:
+        current_ids = {item['job_id'] for item in state.get('matches', [])}
+        state.setdefault('matches', []).extend(item for item in previous_matches if item['job_id'] not in current_ids)
         state.update(stage='failed', error='The recruiter could not finish. Your progress is saved. Please retry.')
         outcome = {'stage': 'Could not finish', 'reason': type(e).__name__}
     finally:

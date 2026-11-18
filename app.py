@@ -40,6 +40,7 @@ LOCK = threading.Lock()
 SEARCH_ACTIVE = threading.Event()
 SEARCH_DEADLINE = ContextVar('search_deadline', default=None)
 BOARD_DEADLINE = ContextVar('board_deadline', default=None)
+SEARCH_STOP = ContextVar('search_stop', default=None)
 NETWORK_SLOTS = threading.BoundedSemaphore(3)
 SEARCH_SECONDS = 240
 BOARD_SECONDS = 35
@@ -187,6 +188,9 @@ PERSONIO_OPENER = ur.build_opener(NoRedirect())
 
 def network_call(operation, seconds=REQUEST_SECONDS):
     """Bound the whole network operation, including DNS, redirects and response reads."""
+    check_stop = SEARCH_STOP.get()
+    if check_stop and check_stop():
+        raise recruiter.SearchStopped()
     search_deadline = SEARCH_DEADLINE.get()
     if search_deadline is None:
         return operation(seconds)
@@ -211,10 +215,19 @@ def network_call(operation, seconds=REQUEST_SECONDS):
     except Exception:
         NETWORK_SLOTS.release()
         raise
-    try:
-        ok, value = result.get(timeout=remaining)
-    except Empty:
-        raise TimeoutError(f'Employer request exceeded {remaining:.0f} seconds') from None
+    end = time.monotonic() + remaining
+    while True:
+        check_stop = SEARCH_STOP.get()
+        if check_stop and check_stop():
+            raise recruiter.SearchStopped()
+        wait = end - time.monotonic()
+        if wait <= 0:
+            raise TimeoutError(f'Employer request exceeded {remaining:.0f} seconds') from None
+        try:
+            ok, value = result.get(timeout=min(wait, .5) if check_stop else wait)
+            break
+        except Empty:
+            continue
     if not ok:
         raise value
     return value
@@ -1575,6 +1588,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
     run_id = None
     deadline = time.monotonic() + SEARCH_SECONDS
     token = SEARCH_DEADLINE.set(deadline)
+    stop_token = SEARCH_STOP.set(
+        (lambda: recruiter.stop_requested(service(), recruiter_version)) if recruiter_version is not None else None)
     SEARCH_ACTIVE.set()
     report['progress'] = {'stage': 'Preparing search'}
     if recruiter_version is not None:
@@ -1590,6 +1605,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 recruiter.record_activity(c, recruiter_version, now(), report['progress'])
 
     def source_issue(stage, source, error):
+        if isinstance(error, recruiter.SearchStopped):
+            raise error
         if recruiter_version is not None:
             with connect() as c:
                 recruiter.record_activity(c, recruiter_version, now(), {
@@ -1597,6 +1614,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 })
 
     def time_left(remaining, kind):
+        if recruiter_version is not None and recruiter.stop_requested(service(), recruiter_version):
+            raise recruiter.SearchStopped()
         if time.monotonic() < deadline:
             return True
         report['failures'].append(f'Search time limit reached; {remaining} {kind} deferred. Run again to continue.')
@@ -1639,7 +1658,9 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 category=cfg['categories'][(start+offset)%len(cfg['categories'])]
                 domains=['jobs.ashbyhq.com','job-boards.greenhouse.io','jobs.lever.co','myworkdayjobs.com','jobs.smartrecruiters.com','recruitee.com']
                 regions=discovery_regions(cfg)
-                query='"'+category+'" jobs '+regions[offset%len(regions)]+' site:'+domains[(start+offset)%len(domains)]
+                query='"'+category+'" jobs '+regions[offset%len(regions)]
+                if not cfg.get('recruiter_discovery'):
+                    query += ' site:'+domains[(start+offset)%len(domains)]
                 try:
                     url='https://www.bing.com/search?format=rss&q='+up.quote(query)
                     raw, _ = read_response(ur.Request(url, headers={'User-Agent':'PersonalJobDashboard/1.0'}),
@@ -1982,6 +2003,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                         })
         finally:
             SEARCH_DEADLINE.reset(token)
+            SEARCH_STOP.reset(stop_token)
             SEARCH_ACTIVE.clear()
             LOCK.release()
     return report

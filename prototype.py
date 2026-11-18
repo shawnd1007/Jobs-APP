@@ -161,7 +161,9 @@ def ai_key(a):
 
 
 def unlimited_personal_testing():
-    return os.environ.get('JOBS_PERSONAL_UNLIMITED_AI') == '1'
+    # This branch is the owner's personal trial. Operators can restore the daily
+    # ceiling explicitly before using it for a limited trial.
+    return os.environ.get('JOBS_PERSONAL_UNLIMITED_AI', '1') == '1'
 
 
 def ai_review(a, job_id):

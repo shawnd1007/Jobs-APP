@@ -15,6 +15,87 @@ PREFS = dict(salary=70000, currency='USD', period='year', flexible=False,
 
 
 class RecruiterTests(unittest.TestCase):
+    def test_recruiter_discovery_queries_are_not_restricted_to_one_ats(self):
+        self.analyze()
+        result = self.search()
+        from urllib.parse import urlsplit, parse_qs
+        queries = [parse_qs(urlsplit(url).query)['q'][0] for url in self.calls
+                   if url.startswith('https://www.bing.com/search?')]
+        self.assertTrue(queries)
+        self.assertTrue(all('site:' not in query for query in queries))
+        self.assertTrue(any(item['group'] == 'close' for item in result['matches']))
+
+    def test_failed_refresh_keeps_last_shortlist_and_restart_clears_old_progress(self):
+        self.analyze()
+        previous = self.search()
+        def pipeline(*args, **kwargs):
+            self.a.LOCK.release()
+            return {'state': 'partial'}
+        with patch.object(self.a, 'run_pipeline', side_effect=pipeline), \
+             patch.object(recruiter, 'match', side_effect=recruiter.AIRequestError('Fictional timeout')):
+            self.assertEqual(recruiter.start(self.a, dict(action='search', version=previous['version'], preferences=PREFS))[0], 202)
+            failed = self.wait()
+        self.assertEqual(failed['stage'], 'failed')
+        self.assertEqual(failed['matches'], previous['matches'])
+        failed = recruiter.read(self.a, True)
+        failed.update(stage='matching', progress={'stage': 'Comparing jobs'})
+        recruiter.write(self.a, failed)
+        with self.a.connect() as c:
+            recruiter.init(c, self.a.now)
+        interrupted = recruiter.read(self.a)
+        self.assertEqual(interrupted['progress']['stage'], 'Interrupted by a server restart')
+        self.assertEqual(interrupted['matches'], previous['matches'])
+
+    def test_relevant_older_opening_is_prioritized_and_all_openings_are_compared(self):
+        self.analyze()
+        self.search()
+        relevant = next(job for job in self.a.records() if job['requisition'] == 'billing')
+        irrelevant = next(job for job in self.a.records() if job['requisition'] == 'cnc')
+        unrelated = [dict(irrelevant, id=1000 + i, updated='2099-01-01') for i in range(20)]
+        def pipeline(*args, **kwargs):
+            self.a.LOCK.release()
+            return {'state': 'success'}
+        with patch.object(self.a, 'run_pipeline', side_effect=pipeline), \
+             patch.object(self.a, 'records', return_value=unrelated + [relevant]), \
+             patch.object(recruiter, 'match', wraps=recruiter.match) as compared:
+            result = self.search()
+        self.assertEqual(result['deferred'], 0)
+        self.assertEqual(len(compared.call_args_list), 21)
+        self.assertEqual(compared.call_args_list[0].args[2]['id'], relevant['id'])
+        self.assertIn(relevant['id'], [call.args[2]['id'] for call in compared.call_args_list])
+        self.assertTrue(any(item['job_id'] == relevant['id'] and item['group'] == 'close'
+                            for item in result['matches']))
+
+    def test_stop_interrupts_blocked_employer_request_without_waiting_for_socket(self):
+        entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+        outcomes = []
+        def blocked(timeout):
+            entered.set()
+            release.wait(5)
+            return 'late response'
+        def search_request():
+            token = self.a.SEARCH_DEADLINE.set(time.monotonic() + 30)
+            stop_token = self.a.SEARCH_STOP.set(stopped.is_set)
+            try:
+                try:
+                    self.a.network_call(blocked)
+                except Exception as error:
+                    outcomes.append(type(error))
+            finally:
+                self.a.SEARCH_STOP.reset(stop_token)
+                self.a.SEARCH_DEADLINE.reset(token)
+        worker = threading.Thread(target=search_request)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            stopped.set()
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(outcomes, [recruiter.SearchStopped])
+        finally:
+            release.set()
+            worker.join(5)
+
     def test_master_file_is_saved_replaced_and_reset_without_touching_tracking(self):
         file = base64.b64encode(b'%PDF-1.4 fictional resume').decode()
         status, _ = recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA,
@@ -288,6 +369,7 @@ class RecruiterTests(unittest.TestCase):
             current = recruiter.read(self.a, True)
             self.assertEqual(recruiter.start(self.a, dict(action='stop', version=current['version']))[0], 202)
             self.assertTrue(recruiter.read(self.a, status_only=True)['stop_requested'])
+            self.assertIn('Stopping search', recruiter.read(self.a, status_only=True)['progress']['stage'])
             self.assertEqual(recruiter.start(self.a, dict(action='stop', version=previous['version']))[0], 409)
             release.set()
             stopped = self.wait()
@@ -677,6 +759,7 @@ class RecruiterTests(unittest.TestCase):
              patch.object(recruiter, 'ai', side_effect=failure):
             result = self.search()
         self.assertEqual(result['stage'], 'complete')
+        self.assertEqual(result['pay_research_failures'], 1)
         self.assertEqual(len([m for m in result['matches'] if m['job_id'] in (job['id'], twin['id'])]), 2)
         self.assertTrue(any(entry['progress']['stage'] == 'Some market pay research could not finish'
                             for entry in recruiter.activity(self.a)['entries']))
@@ -804,6 +887,7 @@ class RecruiterTests(unittest.TestCase):
             state['preferences']['remote_region'] = 'Florida, United States'
             self.assertEqual(recruiter.match(self.a, state, job)['group'], 'avoid')
 
+    @patch.dict('os.environ', {'JOBS_PERSONAL_UNLIMITED_AI': '0'})
     def test_provider_failure_is_redacted_and_reserves_budget(self):
         cfg = dict(self.a.config(), ai_enabled=True, ai_daily_limit=1)
         with patch.object(self.a, 'config', return_value=cfg), \
@@ -858,9 +942,9 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual((entry['input_tokens'], entry['output_tokens'], entry['cached_input_tokens']), (120, 30, 20))
         self.assertEqual(entry['unknown_calls'], 1)
 
-    def test_personal_override_records_attempts_without_daily_cap(self):
+    def test_personal_trial_defaults_to_no_daily_cap_and_records_attempts(self):
         cfg = dict(self.a.config(), ai_enabled=True, ai_daily_limit=1)
-        with patch.dict('os.environ', {'JOBS_PERSONAL_UNLIMITED_AI': '1'}), \
+        with patch.dict('os.environ', {}, clear=True), \
              patch.object(self.a, 'config', return_value=cfg), \
              patch.object(recruiter.prototype, 'ai_key', return_value='fictional-test-token'), \
              patch('urllib.request.urlopen', side_effect=RuntimeError('offline fixture')) as network:
