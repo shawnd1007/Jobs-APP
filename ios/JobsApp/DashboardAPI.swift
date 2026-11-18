@@ -460,7 +460,7 @@ enum DashboardAPI {
         guard let url = endpoint(path, at: address) else {
             throw ServerError(status: 0, message: "Check the URL in Server Settings.")
         }
-        var request = URLRequest(url: url, timeoutInterval: path.hasSuffix("/ai-review") ? 105 : (path.hasSuffix("/search-status") ? 5 : 15))
+        var request = URLRequest(url: url, timeoutInterval: path.hasSuffix("/ai-review") || path.hasSuffix("/tailored-resume") || path == "/api/recruiter" && body != nil ? 105 : (path.hasSuffix("/search-status") ? 5 : 15))
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let token = try await MicrosoftSession.shared.accessToken(for: address) {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")

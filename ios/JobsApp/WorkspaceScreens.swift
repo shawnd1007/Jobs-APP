@@ -220,6 +220,7 @@ struct PreferencesScreen: View {
     let openSample: () -> Void
     @State private var editingPreferences = false
     @State private var editingAdministration = false
+    @State private var viewingMasterResume = false
     @State private var confirmingRecruiterReset = false
     @State private var resettingRecruiter = false
     @State private var resetMessage: String?
@@ -230,6 +231,9 @@ struct PreferencesScreen: View {
                 Section("Search Profile") {
                     Button("Edit Search Profile", systemImage: "slider.horizontal.3") {
                         editingPreferences = true
+                    }
+                    if !workspace.isSample {
+                        Button("View Master Résumé", systemImage: "doc.text") { viewingMasterResume = true }
                     }
                     LabeledContent("Role Phrases", value: String(dashboard.preferences.categories.count))
                     LabeledContent("Selected Skills", value: String(dashboard.preferences.preferredSkills?.count ?? 0))
@@ -253,7 +257,7 @@ struct PreferencesScreen: View {
                     Button("Start a New Résumé", systemImage: "arrow.counterclockwise", role: .destructive) {
                         confirmingRecruiterReset = true
                     }.disabled(resettingRecruiter || workspace.address.isEmpty)
-                    Text("Clears the recruiter résumé, profile, preferences and matches on this server. Saved jobs and application tracking stay in your workspace.")
+                    Text("Clears the master résumé, profile, preferences and matches on this server. Saved jobs, tracking and tailored drafts remain; drafts may contain résumé information.")
                         .font(.footnote).foregroundStyle(.secondary)
                     if let resetMessage { Text(resetMessage).font(.footnote) }
                 }
@@ -276,9 +280,10 @@ struct PreferencesScreen: View {
         .confirmationDialog("Start a new résumé?", isPresented: $confirmingRecruiterReset, titleVisibility: .visible) {
             Button("Clear Recruiter Profile", role: .destructive) { Task { await resetRecruiter() } }
         } message: {
-            Text("This clears the résumé and recruiter results for every device connected to this workspace. Saved jobs and applications are kept.")
+            Text("This clears the master résumé and recruiter results for every connected device. Saved jobs, applications and tailored drafts are kept.")
         }
         .refreshable { await workspace.refresh() }
+        .sheet(isPresented: $viewingMasterResume) { MasterResumeView(workspace: workspace) }
         .sheet(isPresented: $editingAdministration) {
             if let dashboard = workspace.dashboard {
                 PreferencesEditor(workspace: workspace, dashboard: dashboard, administration: true)
@@ -320,7 +325,7 @@ private struct RecruiterUsageScreen: View {
                 }.font(.footnote)
                 if usage.operations.isEmpty { Text("No recorded recruiter AI calls yet.") }
                 ForEach(Array(usage.operations.enumerated()), id: \.offset) { _, operation in
-                    Section(operation.kind == "career_strategy" ? "Résumé analysis" : "Job comparisons") {
+                    Section(operation.kind == "career_strategy" ? "Résumé analysis" : operation.kind == "resume_tailor" ? "Résumé tailoring" : "Job comparisons") {
                         LabeledContent("Started", value: operation.started)
                         LabeledContent("Model", value: operation.model)
                         LabeledContent("AI calls", value: "\(operation.calls)")

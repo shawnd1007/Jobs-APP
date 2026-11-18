@@ -1,5 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import MapKit
+import QuickLook
 
 struct RecruiterState: Decodable {
     struct Evidence: Decodable { let label, evidence, kind: String }
@@ -72,8 +74,11 @@ struct RecruiterHome: View {
     @State private var selectedGroup = "recommended"
     @State private var editingPreferences = false
     @State private var importedText: String?
+    @State private var importedFileName: String?
+    @State private var importedFileData: Data?
     @State private var lastVersion = -1
     @State private var showingStrategy = false
+    @State private var showingResume = false
 
     private var busy: Bool { reading || sending || state?.busy == true }
     private var stageTitle: String {
@@ -107,7 +112,7 @@ struct RecruiterHome: View {
                             Button(state == nil ? "Reconnect" : "Retry") {
                                 Task {
                                     if state == nil { await reload() }
-                                    else if state?.strategy == nil { await analyze(importedText) }
+                                    else if state?.strategy == nil { await analyze(importedText, fileName: importedFileName, fileData: importedFileData) }
                                     else { await search() }
                                 }
                             }.buttonStyle(.bordered)
@@ -154,6 +159,7 @@ struct RecruiterHome: View {
             if state?.strategy != nil {
                 Menu {
                     Button("Your search preferences") { editingPreferences = true }
+                    Button("View master résumé") { showingResume = true }
                     Button("Replace résumé") { openFilePicker() }
                     Button("Refresh matches") { Task { await search() } }
                 } label: { Image(systemName: "slider.horizontal.3") }
@@ -169,9 +175,16 @@ struct RecruiterHome: View {
                     reading = true
                     defer { reading = false }
                     do {
-                        let preview = try await Task.detached { try ResumePreview.read(url) }.value
+                        let (preview, data) = try await Task.detached {
+                            let preview = try ResumePreview.read(url)
+                            let accessed = url.startAccessingSecurityScopedResource()
+                            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                            return (preview, try Data(contentsOf: url))
+                        }.value
                         importedText = preview.text
-                        await analyze(preview.text)
+                        importedFileName = preview.name
+                        importedFileData = data
+                        await analyze(preview.text, fileName: preview.name, fileData: data)
                     } catch { self.error = error.localizedDescription }
                 }
             case .failure(let issue):
@@ -182,6 +195,7 @@ struct RecruiterHome: View {
             if !presented { workspace.choosingRecruiterFile = false }
         }
         .onDisappear { workspace.choosingRecruiterFile = false }
+        .sheet(isPresented: $showingResume) { MasterResumeView(workspace: workspace) }
         .task(id: workspace.address) {
             while !Task.isCancelled {
                 if !workspace.choosingRecruiterFile { await reload() }
@@ -264,17 +278,28 @@ struct RecruiterHome: View {
             Text("Your roles and skills are ready. Just tell us what you need to earn and where you can work.")
                 .font(.subheadline).foregroundStyle(.secondary)
             Text("Pay target").font(.headline)
-            TextField("Minimum base pay", value: $preferences.salary, format: .number)
-                .keyboardType(.numberPad).textFieldStyle(.roundedBorder).accessibilityLabel("Minimum base pay")
             HStack {
                 Picker("Currency", selection: $preferences.currency) {
                     ForEach(["USD", "CAD", "GBP", "EUR"], id: \.self) { Text($0) }
                 }
-                Picker("Pay period", selection: $preferences.period) {
+                Picker("Pay period", selection: Binding(get: { preferences.period }, set: { new in
+                    guard new != preferences.period else { return }
+                    let converted = new == "hour" ? Double(preferences.salary) / 2080 : Double(preferences.salary) * 2080
+                    preferences.salary = min(1_000_000, max(0, Int(converted.rounded())))
+                    preferences.period = new
+                })) {
                     Text("Per year").tag("year")
                     Text("Per hour").tag("hour")
                 }
             }
+            Picker("Minimum base pay", selection: $preferences.salary) {
+                ForEach(salaryOptions, id: \.self) { amount in
+                    Text(amount.formatted(.currency(code: preferences.currency).precision(.fractionLength(0))) + (preferences.period == "hour" ? " / hour" : " / year"))
+                        .tag(amount)
+                }
+            }.pickerStyle(.menu)
+            Text("Choose your minimum base pay. Changing the period estimates a full-time year of 2,080 hours; check the amount.")
+                .font(.footnote).foregroundStyle(.secondary)
             Toggle("My pay target is flexible", isOn: $preferences.flexible)
             Divider()
             Text("Where you work").font(.headline)
@@ -282,18 +307,24 @@ struct RecruiterHome: View {
             mode("Hybrid", "hybrid")
             mode("On-site", "onsite")
             if preferences.modes.contains("remote") {
-                TextField("Remote work state/region, country", text: $preferences.remoteRegion)
-                    .textFieldStyle(.roundedBorder)
+                LocationSuggestionField(title: "Remote work state/region, country", value: $preferences.remoteRegion)
                 Text("Where you will physically work. Remote employers may only hire in certain regions.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if preferences.modes.contains("hybrid") || preferences.modes.contains("onsite") {
-                TextField("Office city, state/region", text: $preferences.commute).textFieldStyle(.roundedBorder)
+                LocationSuggestionField(title: "Office city, state/region", value: $preferences.commute)
                 Text("An office location you can commute to. Remote hiring eligibility is checked separately.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
 
         }.jobCardSurface()
+    }
+
+    private var salaryOptions: [Int] {
+        let values = preferences.period == "hour"
+            ? Array(stride(from: 0, through: 150, by: 1)) + Array(stride(from: 155, through: 500, by: 5))
+            : Array(stride(from: 0, through: 200_000, by: 1_000)) + Array(stride(from: 205_000, through: 300_000, by: 5_000)) + Array(stride(from: 310_000, through: 1_000_000, by: 10_000))
+        return Array(Set(values + [preferences.salary])).sorted()
     }
 
     private func mode(_ label: String, _ value: String) -> some View {
@@ -394,9 +425,10 @@ struct RecruiterHome: View {
         }
     }
 
-    @MainActor private func analyze(_ text: String?) async {
+    @MainActor private func analyze(_ text: String?, fileName: String? = nil, fileData: Data? = nil) async {
         var payload: [String: Any] = ["action": "analyze", "version": state?.version ?? 0]
         if let text { payload["resume"] = text }
+        if let fileName, let fileData { payload["file_name"] = fileName; payload["file_data"] = fileData.base64EncodedString() }
         await submit(payload)
     }
 
@@ -420,5 +452,191 @@ struct RecruiterHome: View {
             editingPreferences = false
             await reload()
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+@MainActor
+private final class LocationSuggestions: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
+    @Published var results: [MKLocalSearchCompletion] = []
+    private let completer = MKLocalSearchCompleter()
+    override init() {
+        super.init()
+        completer.delegate = self
+        completer.resultTypes = .address
+    }
+    func search(_ text: String) {
+        guard text.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2 else {
+            completer.cancel(); results = []; return
+        }
+        completer.queryFragment = text
+    }
+    func clear() { completer.cancel(); results = [] }
+    func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
+        results = Array(completer.results.prefix(5))
+    }
+    func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) { results = [] }
+}
+
+private struct LocationSuggestionField: View {
+    let title: String
+    @Binding var value: String
+    @StateObject private var suggestions = LocationSuggestions()
+    @FocusState private var focused: Bool
+    @State private var selected = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField(title, text: $value).textFieldStyle(.roundedBorder).focused($focused)
+                .onChange(of: value) { _, text in
+                    if selected { selected = false; return }
+                    if focused { suggestions.search(text) }
+                }
+                .onChange(of: focused) { _, isFocused in if !isFocused { suggestions.clear() } }
+            if focused {
+                ForEach(suggestions.results, id: \.self) { result in
+                    Button {
+                        selected = true
+                        value = [result.title, result.subtitle].filter { !$0.isEmpty }.joined(separator: ", ")
+                        suggestions.clear(); focused = false
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(result.title)
+                            if !result.subtitle.isEmpty { Text(result.subtitle).font(.caption).foregroundStyle(.secondary) }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain).padding(.vertical, 4)
+                }
+                Text("Suggestions use Apple Maps. You can also type or correct a location yourself.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct MasterResume: Decodable { let text, name, file: String }
+
+struct MasterResumeView: View {
+    @Environment(\.dismiss) private var dismiss
+    let workspace: Workspace
+    @State private var master: MasterResume?
+    @State private var fileURL: URL?
+    @State private var previewURL: URL?
+    @State private var error: String?
+    var body: some View {
+        NavigationStack {
+            List {
+                if let master {
+                    Section("Master résumé") {
+                        if !master.name.isEmpty { Text(master.name) }
+                        if let fileURL {
+                            Button("View original file") { previewURL = fileURL }
+                            ShareLink("Share original file", item: fileURL)
+                        }
+                        if master.file.isEmpty { Text("The extracted text is saved. Upload the original again to keep a copy of the file.").font(.footnote) }
+                        Text(master.text.isEmpty ? "No résumé has been uploaded yet." : master.text).textSelection(.enabled)
+                    }
+                } else if let error { Text(error).foregroundStyle(.red) }
+                else { ProgressView("Loading résumé…") }
+            }
+            .navigationTitle("Master Résumé")
+            .toolbar { Button("Close") { dismiss() } }
+            .task { await load() }
+            .quickLookPreview($previewURL)
+            .onDisappear { if let fileURL { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) } }
+        }
+    }
+    private func load() async {
+        do {
+            let data = try await DashboardAPI.request("/api/recruiter/resume", at: workspace.address)
+            let result = try JSONDecoder().decode(MasterResume.self, from: data)
+            if !result.file.isEmpty, let bytes = Data(base64Encoded: result.file) {
+                let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let url = folder.appendingPathComponent(URL(fileURLWithPath: result.name).lastPathComponent)
+                try bytes.write(to: url, options: [.atomic, .completeFileProtection]); fileURL = url
+            }
+            master = result
+        } catch { self.error = DashboardAPI.connectionMessage(for: error) }
+    }
+}
+
+private struct TailoredState: Decodable {
+    let draft: String
+    let version: Int
+    let hasResume, hasDescription, stale: Bool
+    let resumeHash, postingHash: String
+}
+private struct TailoredResponse: Decodable { let draft: String?; let version: Int }
+
+struct TailoredResumeView: View {
+    @Environment(\.dismiss) private var dismiss
+    let jobID: Int
+    let address: String
+    @State private var state: TailoredState?
+    @State private var draft = ""
+    @State private var savedDraft = ""
+    @State private var version = 0
+    @State private var busy = false
+    @State private var error: String?
+    @State private var confirmingGenerate = false
+    @State private var confirmingClose = false
+    private var dirty: Bool { draft != savedDraft }
+    private var path: String { "/api/jobs/\(jobID)/tailored-resume" }
+    var body: some View {
+        NavigationStack {
+            List {
+                if let state {
+                    Section {
+                        Text("Create a job-specific draft from your saved master résumé and this employer's description. Your master stays unchanged. Review every detail for accuracy.")
+                        if state.stale { Text("Your master résumé or the posting has changed since this draft was saved. Review the draft again.").foregroundStyle(.orange) }
+                        if !state.hasResume || !state.hasDescription { Text("A master résumé and an employer description are required.") }
+                        Button("Generate with AI", systemImage: "sparkles") { confirmingGenerate = true }
+                            .disabled(busy || !state.hasResume || !state.hasDescription)
+                    }
+                    Section("Your editable draft") {
+                        TextEditor(text: $draft).frame(minHeight: 300).disabled(busy)
+                        if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ShareLink("Share draft text", item: draft)
+                        }
+                        Text("No experience, dates, credentials or numbers should be invented. Check the draft before using it.").font(.footnote).foregroundStyle(.secondary)
+                    }
+                } else if error == nil { ProgressView("Loading résumé draft…") }
+                if busy { ProgressView("Working…") }
+                if let error { Text(error).foregroundStyle(.red) }
+            }
+            .navigationTitle("Tailored Résumé")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Close") { if dirty { confirmingClose = true } else { dismiss() } }.disabled(busy) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { Task { await send("save") } }.disabled(busy || state == nil || !dirty || draft.count > 30000) }
+            }
+            .confirmationDialog("Generate a new draft?", isPresented: $confirmingGenerate) {
+                Button("Send to AI") { Task { await send("generate") } }
+            } message: { Text("Your master résumé and this job description will be sent to OpenAI. This can incur charges and replaces the draft currently on screen, but not the saved draft until you save.") }
+            .confirmationDialog("Close without saving?", isPresented: $confirmingClose) {
+                Button("Discard edits", role: .destructive) { dismiss() }
+            }
+            .interactiveDismissDisabled(dirty || busy)
+            .task { await load() }
+        }
+    }
+    private func load() async {
+        do {
+            let data = try await DashboardAPI.request(path, at: address)
+            let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let value = try decoder.decode(TailoredState.self, from: data)
+            state = value; draft = value.draft; savedDraft = value.draft; version = value.version
+        } catch { self.error = DashboardAPI.connectionMessage(for: error) }
+    }
+    private func send(_ action: String) async {
+        guard let state else { return }
+        busy = true; error = nil
+        defer { busy = false }
+        do {
+            let payload: [String: Any] = ["action": action, "version": version, "draft": draft,
+                "resume_hash": state.resumeHash, "posting_hash": state.postingHash]
+            let body = try JSONSerialization.data(withJSONObject: payload)
+            let data = try await DashboardAPI.request(path, at: address, body: body)
+            let response = try JSONDecoder().decode(TailoredResponse.self, from: data)
+            if let generated = response.draft { draft = generated }
+            else { savedDraft = draft; version = response.version }
+        } catch { self.error = DashboardAPI.connectionMessage(for: error) }
     }
 }

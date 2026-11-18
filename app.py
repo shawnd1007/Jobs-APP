@@ -1945,12 +1945,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path=up.urlsplit(self.path).path
         if path=='/api/recruiter':return self.send(200,recruiter.read(service()))
+        if path=='/api/recruiter/resume':return self.send(200,recruiter.resume(service()))
         if path=='/api/recruiter/usage':return self.send(200,recruiter.usage_report(service()))
         if path=='/api/dashboard':return self.send(200,snapshot())
         if path=='/api/v1/health':return self.send(200,{'status':'ok','api_version':1})
         if path=='/api/v1/search-status':return self.send(200,search_status())
         if path=='/api/v1/dashboard':return self.send(200,snapshot())
         prep_match = re.fullmatch(r'/api/jobs/(\d+)/application-prep', path)
+        tailored_match = re.fullmatch(r'/api/jobs/(\d+)/tailored-resume', path)
+        if tailored_match:return self.send(*recruiter.tailored_resume(service(), int(tailored_match[1])))
         if prep_match:
             return self.send(*application_prep(int(prep_match[1])))
         if path in ('/','/index.html'):return self.send(200,(ROOT/'site'/'index.html').read_text(encoding='utf-8-sig'),'text/html')
@@ -1965,12 +1968,21 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/api/recruiter':
             try:
                 size = int(self.headers.get('Content-Length', 0))
-                if not 0 < size <= 150000:
+                if not 0 < size <= 13800000:
                     raise ValueError('The résumé request is too large or empty.')
                 return self.send(*recruiter.start(service(), json.loads(self.rfile.read(size))))
             except (ValueError, UnicodeError) as error:
                 return self.send(400, {'error': str(error)})
         if self.path=='/api/run':return self.send(202 if start_run() else 409,{'running':True})
+        tailored_match = re.fullmatch(r'/api/jobs/(\d+)/tailored-resume', self.path)
+        if tailored_match:
+            try:
+                size = int(self.headers.get('Content-Length', 0))
+                if not 0 < size <= 150000:
+                    raise ValueError('The résumé draft is too large or empty.')
+                return self.send(*recruiter.tailor(service(), int(tailored_match[1]), json.loads(self.rfile.read(size))))
+            except (ValueError, UnicodeError, TypeError) as error:
+                return self.send(400, {'error': str(error)})
         if self.path == '/api/applications':
             try:
                 size = int(self.headers.get('Content-Length', 0))

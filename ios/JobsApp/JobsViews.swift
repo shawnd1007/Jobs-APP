@@ -691,7 +691,7 @@ struct JobDetail: View {
     @State private var adviceError: String?
 
     private enum Editor: String, Identifiable {
-        case review, tracking, prep
+        case review, tracking, prep, tailoredResume
         var id: Self { self }
     }
 
@@ -750,6 +750,9 @@ struct JobDetail: View {
                         if recruiterMatch == nil && !job.isExternalApplication && workspace.dashboard?.applicationPrepAvailable == true {
                             Button("Application Prep", systemImage: "doc.text") { editor = .prep }
                                 .accessibilityIdentifier("openApplicationPrep")
+                        }
+                        if !workspace.isSample && !job.isExternalApplication {
+                            Button("Tailor résumé to this job", systemImage: "doc.text") { editor = .tailoredResume }
                         }
                     }
                     if job.isExternalApplication {
@@ -859,6 +862,7 @@ struct JobDetail: View {
                     case .review: ReviewEditor(workspace: workspace, job: job)
                     case .tracking: TrackingEditor(workspace: workspace, job: job)
                     case .prep: ApplicationPrepSheet(job: job, address: workspace.address)
+                    case .tailoredResume: TailoredResumeView(jobID: job.id, address: workspace.address)
                     }
                 }
                 .confirmationDialog("Request AI Career Advice?", isPresented: $confirmingAdvice) {

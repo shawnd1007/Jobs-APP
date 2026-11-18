@@ -15,6 +15,9 @@ The matching follow-up adds [distinct duty evidence](COMPLETE-GUIDE.md#7-how-mat
 
 ## Ideas from personal testing
 
+- Local implementation in progress: recruiter pay selection, Apple Maps location suggestions, a stored master résumé and job-specific editable AI drafts. Verify the original file upload and preview on a signed phone, live location suggestions, PostgreSQL persistence and recovery, and a separately authorized live AI request before treating these as deployed or production-ready. Existing résumé text does not include the original file; it must be selected again to store that copy. Tailored drafts currently share as text, not a formatted PDF.
+
+
 - Show meaningful search progress, including the current stage and available counts, so people can tell the search is still working. Handle unknown totals and incomplete coverage honestly.
 - Suggest and validate locations as people type, including city, state, and country, while preserving a way to correct the selection.
 - Keep a copy of the uploaded résumé in the candidate profile, with clear access, replacement, and deletion controls.

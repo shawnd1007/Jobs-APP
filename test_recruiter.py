@@ -1,5 +1,6 @@
 """V2 orchestration acceptance tests, isolated fictional profiles and feeds."""
 import json
+import base64
 import threading
 import time
 import unittest
@@ -14,6 +15,41 @@ PREFS = dict(salary=70000, currency='USD', period='year', flexible=False,
 
 
 class RecruiterTests(unittest.TestCase):
+    def test_master_file_is_saved_replaced_and_reset_without_touching_tracking(self):
+        file = base64.b64encode(b'%PDF-1.4 fictional resume').decode()
+        status, _ = recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA,
+            file_name='fictional.pdf', file_data=file))
+        self.assertEqual(status, 202)
+        self.wait()
+        self.assertEqual(recruiter.resume(self.a), dict(text=MARA, name='fictional.pdf', file=file))
+        self.assertNotIn('resume', recruiter.read(self.a))
+        version = recruiter.read(self.a)['version']
+        status, _ = recruiter.start(self.a, dict(action='analyze', version=version, resume=JULES))
+        self.assertEqual(status, 202)
+        self.wait()
+        self.assertEqual(recruiter.resume(self.a)['file'], '')
+        self.assertEqual(recruiter.start(self.a, dict(action='reset', version=recruiter.read(self.a)['version']))[0], 200)
+        self.assertEqual(recruiter.resume(self.a)['text'], '')
+
+    def test_tailored_draft_is_separate_versioned_and_detects_changed_resume(self):
+        self.analyze(); self.search()
+        job = self.a.records()[0]
+        code, initial = recruiter.tailored_resume(self.a, job['id'])
+        self.assertEqual(code, 200)
+        payload = dict(action='generate', version=initial['version'], resume_hash=initial['resume_hash'], posting_hash=initial['posting_hash'])
+        with patch.object(recruiter, 'ai', return_value={'sections': ['Fictional tailored draft']}) as mock:
+            code, generated = recruiter.tailor(self.a, job['id'], payload)
+        self.assertEqual(code, 200)
+        self.assertEqual(mock.call_args.args[2]['resume'], MARA)
+        self.assertEqual(recruiter.tailored_resume(self.a, job['id'])[1]['draft'], '')
+        payload.update(action='save', draft=generated['draft'])
+        self.assertEqual(recruiter.tailor(self.a, job['id'], payload)[0], 200)
+        self.assertEqual(recruiter.tailor(self.a, job['id'], payload)[0], 409)
+        self.assertEqual(recruiter.resume(self.a)['text'], MARA)
+        self.analyze(JULES)
+        self.assertTrue(recruiter.tailored_resume(self.a, job['id'])[1]['stale'])
+        self.assertEqual(recruiter.tailor(self.a, job['id'], payload)[0], 409)
+
     def test_reset_clears_recruiter_only_and_rejects_stale_requests(self):
         self.analyze()
         self.search()
