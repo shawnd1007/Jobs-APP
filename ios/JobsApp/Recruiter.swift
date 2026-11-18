@@ -530,7 +530,7 @@ struct MasterResumeView: View {
                             Button("View original file") { previewURL = fileURL }
                             ShareLink("Share original file", item: fileURL)
                         }
-                        if master.file.isEmpty { Text("The extracted text is saved. Upload the original again to keep a copy of the file.").font(.footnote) }
+                        if master.file.isEmpty && !master.text.isEmpty { Text("The extracted text is saved. Upload the original again to keep a copy of the file.").font(.footnote) }
                         Text(master.text.isEmpty ? "No résumé has been uploaded yet." : master.text).textSelection(.enabled)
                     }
                 } else if let error { Text(error).foregroundStyle(.red) }
