@@ -36,6 +36,7 @@ struct RecruiterState: Decodable {
         let jobId: Int
         let title, employer, location, salary, group, reason, resumeEvidence, jobEvidence: String
         let gaps, emphasis, checks: [String]
+        let payNotes: [String]?
         var label: String {
             switch group {
             case "close": "Close match"
@@ -100,6 +101,7 @@ struct RecruiterHome: View {
     @State private var showingStrategy = false
     @State private var showingResume = false
     @State private var showingActivity = false
+    @State private var researchingPay: RecruiterState.Match?
     @State private var latestLoad = UUID()
     @State private var lastStatusCheck: Date?
     @State private var lastRecruiterLoad: Date?
@@ -228,6 +230,9 @@ struct RecruiterHome: View {
         .onDisappear { workspace.choosingRecruiterFile = false }
         .sheet(isPresented: $showingResume) { MasterResumeView(workspace: workspace) }
         .sheet(isPresented: $showingActivity) { RecruiterActivityView(address: workspace.address) }
+        .sheet(item: $researchingPay) { match in
+            MarketPayView(jobID: match.jobId, address: workspace.address)
+        }
         .task(id: workspace.address) {
             while !Task.isCancelled {
                 if !workspace.choosingRecruiterFile { await reload(polling: true) }
@@ -438,6 +443,14 @@ struct RecruiterHome: View {
                         ForEach(match.checks, id: \.self) { check in
                             Text(check).font(.subheadline.weight(.medium))
                         }
+                    } else {
+                        ForEach(match.payNotes ?? [], id: \.self) { note in
+                            Text(note).font(.subheadline.weight(.medium))
+                        }
+                    }
+                    if selectedGroup == "recommended", match.payNotes?.isEmpty == false {
+                        Button("Market pay estimate", systemImage: "magnifyingglass") { researchingPay = match }
+                            .buttonStyle(.bordered)
                     }
                     Text(match.reason).font(.subheadline)
                     DisclosureGroup("Why this match?") {
@@ -735,6 +748,103 @@ struct MasterResumeView: View {
             }
             master = result
         } catch { self.error = DashboardAPI.connectionMessage(for: error) }
+    }
+}
+
+struct MarketPayView: View {
+    @Environment(\.dismiss) private var dismiss
+    let jobID: Int
+    let address: String
+
+    @State private var report: Report?
+    @State private var loading = false
+    @State private var error: String?
+
+    private struct Report: Decodable {
+        struct Citation: Decodable {
+            let url: URL
+            let title: String
+            let end: Int
+        }
+        let summary: String?
+        let citations: [Citation]
+        let researchedAt: String
+    }
+
+    private struct Response: Decodable {
+        let research: Report?
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Estimate for comparable roles. Employer pay may differ.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    if let report {
+                        if let summary = report.summary {
+                            Text(citedText(summary, citations: report.citations))
+                        } else {
+                            Text("The research didn’t find enough reliable pay data for this role.")
+                        }
+                        Text("Researched \(displayTimestamp(report.researchedAt))")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    } else if !loading {
+                        Button("Research market pay", systemImage: "magnifyingglass") {
+                            Task { await load(research: true) }
+                        }
+                    }
+                    if loading { ProgressView("Looking up market pay…") }
+                    if let error { Text(error).font(.footnote).foregroundStyle(.secondary) }
+                }
+                if let citations = report?.citations, !citations.isEmpty {
+                    Section("Sources") {
+                        ForEach(Array(citations.enumerated()), id: \.offset) { index, citation in
+                            Link("[\(index + 1)] \(citation.title)", destination: citation.url)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Market Pay Estimate")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } } }
+            .task { await load(research: false) }
+        }
+    }
+
+    private func citedText(_ summary: String, citations: [Report.Citation]) -> AttributedString {
+        let scalars = summary.unicodeScalars
+        var result = AttributedString()
+        var cursor = scalars.startIndex
+        for (index, citation) in citations.enumerated().sorted(by: { $0.element.end < $1.element.end }) {
+            guard citation.url.scheme == "https", citation.end >= 0,
+                  let end = scalars.index(scalars.startIndex, offsetBy: citation.end, limitedBy: scalars.endIndex),
+                  end >= cursor else { continue }
+            result.append(AttributedString(String(scalars[cursor..<end])))
+            var link = AttributedString(" [\(index + 1)]")
+            link.link = citation.url
+            result.append(link)
+            cursor = end
+        }
+        result.append(AttributedString(String(scalars[cursor...])))
+        return result
+    }
+
+    @MainActor private func load(research: Bool) async {
+        guard !loading else { return }
+        loading = true
+        error = nil
+        defer { loading = false }
+        do {
+            let data = try await DashboardAPI.request("/api/jobs/\(jobID)/market-pay", at: address,
+                                                      body: research ? Data("{}".utf8) : nil)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            report = try decoder.decode(Response.self, from: data).research
+        } catch is CancellationError {
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }
 

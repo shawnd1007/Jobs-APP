@@ -2055,6 +2055,8 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/api/v1/health':return self.send(200,{'status':'ok','api_version':1})
         if path=='/api/v1/search-status':return self.send(200,search_status())
         if path=='/api/v1/dashboard':return self.send(200,snapshot())
+        pay_match = re.fullmatch(r'/api/jobs/(\d+)/market-pay', path)
+        if pay_match:return self.send(*recruiter.market_pay(service(), int(pay_match[1])))
         prep_match = re.fullmatch(r'/api/jobs/(\d+)/application-prep', path)
         tailored_match = re.fullmatch(r'/api/jobs/(\d+)/tailored-resume', path)
         if tailored_match:return self.send(*recruiter.tailored_resume(service(), int(tailored_match[1])))
@@ -2078,6 +2080,15 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, UnicodeError) as error:
                 return self.send(400, {'error': str(error)})
         if self.path=='/api/run':return self.send(202 if start_run() else 409,{'running':True})
+        pay_match = re.fullmatch(r'/api/jobs/(\d+)/market-pay', self.path)
+        if pay_match:
+            try:
+                size = int(self.headers.get('Content-Length', 0))
+                if not 0 < size <= 1024 or json.loads(self.rfile.read(size)) != {}:
+                    raise ValueError('Could not read the market pay request.')
+                return self.send(*recruiter.market_pay(service(), int(pay_match[1]), research=True))
+            except ValueError as error:
+                return self.send(400, {'error': str(error)})
         tailored_match = re.fullmatch(r'/api/jobs/(\d+)/tailored-resume', self.path)
         if tailored_match:
             try:

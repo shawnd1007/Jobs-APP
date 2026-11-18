@@ -465,7 +465,8 @@ enum DashboardAPI {
         }
         let timeout: TimeInterval
         switch path {
-        case _ where path.hasSuffix("/ai-review") || path.hasSuffix("/tailored-resume"),
+        case _ where path.hasSuffix("/ai-review") || path.hasSuffix("/tailored-resume")
+                          || (path.hasSuffix("/market-pay") && body != nil),
              "/api/recruiter" where body != nil:
             timeout = 105
         case "/api/v1/dashboard":

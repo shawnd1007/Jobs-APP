@@ -278,11 +278,69 @@ class RecruiterTests(unittest.TestCase):
         self.analyze(); self.search()
         job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
         for change, expected in [({'salary_max': 60000, 'salary_min': 50000}, 'avoid'),
-                                 ({'salary_min': 60000}, 'review'), ({'salary_currency': 'CAD'}, 'review'),
+                                 ({'salary_min': 60000}, 'close'), ({'salary_currency': 'CAD'}, 'close'),
                                  ({'availability': 'Closed'}, 'avoid'), ({'posting_verified': None}, 'review')]:
             with self.subTest(change=change):
                 result = recruiter.match(self.a, recruiter.read(self.a, True), dict(job, **change))
                 self.assertEqual(result['group'], expected)
+                if expected == 'close':
+                    self.assertIn('Salary check needed.', result['pay_notes'][0])
+
+    def test_pay_only_review_can_be_restored_from_legacy_comparison(self):
+        self.analyze(); self.search()
+        job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
+        job.update(salary_min=None, salary_max=None, salary_text='Salary not published')
+        with self.a.connect() as c:
+            self.a.upsert(c, job)
+        state = recruiter.read(self.a, True)
+        match = recruiter.match(self.a, state, job)
+        self.assertEqual(match['group'], 'close')
+        match.pop('fit_group')
+        match.pop('pay_notes')
+        match['group'] = 'review'
+        state['matches'] = [match]
+        recruiter.write(self.a, state)
+        with patch.object(recruiter, 'ai', side_effect=AssertionError('Unexpected AI request')), \
+             patch.object(self.a, 'run_pipeline', side_effect=AssertionError('Unexpected employer search')):
+            restored = recruiter.read(self.a)['matches'][0]
+            self.assertEqual(restored['group'], 'close')
+            self.assertTrue(restored['pay_notes'])
+            state['matches'][0]['evidence_checks'] = ['Résumé evidence could not be verified.']
+            recruiter.write(self.a, state)
+            self.assertEqual(recruiter.read(self.a)['matches'][0]['group'], 'review')
+
+    def test_market_pay_uses_public_job_facts_and_reuses_researched_sources(self):
+        self.analyze(); self.search()
+        job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
+        cfg = dict(self.a.config(), ai_enabled=True, ai_daily_limit=10)
+        text = 'Fictional state wage data shows an annual market range of $75,000 to $95,000.'
+        body = {'status': 'completed', 'output': [
+            {'type': 'web_search_call', 'status': 'completed', 'action': {'type': 'search'}},
+            {'type': 'message', 'content': [{'type': 'output_text', 'text': text, 'annotations': [
+                {'type': 'url_citation', 'url': 'https://example.com/fictional-wages',
+                 'title': 'Fictional wage data', 'start_index': 0, 'end_index': len(text)},
+            ]}]},
+        ]}
+        self.assertEqual(recruiter.market_pay(self.a, job['id']), (200, {'research': None}))
+        with patch.object(recruiter, 'ai', side_effect=REAL_AI), \
+             patch.object(self.a, 'config', return_value=cfg), \
+             patch.object(recruiter.prototype, 'ai_key', return_value='fictional-test-token'), \
+             patch('urllib.request.urlopen') as network, \
+             patch.object(recruiter.json, 'load', return_value=body):
+            code, result = recruiter.market_pay(self.a, job['id'], research=True)
+            self.assertEqual(code, 200)
+            self.assertEqual(result['research']['summary'], text)
+            self.assertTrue(result['research']['citations'][0]['url'].startswith('https://'))
+            self.assertEqual(recruiter.market_pay(self.a, job['id'], research=True), (200, result))
+            network.assert_called_once()
+            payload = json.loads(network.call_args.args[0].data)
+            self.assertEqual(payload['tools'][0]['type'], 'web_search')
+            self.assertFalse(payload['store'])
+            self.assertEqual(set(json.loads(payload['input'])), {'title', 'location', 'work_arrangement'})
+        self.assertEqual(recruiter.market_pay(self.a, job['id']), (200, result))
+        self.assertEqual(recruiter.researched_pay(body['output'][1:]), {'summary': None, 'citations': []})
+        body['output'][1]['content'][0]['annotations'] = []
+        self.assertEqual(recruiter.researched_pay(body['output']), {'summary': None, 'citations': []})
 
     def test_unverified_match_is_reviewed_without_stopping_other_matches(self):
         self.analyze()
