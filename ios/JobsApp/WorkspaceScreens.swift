@@ -172,30 +172,60 @@ struct EmployerBoards: View {
 
     var body: some View {
         List {
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Explore more opportunities", systemImage: "sparkles")
+                        .font(.title3.bold())
+                    Text("Jobs checks employer career pages to discover openings for you.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6)
+            }
             if let message { Text(message).foregroundStyle(.secondary) }
             if let dashboard = workspace.dashboard {
                 if dashboard.sources.isEmpty {
                     ContentUnavailableView("No Employer Sources", systemImage: "building.2",
-                                           description: Text("Add a board or posting URL in Preferences."))
+                                           description: Text("No employer sources are configured yet."))
                 }
-                ForEach(dashboard.sources) { source in
-                    Section {
-                        Text(source.source).font(.headline)
-                        LabeledContent("Status", value: source.disabled ? "Paused" : source.state.capitalized)
-                        Text("\(source.kind) · \(source.count) postings at last check")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                        if !source.checked.isEmpty { Text(displayTimestamp(source.checked)).font(.footnote) }
-                        if !source.error.isEmpty { Text(source.error).foregroundStyle(.secondary) }
-                        Button(source.disabled ? "Resume Source" : "Pause Source") {
-                            Task { await toggle(source, dashboard: dashboard) }
+                Section("Employers we search") {
+                    ForEach(dashboard.sources) { source in
+                        DisclosureGroup {
+                            LabeledContent("Status", value: source.disabled ? "Paused" : source.state.capitalized)
+                            if !source.checked.isEmpty {
+                                LabeledContent("Last checked", value: displayTimestamp(source.checked))
+                                LabeledContent("Openings at last check", value: "\(source.count)")
+                            }
+                            if !source.error.isEmpty { Text(source.error).foregroundStyle(.secondary) }
+                            Button(source.disabled ? "Resume Source" : "Pause Source") {
+                                Task { await toggle(source, dashboard: dashboard) }
+                            }
+                            .disabled(workspace.saving || dashboard.running)
+                        } label: {
+                            Label {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(sourceName(source)).font(.headline)
+                                    Text(source.disabled ? "Paused" : source.checked.isEmpty ? "Not checked yet" : "Career page")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            } icon: {
+                                Image(systemName: "building.2.fill").foregroundStyle(.tint)
+                            }
                         }
-                        .disabled(workspace.saving || dashboard.running)
                     }
                 }
             }
         }
         .navigationTitle("Employer Boards")
         .refreshable { await workspace.refresh() }
+    }
+
+    private func sourceName(_ source: EmployerSource) -> String {
+        if let url = URL(string: source.source), let host = url.host, source.source.hasPrefix("https:") {
+            return host.replacingOccurrences(of: "www.", with: "")
+        }
+        let identifier = source.source.split(separator: "/").last.map(String.init) ?? source.source
+        return identifier.replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ").capitalized
     }
 
     private func toggle(_ source: EmployerSource, dashboard: Dashboard) async {
@@ -537,19 +567,29 @@ struct PreferencesEditor: View {
                     }
                 }
             } else {
-                Section("Matching Rules") {
+                Section("Advanced matching rules") {
+                    Text("These are workspace rules for the older job search, not skills from your résumé. The recruiter builds your skills from the résumé you provide.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     multiline("Excluded title terms, one per line", $draft.exclusions)
                     multiline("Skill groups: Name | Weight | term, term", $draft.skills)
                 }
-                Section("Employer Sources") {
-                    boardField("Ashby", "ashby")
-                    boardField("Greenhouse", "greenhouse")
-                    boardField("Lever", "lever")
-                    boardField("SmartRecruiters", "smartrecruiters")
-                    boardField("Personio", "personio")
-                    boardField("Recruitee", "recruitee")
-                    multiline("Employer posting URLs, one per line", $draft.employerURLs)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                Section("Advanced source configuration") {
+                    NavigationLink("Manage source identifiers") {
+                        Form {
+                            Section {
+                                boardField("Ashby", "ashby")
+                                boardField("Greenhouse", "greenhouse")
+                                boardField("Lever", "lever")
+                                boardField("SmartRecruiters", "smartrecruiters")
+                                boardField("Personio", "personio")
+                                boardField("Recruitee", "recruitee")
+                                ProfileTermsLink(title: "Individual Posting URLs", prompt: "Add a posting URL", terms: $draft.employerURLs)
+                            } footer: {
+                                Text("These technical settings are shared by the workspace and stay when you start a new résumé.")
+                            }
+                        }
+                        .navigationTitle("Source Configuration")
+                    }
                 }
                 Section("Schedule") {
                     Toggle("Daily Employer Search", isOn: $draft.preferences.scheduleEnabled)
@@ -644,11 +684,10 @@ struct PreferencesEditor: View {
     }
 
     private func boardField(_ name: String, _ platform: String) -> some View {
-        multiline("\(name) board slugs, one per line", Binding(
+        ProfileTermsLink(title: name, prompt: "Add an employer board identifier", terms: Binding(
             get: { draft.boards[platform, default: ""] },
             set: { draft.boards[platform] = $0 }
-        ))
-        .textInputAutocapitalization(.never).autocorrectionDisabled()
+        ), emptySummary: "No boards")
     }
 
     private func multiline(_ label: String, _ value: Binding<String>) -> some View {
