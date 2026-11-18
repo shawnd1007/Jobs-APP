@@ -74,6 +74,27 @@ class RecruiterTests(unittest.TestCase):
         self.assertFalse(recruiter.quote_in('managed billing projects and hired staff', source))
         self.assertFalse(recruiter.quote_in('""', source))
 
+    def test_comparison_uses_complete_resume_and_invalidates_cache_when_it_changes(self):
+        self.analyze()
+        self.search()
+        state = recruiter.read(self.a, True)
+        job = next(j for j in self.a.records() if j['requisition'] == 'billing')
+        state['resume'] += ' Built a patient payment reconciliation tool. Email: mara@example.com'
+        response = dict(group='close', reason='The applicant has matching experience.', gaps=[],
+                        resume_evidence='Built a patient payment reconciliation tool.',
+                        job_evidence='Review denial queues and coach billing specialists.', emphasis=[])
+        with patch.object(recruiter, 'ai', return_value=response) as provider:
+            match = recruiter.match(self.a, state, job)
+            self.assertEqual(match['group'], 'close')
+            supplied = provider.call_args.args[2]
+            self.assertIn('Built a patient payment reconciliation tool.', supplied['resume'])
+            self.assertNotIn('mara@example.com', supplied['resume'])
+            recruiter.match(self.a, state, job)
+            self.assertEqual(provider.call_count, 1)
+            state['resume'] += ' Documented a separate reporting workflow.'
+            recruiter.match(self.a, state, job)
+            self.assertEqual(provider.call_count, 2)
+
     def setUp(self):
         self.context = environment()
         self.a, self.calls = self.context.__enter__()

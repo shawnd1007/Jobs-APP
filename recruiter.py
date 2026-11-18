@@ -106,12 +106,14 @@ def refresh_saved_matches(a, state):
                    current[item['job_id']], cfg, remote_region=preferences.get('remote_region'))]
     state['matches'] = matches
     checked_at = a.dt.datetime.now(a.dt.timezone.utc)
-    keys = {item['job_id']: match_cache_key(state['strategy'], match_facts(current[item['job_id']]), cfg['ai_model'])
+    keys = {item['job_id']: match_cache_key(state['strategy'], match_facts(current[item['job_id']]), cfg['ai_model'], state['resume'])
             for item in matches if item.get('fit_group', item['group']) in ('review', 'avoid')}
+    legacy_keys = {item['job_id']: match_cache_key(state['strategy'], match_facts(current[item['job_id']]), cfg['ai_model'])
+                   for item in matches if item['job_id'] in keys}
     market_keys = {item['job_id']: market_pay_key(market_pay_facts(a, current[item['job_id']], preferences))
                    for item in matches if market_pay_needed(a, current[item['job_id']], preferences)
                    and item.get('fit_group', item['group']) != 'avoid'}
-    comparisons = saved_comparisons(a, list(dict.fromkeys([*keys.values(), *market_keys.values()])))
+    comparisons = saved_comparisons(a, list(dict.fromkeys([*keys.values(), *legacy_keys.values(), *market_keys.values()])))
     for item in matches:
         job = current[item['job_id']]
         checks = constraints(a, job, preferences, cfg, checked_at)
@@ -120,7 +122,7 @@ def refresh_saved_matches(a, state):
         if changed:
             checks.append(('review', 'The employer details changed after this analysis. Refresh matches.'))
         prior_group = item.get('fit_group', item['group'])
-        comparison = item if changed else comparisons.get(keys.get(job['id']), item)
+        comparison = item if changed else comparisons.get(keys.get(job['id']), comparisons.get(legacy_keys.get(job['id']), item))
         evidence_checks = comparison_evidence(comparison, state['resume'], job)
         evidence_checks = list(dict.fromkeys(item.get('evidence_checks', []) + evidence_checks))
         assessed = dict(comparison, group=comparison.get('group', prior_group))
@@ -653,8 +655,11 @@ def match_facts(job):
     return {key: job.get(key, '') for key in ('title', 'employer', 'description', 'location', 'salary_text')}
 
 
-def match_cache_key(strategy, facts, model):
-    return hashlib.sha256(json.dumps([strategy, facts, model], sort_keys=True).encode()).hexdigest()
+def match_cache_key(strategy, facts, model, resume=None):
+    inputs = [strategy, facts, model]
+    if resume is not None:
+        inputs.extend(['resume-comparison-v1', resume])
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
 OPTIONAL_GAP = re.compile(r'\b(?:prefer(?:red|ence)|optional|nice.to.have|bonus|a plus)\b', re.I)
@@ -721,12 +726,13 @@ def checked_group(group, checks):
 def match(a, state, job):
     facts = match_facts(job)
     cfg = a.config()
-    digest = match_cache_key(state['strategy'], facts, cfg['ai_model'])
+    digest = match_cache_key(state['strategy'], facts, cfg['ai_model'], state['resume'])
     with a.connect() as c:
         cached = c.execute('SELECT value FROM recruiter_match_cache WHERE fingerprint=?', (digest,)).fetchone()
     candidate_facts = {key: value for key, value in facts.items() if key != 'salary_text'}
+    resume = re.sub(r'\b[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}\b', '[email removed]', state['resume'])
     result = json.loads(cached[0]) if cached else ai(
-        a, 'candidate_match', {'candidate': state['strategy'], 'job': candidate_facts}, MATCH
+        a, 'candidate_match', {'candidate': state['strategy'], 'resume': resume, 'job': candidate_facts}, MATCH
     )
     validate(result, MATCH)
     unverified = comparison_evidence(result, state['resume'], job)

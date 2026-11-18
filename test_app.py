@@ -237,6 +237,20 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(saved['identity'],'personio:fictional:123')
   self.assertNotIn('application_verified',saved)
   self.assertEqual(len(app.records()),2)
+
+ def test_recruiter_new_posting_checks_have_separate_budget_from_retained(self):
+  cfg = dict(app.config(), request_delay_seconds=0)
+  job = dict(title='Fictional Analyst', employer='Fictional', location='Remote - United States',
+             url='https://jobs.lever.co/fictional/abc', description='Review invoices.', availability='Open')
+  report = {'log': [], 'posting_checks': 8, 'retained_posting_checks': 8}
+  def verified(listing, *_args, **_kwargs):
+   listing['posting_verified'] = app.now()
+  with patch.object(app, 'verify_application', side_effect=verified) as verify:
+   checked = app.finalize(dict(job), cfg, report, check_posting=True)
+  self.assertEqual(verify.call_count, 1)
+  self.assertTrue(checked.get('posting_verified'))
+  self.assertEqual(report['posting_checks'], 9)
+  self.assertEqual(report['new_posting_checks'], 1)
  def test_distinct_requisitions_do_not_share_application_history(self):
   first = dict(title='Billing Analyst', employer='Fictional Employer',
                location='Remote - United States',
@@ -678,6 +692,23 @@ class PersistenceTests(unittest.TestCase):
   self.assertTrue(chosen['url'].endswith('/transferable'))
   self.assertEqual(chosen['matched_duty_count'], 2)
   self.assertEqual(chosen['queue'], 'Review')
+
+ def test_recruiter_prioritizes_target_title_when_new_listings_are_limited(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(recruiter_discovery=True, categories=['Billing Analyst'], preferred_skills=['Excel', 'SQL'],
+             profile='Used Excel and SQL in finance operations.', skill_groups=[], target_locations=[],
+             workplace_types=[], max_new_candidates=1, additional_boards={'ashby':['fictional']})
+  jobs = [dict(title=title, employer='Fictional', location='Remote - United States', description=description,
+               availability='Open', url='https://jobs.ashbyhq.com/fictional/'+identifier+'/application')
+          for title, description, identifier in (
+           ('Billing Analyst', 'Review billing accounts.', 'target'),
+           ('Director of Finance', 'Responsibilities:\nBuild SQL reports.\nReview Excel data.', 'director'))]
+  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', return_value=jobs), \
+       patch.object(app, 'verify_application', side_effect=lambda job, *_args, **_kwargs: job.update(posting_verified=app.now())):
+   app.LOCK.acquire()
+   app.run_pipeline()
+  saved = [job for job in app.records() if job['employer'] == 'Fictional']
+  self.assertEqual([job['title'] for job in saved], ['Billing Analyst'])
 
  def test_smartrecruiters_checks_saved_search_titles_before_general_postings(self):
   _, cfg = self.pipeline_fixture()

@@ -1318,13 +1318,15 @@ def finalize(job, cfg, report, *, check_posting=False, previous=None):
             return job
 
     host = up.urlsplit(job['url']).hostname or 'employer'
+    counter = 'retained_posting_checks' if previous else 'new_posting_checks'
     limit = RETAINED_POSTING_CHECKS if previous else POSTING_CHECKS_PER_RUN
     attempted = False
     try:
-        if (report.get('posting_checks', 0) >= limit or host in report.get('throttled_posting_hosts', [])):
+        if (report.get(counter, 0) >= limit or host in report.get('throttled_posting_hosts', [])):
             report['posting_checks_deferred'] = report.get('posting_checks_deferred', 0) + 1
             raise ValueError('Direct posting check deferred until a later search')
         attempted = True
+        report[counter] = report.get(counter, 0) + 1
         report['posting_checks'] = report.get('posting_checks', 0) + 1
         job['posting_check_attempted'] = now()
         verify_application(job, report, render_form=wants_form)
@@ -1820,7 +1822,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
         progress('Ranking results')
         if cfg.get('recruiter_discovery'):
             ranked = sorted(candidates.values(), key=lambda item: (
-                item[0]['location_eligibility'] == 'Eligible', item[0]['matched_duty_count'],
+                item[0]['location_eligibility'] == 'Eligible',
+                item[0]['category'] != 'Other / Review', item[0]['matched_duty_count'],
                 item[0]['score'], item[0].get('posted') or '',
             ), reverse=True)
         else:
