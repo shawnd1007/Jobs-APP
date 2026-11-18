@@ -44,6 +44,13 @@ SEARCH_SECONDS = 240
 BOARD_SECONDS = 35
 REQUEST_SECONDS = 12
 logging.basicConfig(filename=DATA / 'errors.log', level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+timing_logger = logging.getLogger('jobs.timing')
+if not any(getattr(handler, '_jobs_timing_handler', False) for handler in timing_logger.handlers):
+    timing_handler = logging.StreamHandler()
+    timing_handler._jobs_timing_handler = True
+    timing_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    timing_logger.addHandler(timing_handler)
+timing_logger.setLevel(logging.WARNING)
 
 def now(): return dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')
 def postgres_enabled(): return bool(os.environ.get('JOBS_POSTGRES_DSN'))
@@ -2090,6 +2097,22 @@ def save_interest(job_id, payload):
     return 200, {'saved': True}
 
 
+def timed_request(method):
+    """Log slow requests using only a fixed route label and elapsed time."""
+    def wrapped(handler):
+        started = time.monotonic()
+        try:
+            return method(handler)
+        finally:
+            elapsed = time.monotonic() - started
+            path = up.urlsplit(handler.path).path
+            labels = {'/api/recruiter': 'recruiter', '/api/v1/dashboard': 'dashboard',
+                      '/api/dashboard': 'dashboard', '/api/v1/search-status': 'search-status'}
+            if elapsed >= 1 and path in labels:
+                timing_logger.warning('Slow request: route=%s elapsed=%.2fs', labels[path], elapsed)
+    return wrapped
+
+
 class Handler(BaseHTTPRequestHandler):
     def send(self,status,data,kind='application/json'):
         raw=json.dumps(data).encode() if kind=='application/json' else data.encode()
@@ -2098,6 +2121,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(raw)
         except (BrokenPipeError, ConnectionResetError):
             pass
+    @timed_request
     def do_GET(self):
         target=up.urlsplit(self.path)
         path=target.path
@@ -2127,6 +2151,7 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/prototype.js':return self.send(200,(ROOT/'site'/'prototype.js').read_text(encoding='utf-8-sig'),'text/javascript')
         if path=='/prototype.css':return self.send(200,(ROOT/'site'/'prototype.css').read_text(encoding='utf-8-sig'),'text/css')
         self.send(404,{'error':'Not found'})
+    @timed_request
     def do_POST(self):
         # Reject cross-site form/script mutations, including DNS rebinding origins.
         host=self.headers.get('Host','');origin=self.headers.get('Origin','')

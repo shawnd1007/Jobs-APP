@@ -381,7 +381,7 @@ private struct WorkspaceView: View {
             guard scenePhase == .active, workspace.searchRunning, sample == nil else { return }
             while !Task.isCancelled && workspace.searchRunning {
                 await workspace.checkSearchStatus()
-                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+                do { try await Task.sleep(for: .seconds(5)) } catch { break }
             }
         }
     }

@@ -11,6 +11,12 @@ import postgres_store
 
 
 class RowTests(unittest.TestCase):
+    def test_immediate_transaction_acquires_transaction_scoped_lock(self):
+        raw = MagicMock()
+        connection = postgres_store.Connection(raw)
+        connection.execute('BEGIN IMMEDIATE')
+        raw.execute.assert_called_once_with('SELECT pg_advisory_xact_lock(754086278)')
+
     def test_managed_identity_credential_reused_and_token_requested_each_time(self):
         identity = types.ModuleType('azure.identity')
         credential = MagicMock()

@@ -473,7 +473,7 @@ enum DashboardAPI {
         case "/api/v1/dashboard":
             timeout = 30
         case "/api/v1/search-status":
-            timeout = 5
+            timeout = 15
         default:
             timeout = 15
         }

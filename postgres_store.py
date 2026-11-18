@@ -4,7 +4,9 @@ Azure connections require managed identity and verified TLS. The Azure path
 still requires end-to-end deployment and recovery verification before use.
 """
 
+import logging
 import threading
+import time
 
 _credential_lock = threading.Lock()
 _managed_identity_credential = None
@@ -68,12 +70,23 @@ def connect_azure(dsn, ca_file):
     # The credential owns an in-memory token cache and refreshes expiring tokens.
     # Reuse it across connections, serializing access to its underlying client.
     global _managed_identity_credential
-    with _credential_lock:
-        if _managed_identity_credential is None:
-            _managed_identity_credential = ManagedIdentityCredential()
-        token = _managed_identity_credential.get_token('https://ossrdbms-aad.database.windows.net/.default').token
-    import psycopg
-    return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows)
+    started = time.monotonic()
+    token_finished = None
+    try:
+        with _credential_lock:
+            if _managed_identity_credential is None:
+                _managed_identity_credential = ManagedIdentityCredential()
+            token = _managed_identity_credential.get_token('https://ossrdbms-aad.database.windows.net/.default').token
+        token_finished = time.monotonic()
+        import psycopg
+        return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows)
+    finally:
+        finished = time.monotonic()
+        if finished - started >= 1:
+            identity_end = token_finished if token_finished is not None else finished
+            logging.getLogger('jobs.timing').warning(
+                'Slow PostgreSQL connection: identity=%.2fs connect=%.2fs',
+                identity_end - started, finished - identity_end)
 
 
 SCHEMA = (
