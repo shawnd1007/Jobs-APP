@@ -5,7 +5,7 @@ import time
 import unittest
 from unittest.mock import patch, MagicMock
 import recruiter
-from fixtures.recruiter_fixture import environment, MARA, JULES, strategy
+from fixtures.recruiter_fixture import environment, MARA, JULES, strategy, fake_ai
 
 REAL_AI = recruiter.ai
 
@@ -134,6 +134,21 @@ class RecruiterTests(unittest.TestCase):
             with self.subTest(change=change):
                 result = recruiter.match(self.a, recruiter.read(self.a, True), dict(job, **change))
                 self.assertEqual(result['group'], expected)
+
+    def test_unverified_match_is_reviewed_without_stopping_other_matches(self):
+        self.analyze()
+        def one_bad_quote(a, name, inputs, schema):
+            result = fake_ai(a, name, inputs, schema)
+            if inputs['job']['title'] == 'Revenue Cycle Supervisor':
+                result['resume_evidence'] = 'Invented management certification'
+            return result
+        with patch.object(recruiter, 'ai', side_effect=one_bad_quote):
+            state = self.search()
+        self.assertEqual(len(state['matches']), 6)
+        candidate = next(m for m in state['matches'] if m['title'] == 'Revenue Cycle Supervisor')
+        self.assertEqual(candidate['group'], 'review')
+        self.assertEqual(candidate['resume_evidence'], '')
+        self.assertTrue(any('could not be verified' in check for check in candidate['checks']))
 
     def test_failure_keeps_progress_and_does_not_touch_tracking(self):
         self.analyze(); self.search()

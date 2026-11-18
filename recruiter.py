@@ -49,7 +49,7 @@ def read(a, private=False):
             checks = constraints(a, job, state['preferences'])
             if item.get('listing_fingerprint') != listing_fingerprint(job):
                 checks.append(('review', 'The employer details changed after this analysis. Refresh matches.'))
-            item['checks'] = [c[1] for c in checks]
+            item['checks'] = [c[1] for c in checks] + item.get('evidence_checks', [])
             if any(c[0] == 'avoid' for c in checks):
                 item['group'] = 'avoid'
             elif any(c[0] == 'review' for c in checks) and item['group'] in ('close', 'adjacent'):
@@ -304,9 +304,14 @@ def match(a, state, job):
         cached = c.execute('SELECT value FROM recruiter_match_cache WHERE fingerprint=?', (digest,)).fetchone()
     result = json.loads(cached[0]) if cached else ai(a, 'candidate_match', {'candidate': state['strategy'], 'job': facts}, MATCH)
     validate(result, MATCH)
-    if result['group'] in ('close', 'adjacent') and (
-        not quote_in(result['resume_evidence'], state['resume']) or not quote_in(result['job_evidence'], job.get('description', ''))):
-        raise ValueError('Match evidence could not be traced to the source documents.')
+    unverified = []
+    if result['group'] in ('close', 'adjacent'):
+        if not quote_in(result['resume_evidence'], state['resume']):
+            unverified.append('The résumé evidence could not be verified; review this match manually.')
+            result['resume_evidence'] = ''
+        if not quote_in(result['job_evidence'], job.get('description', '')):
+            unverified.append('The posting evidence could not be verified; review this match manually.')
+            result['job_evidence'] = ''
     if not cached:
         with a.connect() as c:
             c.execute('INSERT INTO recruiter_match_cache VALUES(?,?) ON CONFLICT(fingerprint) DO UPDATE SET value=excluded.value', (digest, json.dumps(result)))
@@ -317,9 +322,12 @@ def match(a, state, job):
         result['group'] = 'review'
     if result['gaps'] and result['group'] == 'close':
         result['group'] = 'review'
+    if unverified and result['group'] in ('close', 'adjacent'):
+        result['group'] = 'review'
     return dict(result, job_id=job['id'], title=job['title'], employer=job['employer'],
                 location=job.get('location', ''), salary=job.get('salary_text', 'Pay not disclosed'),
-                checks=[c[1] for c in checks], analyzed=a.now(), listing_fingerprint=listing_fingerprint(job))
+                checks=[c[1] for c in checks] + unverified, evidence_checks=unverified,
+                analyzed=a.now(), listing_fingerprint=listing_fingerprint(job))
 
 
 def work(a, state, action):

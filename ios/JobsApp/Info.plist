@@ -9,7 +9,9 @@
     <key>JobsAzureHost</key>
     <string>$(JOBS_AZURE_HOST)</string>
     <key>CFBundleURLTypes</key>
-    <array><dict><key>CFBundleURLSchemes</key><array><string>msal$(JOBS_ENTRA_CLIENT_ID)</string></array></dict></array>
+    <array><dict><key>CFBundleURLSchemes</key><array><string>msauth.$(PRODUCT_BUNDLE_IDENTIFIER)</string></array></dict></array>
+    <key>LSApplicationQueriesSchemes</key>
+    <array><string>msauthv2</string><string>msauthv3</string></array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Connect to the Jobs workspace running on your Mac.</string>
     <key>NSAppTransportSecurity</key>

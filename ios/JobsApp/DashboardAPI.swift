@@ -443,7 +443,9 @@ enum DashboardAPI {
 
     static func connectionMessage(for error: Error) -> String {
         if error is DecodingError { return "This address didn’t return a compatible Jobs workspace." }
-        if error is URLError { return "Check that your Mac is awake, the Jobs server is running, and this device can reach it." }
+        if let error = error as? URLError {
+            return "Could not reach the Jobs workspace (network diagnostic \(error.errorCode)). Check the server address and connection."
+        }
         return error.localizedDescription
     }
 

@@ -26,7 +26,13 @@ final class MicrosoftSession {
             throw DashboardAPI.ServerError(status: 0, message: "Microsoft sign-in is not configured for this build.")
         }
         let authority = try MSALAADAuthority(url: authorityURL)
-        let config = MSALPublicClientApplicationConfig(clientId: clientID, redirectUri: "msal\(clientID)://auth", authority: authority)
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            throw DashboardAPI.ServerError(status: 0, message: "Microsoft sign-in is not configured for this build.")
+        }
+        // Use this app's own keychain group and browser sign-in for personal-team builds.
+        MSALGlobalConfig.brokerAvailability = .none
+        let config = MSALPublicClientApplicationConfig(clientId: clientID, redirectUri: "msauth.\(bundleID)://auth", authority: authority)
+        config.cacheConfig.keychainSharingGroup = bundleID
         let result = try MSALPublicClientApplication(configuration: config)
         application = result
         return result
@@ -516,7 +522,14 @@ private struct ServerSettings: View {
                         Button("Sign in with Microsoft") {
                             Task {
                                 do { try await MicrosoftSession.shared.signIn(); failure = nil }
-                                catch { failure = error.localizedDescription }
+                                catch {
+                                    let details = error as NSError
+                                    if let internalCode = details.userInfo[MSALInternalErrorCodeKey] as? NSNumber {
+                                        failure = "Microsoft sign-in could not start (diagnostic \(internalCode))."
+                                    } else {
+                                        failure = error.localizedDescription
+                                    }
+                                }
                             }
                         }
                     }

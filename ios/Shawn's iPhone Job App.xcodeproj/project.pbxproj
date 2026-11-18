@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		3A0000000000000000000001 /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = 3785A9EA30ABE0BA00098A26 /* MSAL */; };
 		1A000000000000000000000A /* JobsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000005 /* JobsApp.swift */; };
 		1A0000000000000000000010 /* DashboardAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000000F /* DashboardAPI.swift */; };
 		1A0000000000000000000014 /* JobsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000013 /* JobsViews.swift */; };
@@ -17,6 +16,7 @@
 		1A000000000000000000001D /* ProductDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000001C /* ProductDesign.swift */; };
 		1A0000000000000000000025 /* Tests/JobsSearchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000023 /* Tests/JobsSearchUITests.swift */; };
 		2A0000000000000000000001 /* Recruiter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000002 /* Recruiter.swift */; };
+		3A0000000000000000000001 /* MSAL in Frameworks */ = {isa = PBXBuildFile; productRef = 3785A9EA30ABE0BA00098A26 /* MSAL */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -48,7 +48,9 @@
 		3A0000000000000000000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
-			files = (3A0000000000000000000001 /* MSAL in Frameworks */,);
+			files = (
+				3A0000000000000000000001 /* MSAL in Frameworks */,
+			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -294,6 +296,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Jobs Next";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.shawndelegal.jobsapp.next;
 				PRODUCT_NAME = JobsApp;
@@ -314,6 +317,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Jobs Next";
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", );
 				MARKETING_VERSION = 2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.shawndelegal.jobsapp.next;
 				PRODUCT_NAME = JobsApp;

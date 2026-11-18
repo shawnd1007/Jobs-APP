@@ -40,9 +40,10 @@ These are requested improvements, not claims about completed functionality.
 
 ### Personal Azure setup in progress
 
-- Azure App Service and a small PostgreSQL flexible server have been created for personal testing. The server has seven-day automatic backups; one initial backup was observed, but a restore has not been tested. Track costs and free-service usage separately from OpenAI usage.
-- PostgreSQL support is under development. Isolated local PostgreSQL tests use fictional data and cover startup, settings persistence, job tracking, a mocked search, and AI token records. They do not prove the hosted service or signed phone works.
-- Before relying on the hosted service, finish secure App Service database identity and restricted network access, deploy the reviewed backend, test a backup restore and authenticated phone connection, and carry the approved employer-board settings to the new workspace. Do not copy personal résumé or application data without a separate, deliberate migration.
+- The personal App Service and PostgreSQL workspace are running. A signed physical iPhone connected to the workspace over 5G; a database setting survived a restart. Seven-day automatic backups were observed, but a restore has not been tested.
+- Microsoft sign-in and an account-specific restriction are configured; an independent test that another identity is rejected is still needed. The app endpoint is reachable from public networks, while the advanced deployment endpoint is separately denied. Review security before wider use and account for changing App Service outbound addresses in database firewall rules.
+- The 29 employer boards were carried to the cloud workspace and used in a search. Validate live search quality and token-cost accounting further. The matching fix for unverifiable evidence needs confirmed deployment and a fresh end-to-end run.
+- Keep personal data and configuration out of Git. Track Azure and OpenAI costs separately; Azure budget alerts are not a spending cap.
 
 ## Prepare for the iPhone App Store
 
