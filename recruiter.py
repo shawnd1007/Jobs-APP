@@ -17,6 +17,7 @@ import urllib.request
 from difflib import SequenceMatcher
 from contextvars import ContextVar
 import prototype
+from us_locations import is_us_location, remote_eligibility
 
 LOCK = threading.Lock()
 BUSY = {'analyzing', 'discovering', 'matching'}
@@ -86,6 +87,11 @@ def read(a, private=False, *, status_only=False):
         current = {j['id']: j for j in a.records()} if matches else {}
         cfg = a.config() if current else None
         checked_at = a.dt.datetime.now(a.dt.timezone.utc)
+        if cfg and cfg.get('us_postings_only'):
+            matches = [item for item in matches if is_us_location(a.clean(
+                current.get(item['job_id'], item).get('location')
+            ))]
+            state['matches'] = matches
         for item in matches:
             job = current.get(item['job_id'])
             if job is None:
@@ -410,7 +416,10 @@ def constraints(a, job, p, cfg, checked_at):
         # Explicit exclusions beat broad country labels; otherwise remain conservative.
         region = p['remote_region'].split(',')[0].strip()
         exclusion = re.search(r'(?:excluding|excludes|except(?: for)?|not eligible in)\s+([^.;\n]+)', text, re.I)
-        if exclusion and region and re.search(r'(?<!\w)' + re.escape(region) + r'(?!\w)', exclusion[1], re.I):
+        us_result = remote_eligibility(a.clean(loc), a.clean(job.get('description')), p['remote_region'])
+        if us_result is not None:
+            checks.append(us_result)
+        elif exclusion and region and re.search(r'(?<!\w)' + re.escape(region) + r'(?!\w)', exclusion[1], re.I):
             checks.append(('avoid', 'The employer excludes your remote work region.'))
         elif region and re.search(r'(?<!\w)' + re.escape(region) + r'(?!\w)', loc, re.I) and not re.search(r'exclud|except|only|restrict', text, re.I):
             checks.append(('pass', 'Published remote location includes your region.'))
@@ -498,6 +507,8 @@ def work(a, state, action):
                 raise ValueError('Another employer search is running. Your preferences are saved; retry shortly.')
             report = a.run_pipeline('recruiter', config_override=cfg, recruiter_version=state['version'])
             jobs = [j for j in a.records() if not j.get('external_application') and j.get('availability') != 'Closed']
+            if cfg.get('us_postings_only'):
+                jobs = [job for job in jobs if is_us_location(a.clean(job.get('location')))]
             # Keep the normal cap unless the operator explicitly enables personal testing.
             jobs.sort(key=lambda j: j.get('updated', ''), reverse=True)
             selected = jobs if prototype.unlimited_personal_testing() else jobs[:12]

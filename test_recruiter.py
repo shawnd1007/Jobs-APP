@@ -112,7 +112,7 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(len(state['matches']), 6)
         groups = {m['title'] + m['location']: m['group'] for m in state['matches']}
         self.assertEqual(groups['Revenue Cycle SupervisorRemote — Oregon, United States'], 'close')
-        self.assertEqual(groups['Medical Billing SpecialistRemote — United States'], 'review')
+        self.assertEqual(groups['Medical Billing SpecialistRemote — United States'], 'close')
         self.assertEqual(groups['Medical Billing SpecialistRemote — United States, excluding Oregon'], 'avoid')
         self.assertEqual(groups['Clinical Laboratory ScientistRemote — Oregon, United States'], 'avoid')
         self.assertEqual(groups['Patient Accounts LeadPortland, Oregon'], 'review')
@@ -216,6 +216,63 @@ class RecruiterTests(unittest.TestCase):
              patch.object(self.a, 'config', side_effect=AssertionError('Status must not load settings')):
             status = recruiter.read(self.a, status_only=True)
         self.assertEqual(status, {key: expected.get(key) for key in ('version', 'stage', 'progress')})
+
+    def test_us_location_is_portable_across_customer_regions(self):
+        from us_locations import is_us_location, remote_eligibility
+
+        for region in ('Florida, United States', 'Colorado, United States', 'Oregon, United States'):
+            self.assertEqual(remote_eligibility('United States - Remote',
+                                                'Only shortlisted applicants will be contacted.', region)[0], 'pass')
+        self.assertEqual(remote_eligibility('Remote — United States', 'Excluding Florida and Colorado.',
+                                            'Florida, United States')[0], 'avoid')
+        self.assertEqual(remote_eligibility('Remote — United States', 'Must reside in Oregon or Washington.',
+                                            'Colorado, United States')[0], 'avoid')
+        self.assertEqual(remote_eligibility('Remote — Denver, CO, United States', '',
+                                            'Florida, United States')[0], 'avoid')
+        self.assertEqual(remote_eligibility('Remote — Denver, CO, United States', '',
+                                            'Colorado, United States')[0], 'pass')
+        self.assertEqual(remote_eligibility('Remote — Colorado', '',
+                                            'Florida, United States')[0], 'avoid')
+        self.assertEqual(remote_eligibility('Remote — Ontario, Canada', '',
+                                            'Colorado, United States')[0], 'avoid')
+        self.assertFalse(is_us_location('Toronto, CA, Canada'))
+        self.assertFalse(is_us_location('Worldwide'))
+        self.assertFalse(is_us_location('Worldwide except the United States'))
+        self.assertTrue(is_us_location('Denver, CO'))
+        cfg = dict(target_locations=['Denver, Colorado, United States'], remote_hiring_locations=[],
+                   workplace_types=['onsite'])
+        job = dict(location='Denver, CO', workplace_type='onsite', description='')
+        self.assertEqual(self.a.location_eligibility(job, cfg)[0], 'Eligible')
+        self.assertEqual(self.a.location_eligibility(dict(job, location='Dallas, TX'), cfg)[0], 'Rejected')
+
+    def test_usajobs_search_uses_official_posting_and_keeps_credentials_on_api_host(self):
+        import usajobs
+        from urllib.parse import parse_qs, urlsplit
+
+        descriptor = dict(PositionURI='https://www.usajobs.gov/GetJob/ViewDetails/12345678',
+                          PositionTitle='Fictional Support Specialist', OrganizationName='Fictional Agency',
+                          PositionLocation=[dict(LocationName='Denver, Colorado', CountryCode='United States')],
+                          PositionRemuneration=[dict(MinimumRange='80000', MaximumRange='95000',
+                                                    RateIntervalCode='PA')],
+                          QualificationSummary='Resolve fictional technical requests.')
+        response = {'SearchResult': {'SearchResultItems': [
+            {'MatchedObjectDescriptor': descriptor},
+            {'MatchedObjectDescriptor': dict(descriptor, PositionURI='https://example.com/job/12345678')},
+        ]}}
+        reader = MagicMock(return_value=(json.dumps(response).encode(), usajobs.ENDPOINT))
+        jobs = list(usajobs.search(reader, email='fixture@example.com', key='fictional-key',
+                                  title='support', location='Denver, Colorado', remote=False))
+        request = reader.call_args.args[0]
+        query = parse_qs(urlsplit(request.full_url).query)
+        self.assertEqual(query['HiringPath'], ['public'])
+        self.assertEqual(query['RemoteIndicator'], ['false'])
+        self.assertEqual(query['LocationName'], ['Denver, Colorado'])
+        self.assertIn('Authorization-key', request.unredirected_hdrs)
+        self.assertNotIn('Authorization-key', request.headers)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]['url'], 'https://www.usajobs.gov/job/12345678')
+        self.assertEqual(jobs[0]['salary_min'], 80000)
+        self.assertEqual(jobs[0]['availability'], 'Needs Verification')
 
     def test_pay_and_geography_constraints_override_ai(self):
         self.analyze(); self.search()

@@ -20,6 +20,7 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "of 6 complete"))
             .firstMatch.waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 22))
+        XCTAssertTrue(app.staticTexts["Medical Billing Specialist"].waitForExistence(timeout: 8))
         app.buttons["Search activity"].tap()
         XCTAssertTrue(app.navigationBars["Search activity"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 8))

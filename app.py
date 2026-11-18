@@ -20,6 +20,8 @@ import xml.etree.ElementTree as ET
 from uuid import uuid4
 import prototype
 import recruiter
+import usajobs
+from us_locations import is_us_location, remote_eligibility, state_code
 from contextvars import ContextVar
 from contextlib import nullcontext
 from queue import Empty, Queue
@@ -610,6 +612,12 @@ def preferred_location(loc, desc, mode, cfg):
         return 'Review', 'Employer work arrangement is not published clearly', area
     if modes and mode not in modes:
         return 'Rejected', 'Work arrangement is outside your preferences', area
+    if split and mode == 'remote':
+        decisions = [remote_eligibility(loc, desc, target) for target in targets]
+        if decisions and all(decision is not None for decision in decisions):
+            order = {'pass': 0, 'review': 1, 'avoid': 2}
+            verdict, reason = min(decisions, key=lambda decision: order[decision[0]])
+            return {'pass': 'Eligible', 'review': 'Review', 'avoid': 'Rejected'}[verdict], reason, area
     if mode == 'remote' and ('(' in loc or re.search(
             r'(?:must (?:reside|live|be based|be located)|only in|restricted to|'
             r'exclud(?:es|ing)|except for|(?:hiring|eligible|approved) states)', loc + ' ' + desc)):
@@ -631,6 +639,11 @@ def preferred_location(loc, desc, mode, cfg):
         phrase = location_words(target)
         if phrase and phrase != 'remote' and f' {phrase} ' in published:
             return 'Eligible', f'Published location matches {target}', area
+        if mode in ('onsite', 'hybrid') and ',' in target and ',' in loc:
+            city, region, *_ = [part.strip() for part in target.split(',')]
+            office, state, *_ = [part.strip() for part in loc.split(',')]
+            if state_code(region) and state_code(region) == state_code(state) and location_words(city) == location_words(office):
+                return 'Eligible', f'Published location matches {target}', area
     if mode == 'remote':
         return 'Review', 'Confirm where the employer can hire remote workers', area
     if split and targets:
@@ -655,7 +668,8 @@ def discovery_regions(cfg):
     if uses_legacy_geography(cfg):
         return ['remote United States', 'Jacksonville Florida', 'Buford Suwanee Duluth Georgia']
     modes = cfg.get('workplace_types') or ('remote', 'hybrid', 'onsite')
-    remote = ['remote ' + region for region in cfg.get('remote_hiring_locations', [])] or ['remote']
+    remote = list(dict.fromkeys('remote United States' if is_us_location(region) else 'remote ' + region
+                                for region in cfg.get('remote_hiring_locations', []))) or ['remote']
     offices = cfg.get('target_locations', [])
     if 'remote_hiring_locations' not in cfg and offices:
         return offices
@@ -1427,13 +1441,13 @@ def set_pending_alert(connection, job_id, pending):
     )
 
 
-def release_pending_alert(connection, job_id, previous, current, searches):
+def release_pending_alert(connection, job_id, previous, current, searches, *, us_only=False):
     if not previous.get('pending_match_alert'):
         return
     if current['availability'] == 'Closed':
         set_pending_alert(connection, job_id, False)
     elif current['availability'] == 'Open' and current.get('posting_verified'):
-        matches = prototype.matching_searches(service(), current, searches)
+        matches = prototype.matching_searches(service(), current, searches, us_only=us_only)
         prototype.record_match_alerts(connection, job_id, matches, now())
         set_pending_alert(connection, job_id, False)
 
@@ -1555,6 +1569,39 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
         candidates = {}
         seen = set()
         successful = 0
+        usa_key = os.environ.get('JOBS_USAJOBS_KEY', '').strip()
+        usa_email = os.environ.get('JOBS_USAJOBS_EMAIL', '').strip()
+        if usa_key and usa_email and cfg['categories']:
+            modes = cfg.get('workplace_types') or ('remote', 'onsite', 'hybrid')
+            commute = next(iter(cfg.get('target_locations', [])), '')
+            queries = [(True, '')] if 'remote' in modes else []
+            if commute and ('onsite' in modes or 'hybrid' in modes):
+                queries.append((False, commute))
+            title = cfg['categories'][dt.date.today().toordinal() % len(cfg['categories'])]
+            for index, (remote, location) in enumerate(queries):
+                if not time_left(len(queries) - index, 'USAJOBS searches'):
+                    break
+                progress('Checking USAJOBS', index, len(queries), usajobs.SOURCE)
+                try:
+                    found = list(usajobs.search(read_response, email=usa_email, key=usa_key, title=title,
+                                                remote=remote, location=location))
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    report['failures'].append('USAJOBS search could not finish: ' + type(error).__name__)
+                    source_issue('USAJOBS search could not finish', usajobs.SOURCE, error)
+                    continue
+                successful += 1
+                report['log'].append(f'USAJOBS returned {len(found)} public announcements')
+                for job in found:
+                    if cfg.get('us_postings_only') and not is_us_location(clean(job['location'])):
+                        report['skipped_location'] = report.get('skipped_location', 0) + 1
+                        continue
+                    ident = identity(job['url'])
+                    if ident in known_identities or ident in candidates:
+                        continue
+                    job = assess(job, cfg)
+                    if not cfg.get('recruiter_discovery') and not profile_candidate(job, cfg, report):
+                        continue
+                    candidates[ident] = (job, [])
         with connect() as c:
             checked = {r['source']:r['checked'] for r in c.execute('SELECT source,checked FROM source_health')}
         disabled = set(cfg.get('disabled_sources', []))
@@ -1605,7 +1652,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                             fresh['employer']=old['employer'];fresh['history_confirmation']=old.get('history_confirmation',False)
                             j = finalize(fresh, cfg, report, previous=old)
                             job_id, _ = upsert(c, j)
-                            release_pending_alert(c, job_id, old, j, searches)
+                            release_pending_alert(c, job_id, old, j, searches, us_only=cfg.get('us_postings_only'))
                             c.commit()
                             report['reverified'] += 1
                         elif platform in XML_FEED_PLATFORMS:
@@ -1646,8 +1693,11 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                         if ident in seen:report['duplicates']+=1;continue
                         seen.add(ident)
                         if ident in known_identities:continue
+                        if cfg.get('us_postings_only') and not is_us_location(clean(j.get('location'))):
+                            report['skipped_location'] = report.get('skipped_location', 0) + 1
+                            continue
                         j = assess(hydrate_board_listing(board, j), cfg)
-                        matched = prototype.matching_searches(service(), j, searches)
+                        matched = prototype.matching_searches(service(), j, searches, us_only=cfg.get('us_postings_only'))
                         if not cfg.get('recruiter_discovery') and not matched and not profile_candidate(j, cfg, report):
                             continue
                         candidates[ident] = (j, matched)
@@ -1707,11 +1757,14 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                     j = finalize(j, cfg, report, previous=old)
                     with connect() as c:
                         job_id, _ = upsert(c, j)
-                        release_pending_alert(c, job_id, old, j, searches)
+                        release_pending_alert(c, job_id, old, j, searches, us_only=cfg.get('us_postings_only'))
                     report['reverified'] += 1
                     continue
                 j = assess(j, cfg)
-                matched = prototype.matching_searches(service(), j, searches)
+                if cfg.get('us_postings_only') and not is_us_location(clean(j.get('location'))):
+                    report['skipped_location'] = report.get('skipped_location', 0) + 1
+                    continue
+                matched = prototype.matching_searches(service(), j, searches, us_only=cfg.get('us_postings_only'))
                 if not cfg.get('recruiter_discovery') and not matched and not profile_candidate(j, cfg, report):
                     continue
                 if ident in candidates:
@@ -1859,6 +1912,8 @@ def snapshot():
             if j.get('external_application'):
                 j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
                 continue
+            if cfg.get('us_postings_only') and not is_us_location(clean(j.get('location'))):
+                j['hidden_from_discovery'] = True
             expires = posting_check_expiration(j, cfg)
             j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
             if expires:

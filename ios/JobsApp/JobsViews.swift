@@ -347,7 +347,9 @@ struct JobList: View {
     @State private var addingApplication = false
 
     var body: some View {
-        let jobs = (workspace.dashboard?.jobs ?? []).filter { trackingOnly || !$0.isExternalApplication }
+        let jobs = (workspace.dashboard?.jobs ?? []).filter {
+            trackingOnly || (!$0.isExternalApplication && $0.hiddenFromDiscovery != true)
+        }
         let today = dateString(.now)
         let due = jobs.filter { $0.needsFollowUp(on: today) }
         let upcoming = jobs.filter { $0.trackingStage != .archive && $0.followUp > today }

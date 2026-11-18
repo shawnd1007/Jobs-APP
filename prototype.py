@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from us_locations import is_us_location
 import re
 import threading
 import urllib.request
@@ -37,6 +38,7 @@ def settings(base, data, stored=None):
     base.setdefault('ai_enabled', False)
     base.setdefault('ai_model', 'gpt-5.4-mini')
     base.setdefault('ai_daily_limit', 10)
+    base['us_postings_only'] = True
     return base
 
 
@@ -226,11 +228,15 @@ def enrich_snapshot(a, result, cfg, connection):
     usage = connection.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
     searches_by_id = {search['id']: search for search in searches}
     jobs_by_id = {job['id']: job for job in result['jobs']}
-    result['match_alerts'] = [
+    visible_alerts = [
         dict(row, unread=bool(row['unread']), search_name=search['name'],
              current_state=match_alert_state(a, jobs_by_id.get(row['job_id']), search))
         for row in alert_rows if (search := searches_by_id.get(row['search_id']))
+        and not (jobs_by_id.get(row['job_id']) or {}).get('hidden_from_discovery')
     ]
+    result['match_alerts'] = visible_alerts
+    if cfg.get('us_postings_only'):
+        result['unread_match_count'] = sum(alert['unread'] for alert in visible_alerts)
     result['ai_attempts_today'] = usage[0] if usage else 0
     for j in result['jobs']:
         saved = advice.get(j['id'])
@@ -249,8 +255,10 @@ def search_title_matches(title, search):
                             for term in terms)
 
 
-def matching_searches(a, job, searches):
+def matching_searches(a, job, searches, *, us_only=False):
     if job.get('availability') != 'Open':
+        return []
+    if us_only and not is_us_location(a.clean(job.get('location'))):
         return []
     title = job.get('title', '').lower()
     text = title + ' ' + a.clean(job.get('description')).lower()
