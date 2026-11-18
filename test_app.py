@@ -7,8 +7,25 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 import app
+import us_locations
 
 class PersistenceTests(unittest.TestCase):
+ def test_cached_location_restrictions_refresh_with_changed_posting(self):
+  us_locations._cached_location_clauses.cache_clear()
+  header = 'Remote – US'
+  bay = 'This role will be remote and based in the Bay Area.'
+  nationwide = 'Remote hiring is available across the United States.'
+  first = us_locations.remote_eligibility(header, bay, 'Florida, United States')
+  self.assertEqual(first[0], 'avoid')
+  self.assertEqual(us_locations.remote_eligibility(header, bay, 'Florida, United States'), first)
+  self.assertGreater(us_locations._cached_location_clauses.cache_info().hits, 0)
+  self.assertEqual(us_locations.remote_eligibility(header, nationwide, 'Florida, United States')[0], 'pass')
+  self.assertTrue(us_locations.foreign_location('Bogotá, Colombia'))
+  before = us_locations._cached_location_clauses.cache_info().currsize
+  list(us_locations.location_clauses('x' * 32769))
+  list(us_locations.location_clauses('😀' * 8193))
+  self.assertEqual(us_locations._cached_location_clauses.cache_info().currsize, before)
+
  def test_large_malformed_text_and_geographic_pay_tiers(self):
   tail = '<' * 50000
   self.assertEqual(app.clean('<p>Example</p>' + tail), 'Example ' + tail)

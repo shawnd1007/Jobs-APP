@@ -1,6 +1,7 @@
 """Read published U.S. work locations without inferring eligibility from pay."""
 import re
 import unicodedata
+from functools import lru_cache
 
 
 STATES = dict(zip(
@@ -95,7 +96,7 @@ def office_locations(location):
     return offices
 
 
-def location_clauses(description):
+def _location_clauses(description):
     """Read hiring terms before compensation and avoid matching pay-location tiers."""
     for line in description.splitlines():
         for sentence in re.split(r'[!?;]|\.(?=\s+[A-Z])', line):
@@ -107,6 +108,18 @@ def location_clauses(description):
             if (match := EXCLUSION.search(sentence)) and (has_country(match[1]) or restriction_states(match[1])
                     or re.search(r'\b(?:hire|hiring|resident|reside|remote|eligible|location|state)\b', sentence, re.I)):
                 yield 'excludes', match[1]
+
+
+@lru_cache(maxsize=128)
+def _cached_location_clauses(description):
+    return tuple(_location_clauses(description))
+
+
+def location_clauses(description):
+    """Reuse bounded posting parsing while retaining support for large descriptions."""
+    if len(description) > 32768 or len(description.encode('utf-8')) > 32768:
+        return _location_clauses(description)
+    return iter(_cached_location_clauses(description))
 
 
 def is_us_location(location, description='', *, remote=False):

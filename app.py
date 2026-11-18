@@ -884,12 +884,19 @@ def qualification_checks(description):
 
 def assess(j,cfg):
     title=j.get('title','').lower(); desc=clean(j.get('description','')); text=(title+' '+desc).lower()
+    stage_start = time.monotonic()
     eligible,location_reason,area=location_eligibility(j,cfg)
+    postgres_store.record_timing('assess_location', time.monotonic() - stage_start)
+    stage_start = time.monotonic()
     j.update(location_eligibility=eligible,location_reason=location_reason,area=area,
              work_arrangement=work_arrangement(j))
+    postgres_store.record_timing('assess_arrangement', time.monotonic() - stage_start)
+    stage_start = time.monotonic()
     normalize_salary_evidence(j, desc)
     pay_status, pay_reason = salary_assessment(j, cfg)
     j.update(salary_eligibility=pay_status, salary_reason=pay_reason)
+    postgres_store.record_timing('assess_salary', time.monotonic() - stage_start)
+    stage_start = time.monotonic()
     # Match complete terms while allowing common punctuation between words.
     def words(value):
         return " " + " ".join(re.findall(r"\w+|[+#]+", value.casefold())) + " "
@@ -916,7 +923,10 @@ def assess(j,cfg):
     if matched_skills:
         reasons.append("Selected skills: " + ", ".join(matched_skills))
     reasons.extend(group['label'] for group in matched_groups)
+    postgres_store.record_timing('assess_skills', time.monotonic() - stage_start)
+    stage_start = time.monotonic()
     evidence = experience_evidence(desc, cfg.get('profile', ''), matched_skills)
+    postgres_store.record_timing('assess_evidence', time.monotonic() - stage_start)
     matched_duty_count = len({norm(item['duty']) for item in evidence})
     gaps = qualification_checks(desc) if desc.strip() else [
         'Employer description missing. Review the posting for duties and requirements.'

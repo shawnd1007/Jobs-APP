@@ -15,7 +15,8 @@ _timing_lock = threading.Lock()
 _timings = {name: deque(maxlen=100) for name in (
     'identity', 'postgres_connect', 'recruiter', 'recruiter_status', 'dashboard', 'search_status',
     'sql_select', 'sql_write', 'sql_other', 'dashboard_load', 'dashboard_assess', 'dashboard_enrich',
-    'dashboard_location', 'dashboard_fit', 'dashboard_market', 'dashboard_review')}
+    'dashboard_location', 'dashboard_fit', 'dashboard_market', 'dashboard_review',
+    'assess_location', 'assess_arrangement', 'assess_salary', 'assess_skills', 'assess_evidence')}
 
 
 def record_timing(name, seconds):
