@@ -1818,10 +1818,16 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
             finally:
                 pause()
         progress('Ranking results')
-        ranked = sorted(candidates.values(), key=lambda item: (
-            item[0]['queue'] == 'Confirmed', bool(item[1]), item[0]['matched_duty_count'], item[0]['score'],
-            item[0].get('posted') or '',
-        ), reverse=True)
+        if cfg.get('recruiter_discovery'):
+            ranked = sorted(candidates.values(), key=lambda item: (
+                item[0]['location_eligibility'] == 'Eligible', item[0]['matched_duty_count'],
+                item[0]['score'], item[0].get('posted') or '',
+            ), reverse=True)
+        else:
+            ranked = sorted(candidates.values(), key=lambda item: (
+                item[0]['queue'] == 'Confirmed', bool(item[1]), item[0]['matched_duty_count'],
+                item[0]['score'], item[0].get('posted') or '',
+            ), reverse=True)
         limit = cfg['max_new_candidates']
         new_count = 0
         report['deferred_candidates'] = 0

@@ -107,12 +107,16 @@ def refresh_saved_matches(a, state):
     state['matches'] = matches
     checked_at = a.dt.datetime.now(a.dt.timezone.utc)
     keys = {item['job_id']: match_cache_key(state['strategy'], match_facts(current[item['job_id']]), cfg['ai_model'])
-            for item in matches if item.get('fit_group', item['group']) == 'review'}
-    comparisons = saved_comparisons(a, list(dict.fromkeys(keys.values())))
+            for item in matches if item.get('fit_group', item['group']) in ('review', 'avoid')}
+    market_keys = {item['job_id']: market_pay_key(market_pay_facts(a, current[item['job_id']], preferences))
+                   for item in matches if market_pay_needed(a, current[item['job_id']], preferences)
+                   and item.get('fit_group', item['group']) != 'avoid'}
+    comparisons = saved_comparisons(a, list(dict.fromkeys([*keys.values(), *market_keys.values()])))
     for item in matches:
         job = current[item['job_id']]
         checks = constraints(a, job, preferences, cfg, checked_at)
-        changed = item.get('listing_fingerprint') != listing_fingerprint(job)
+        changed = (item.get('fit_fingerprint') != fit_fingerprint(job) if 'fit_fingerprint' in item
+                   else item.get('listing_fingerprint') != listing_fingerprint(job))
         if changed:
             checks.append(('review', 'The employer details changed after this analysis. Refresh matches.'))
         prior_group = item.get('fit_group', item['group'])
@@ -122,14 +126,23 @@ def refresh_saved_matches(a, state):
         assessed = dict(comparison, group=comparison.get('group', prior_group))
         if comparison is item:
             assessed['group'] = prior_group
-        fit, fit_checks = fit_assessment(a, assessed, evidence_checks, job, state)
+        estimate = comparisons.get(market_keys.get(job['id']))
+        target_match = market_pay_matches_target(a, estimate, preferences, checked_at)
+        fit, fit_checks = fit_assessment(a, assessed, evidence_checks, job, state,
+                                         market_reaches_target=target_match is True)
         if changed and prior_group in ('review', 'avoid'):
             fit = prior_group
         item.update(group=checked_group(fit, checks),
                     checks=[reason for _, reason in checks] + evidence_checks + fit_checks,
-                    pay_notes=[reason for status, reason in checks if status == 'pay_note'],
+                    market_pay_target_match=target_match,
                     market_pay_available=market_pay_needed(a, job, preferences),
                     salary=job.get('salary_text') or 'Pay not disclosed')
+        item.pop('pay_notes', None)
+    # Surface researched matches first while preserving fit order within each set.
+    matches.sort(key=lambda item: (
+        ['close', 'adjacent', 'review', 'avoid'].index(item['group']),
+        item['market_pay_target_match'] is not True,
+    ))
 
 
 def saved_comparisons(a, keys):
@@ -213,6 +226,25 @@ def market_pay_facts(a, job, preferences):
                 work_arrangement=mode, period=preferences.get('period', 'year'))
 
 
+def market_pay_key(facts):
+    return 'market-pay:v2:' + hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest()
+
+
+def market_pay_stale(a, estimate, checked_at):
+    elapsed = checked_at - a.dt.datetime.fromisoformat(estimate['researched_at'])
+    return elapsed >= a.dt.timedelta(days=30 if estimate.get('summary') else 1)
+
+
+def market_pay_matches_target(a, estimate, preferences, checked_at):
+    if (not estimate or not estimate.get('citations') or not estimate.get('geography')
+            or not estimate.get('data_period') or preferences.get('currency') != 'USD'
+            or estimate.get('salary_period') != preferences.get('period')
+            or type(preferences.get('salary')) is not int or market_pay_stale(a, estimate, checked_at)):
+        return None
+    low, high = a.ordered_salary_bounds(estimate.get('salary_min'), estimate.get('salary_max'))
+    return high >= preferences['salary'] if low is not None and high is not None else None
+
+
 def market_pay(a, job_id, *, research=False):
     if research and not LOCK.acquire(False):
         return 409, {'error': 'Wait for the current recruiter task to finish before researching pay.'}
@@ -228,7 +260,7 @@ def market_pay(a, job_id, *, research=False):
             if not market_pay_needed(a, job, preferences):
                 return 400, {'error': 'This employer already published comparable base pay.'}
             facts = market_pay_facts(a, job, preferences)
-            key = 'market-pay:v2:' + hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest()
+            key = market_pay_key(facts)
             prior = dict(title=a.clean(job.get('title'))[:250], location=a.clean(job.get('location'))[:400],
                          work_arrangement=a.work_arrangement(job))
             prior_key = 'market-pay:' + hashlib.sha256(json.dumps(prior, sort_keys=True).encode()).hexdigest()
@@ -236,17 +268,19 @@ def market_pay(a, job_id, *, research=False):
             legacy = c.execute('SELECT value FROM recruiter_match_cache WHERE fingerprint=?', (prior_key,)).fetchone() if not cached else None
         if cached or legacy:
             estimate = json.loads((cached or legacy)[0])
-            elapsed = a.dt.datetime.now(a.dt.timezone.utc) - a.dt.datetime.fromisoformat(estimate['researched_at'])
-            stale = bool(legacy) or elapsed >= a.dt.timedelta(days=30 if estimate.get('summary') else 1)
+            checked_at = a.dt.datetime.now(a.dt.timezone.utc)
+            stale = bool(legacy) or market_pay_stale(a, estimate, checked_at)
             if not research or not stale:
-                return 200, {'research': dict(estimate, stale=stale)}
+                target_match = None if stale else market_pay_matches_target(a, estimate, preferences, checked_at)
+                return 200, {'research': dict(estimate, stale=stale, target_match=target_match)}
         if not research:
             return 200, {'research': None}
         estimate = dict(ai(a, 'market_pay', facts, None), researched_at=a.now())
         with a.connect() as c:
             c.execute('INSERT INTO recruiter_match_cache VALUES(?,?) ON CONFLICT(fingerprint) DO UPDATE SET value=excluded.value',
                       (key, json.dumps(estimate)))
-        return 200, {'research': dict(estimate, stale=False)}
+        target_match = market_pay_matches_target(a, estimate, preferences, a.dt.datetime.now(a.dt.timezone.utc))
+        return 200, {'research': dict(estimate, stale=False, target_match=target_match)}
     finally:
         if research:
             LOCK.release()
@@ -436,7 +470,7 @@ def ai(a, name, inputs, schema):
             'Use only supplied experience. Do not infer protected characteristics or invent qualifications. '
             'Quote exact contiguous source passages for every evidence field. Recommend primary and adjacent roles, '
             'skills to emphasize and roles to approach cautiously with concrete gaps. Cautions are advice, not exclusions. '
-            'For job matching compare actual duties and essential qualifications, not word frequency. '
+            'For job matching compare actual duties and essential qualifications. Exclude pay from fit judgments and gaps. '
             'Missing credentials are unknown. Separate essential qualification, level, and scope gaps from explicitly preferred skills. '
             'Use close for strong duty evidence and no material gap, adjacent for transferable core duties with no unresolved essential '
             'gap, review for unresolved essential qualifications, and avoid for unrelated duties. State whether each gap is required '
@@ -591,16 +625,6 @@ def constraints(a, job, p, cfg, checked_at):
         checks.append(({'Eligible': 'pass', 'Rejected': 'avoid'}.get(status, 'review'), reason))
         if mode == 'hybrid' and status == 'Eligible' and not a.OFFICE_ATTENDANCE.search(a.clean(job.get('description')).lower()):
             checks.append(('review', 'Confirm the employer’s hybrid attendance schedule.'))
-    low, high = job.get('salary_min'), job.get('salary_max')
-    low, high = a.ordered_salary_bounds(low, high)
-    if market_pay_needed(a, job, p):
-        checks.append(('pay_note', 'Salary check needed. Comparable base pay is not disclosed.'))
-    elif high is not None and high < p['salary']:
-        checks.append(('pay_note' if p['flexible'] else 'avoid', 'Published pay is below your target.'))
-    elif low is None or low < p['salary']:
-        checks.append(('pay_note', 'Salary check needed. Confirm whether the employer can meet your target.'))
-    else:
-        checks.append(('pass', 'Published base pay meets your target.'))
     availability = job.get('availability')
     if availability == 'Closed':
         checks.append(('avoid', 'This posting is closed.'))
@@ -617,6 +641,12 @@ def listing_fingerprint(job):
     return hashlib.sha256(json.dumps({k: job.get(k) for k in (
         'title', 'employer', 'description', 'location', 'salary_min', 'salary_max',
         'salary_currency', 'salary_period', 'salary_type', 'workplace_type', 'url')}, sort_keys=True).encode()).hexdigest()
+
+
+def fit_fingerprint(job):
+    return hashlib.sha256(json.dumps({key: job.get(key) for key in (
+        'title', 'employer', 'description', 'location', 'workplace_type', 'url'
+    )}, sort_keys=True).encode()).hexdigest()
 
 
 def match_facts(job):
@@ -651,7 +681,7 @@ def comparison_evidence(result, resume, job):
     return checks
 
 
-def fit_assessment(a, result, evidence_checks, job, state):
+def fit_assessment(a, result, evidence_checks, job, state, *, market_reaches_target=False):
     group = result['group']
     if group == 'avoid':
         return group, []
@@ -667,12 +697,13 @@ def fit_assessment(a, result, evidence_checks, job, state):
 
     if any(not OPTIONAL_GAP.search(gap) or ESSENTIAL_GAP.search(gap) for gap in gaps):
         return 'review', ['The comparison flags a requirement or scope gap. Check it before applying.']
-    if group == 'review' and gaps:
-        # A legacy review can move up when the only gaps are preferred and existing evidence
-        # shows real overlap in employer duties. Exact quotes alone do not prove transferability.
+    if group == 'review' and (gaps or market_reaches_target):
+        # Quotes alone do not establish transferability. Require documented duty overlap
+        # even for a sourced estimate that reaches the target.
         skills = [entry['label'].casefold() for entry in state['strategy']['skills']]
         evidence = a.experience_evidence(job.get('description', ''), state['resume'], skills)
-        if len({item['duty'] for item in evidence}) >= 2:
+        distinct_duties = {item['duty'] for item in evidence}
+        if len(distinct_duties) >= 2 or (market_reaches_target and distinct_duties):
             return 'adjacent', []
     if group == 'close' and gaps:
         return 'adjacent', []
@@ -693,7 +724,10 @@ def match(a, state, job):
     digest = match_cache_key(state['strategy'], facts, cfg['ai_model'])
     with a.connect() as c:
         cached = c.execute('SELECT value FROM recruiter_match_cache WHERE fingerprint=?', (digest,)).fetchone()
-    result = json.loads(cached[0]) if cached else ai(a, 'candidate_match', {'candidate': state['strategy'], 'job': facts}, MATCH)
+    candidate_facts = {key: value for key, value in facts.items() if key != 'salary_text'}
+    result = json.loads(cached[0]) if cached else ai(
+        a, 'candidate_match', {'candidate': state['strategy'], 'job': candidate_facts}, MATCH
+    )
     validate(result, MATCH)
     unverified = comparison_evidence(result, state['resume'], job)
     if not cached:
@@ -707,9 +741,8 @@ def match(a, state, job):
                 job_evidence=result['job_evidence'] if quote_in(result['job_evidence'], job.get('description', '')) else '',
                 group=checked_group(original, checks), fit_group=original,
                 checks=[reason for _, reason in checks] + unverified + fit_checks, evidence_checks=unverified,
-                pay_notes=[reason for status, reason in checks if status == 'pay_note'],
                 market_pay_available=market_pay_needed(a, job, state['preferences']),
-                analyzed=a.now(), listing_fingerprint=listing_fingerprint(job))
+                analyzed=a.now(), listing_fingerprint=listing_fingerprint(job), fit_fingerprint=fit_fingerprint(job))
 
 
 def work(a, state, action):

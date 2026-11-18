@@ -36,8 +36,7 @@ struct RecruiterState: Decodable {
         let jobId: Int
         let title, employer, location, salary, group, reason, resumeEvidence, jobEvidence: String
         let gaps, emphasis, checks: [String]
-        let payNotes: [String]?
-        let marketPayAvailable: Bool?
+        let marketPayAvailable, marketPayTargetMatch: Bool?
         var label: String {
             switch group {
             case "close": "Close match"
@@ -103,6 +102,7 @@ struct RecruiterHome: View {
     @State private var showingResume = false
     @State private var showingActivity = false
     @State private var researchingPay: RecruiterState.Match?
+    @State private var refreshingMarketPay = false
     @State private var latestLoad = UUID()
     @State private var lastStatusCheck: Date?
     @State private var lastRecruiterLoad: Date?
@@ -187,7 +187,8 @@ struct RecruiterHome: View {
         .navigationTitle("For You")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: Int.self) { id in
-            JobDetail(workspace: workspace, jobID: id, recruiterMatch: state?.matches.first(where: { $0.jobId == id }))
+            JobDetail(workspace: workspace, jobID: id, recruiterMatch: state?.matches.first(where: { $0.jobId == id }),
+                      onMarketPayUpdated: { await refreshAfterPayResearch(for: id) })
         }
         .toolbar {
             if state?.strategy != nil {
@@ -232,7 +233,8 @@ struct RecruiterHome: View {
         .sheet(isPresented: $showingResume) { MasterResumeView(workspace: workspace) }
         .sheet(isPresented: $showingActivity) { RecruiterActivityView(address: workspace.address) }
         .sheet(item: $researchingPay) { match in
-            MarketPayView(jobID: match.jobId, address: workspace.address)
+            MarketPayView(jobID: match.jobId, address: workspace.address,
+                          onResearchUpdated: { await refreshAfterPayResearch(for: match.jobId) })
         }
         .task(id: workspace.address) {
             while !Task.isCancelled {
@@ -362,7 +364,8 @@ struct RecruiterHome: View {
             }.pickerStyle(.menu)
             Text("Choose your minimum base pay. Changing the period estimates a full-time year of 2,080 hours; check the amount.")
                 .font(.footnote).foregroundStyle(.secondary)
-            Toggle("My pay target is flexible", isOn: $preferences.flexible)
+            Text("Jobs compares market pay estimates with your target.")
+                .font(.footnote).foregroundStyle(.secondary)
             Divider()
             Text("Where you work").font(.headline)
             mode("Remote", "remote")
@@ -446,10 +449,10 @@ struct RecruiterHome: View {
                         ForEach(match.checks, id: \.self) { check in
                             Text(check).font(.subheadline.weight(.medium))
                         }
-                    } else {
-                        ForEach(match.payNotes ?? [], id: \.self) { note in
-                            Text(note).font(.subheadline.weight(.medium))
-                        }
+                    }
+                    if match.marketPayTargetMatch == true {
+                        Label("Market range reaches your pay target", systemImage: "checkmark.circle")
+                            .font(.footnote.weight(.medium))
                     }
                     if selectedGroup != "avoid", match.marketPayAvailable == true {
                         Button("Market pay estimate", systemImage: "magnifyingglass") { researchingPay = match }
@@ -476,13 +479,25 @@ struct RecruiterHome: View {
         }
     }
 
+    @MainActor private func refreshAfterPayResearch(for jobID: Int) async {
+        refreshingMarketPay = true
+        defer { refreshingMarketPay = false }
+        let wasInReview = state?.matches.first(where: { $0.jobId == jobID })?.group == "review"
+        await reload()
+        if wasInReview, let group = state?.matches.first(where: { $0.jobId == jobID })?.group,
+           ["close", "adjacent"].contains(group) {
+            selectedGroup = "recommended"
+        }
+    }
+
     @MainActor private func openFilePicker() {
         workspace.choosingRecruiterFile = true
         importing = true
     }
 
     @MainActor private func reload(polling: Bool = false) async {
-        guard !workspace.address.isEmpty, !workspace.choosingRecruiterFile else { return }
+        guard !workspace.address.isEmpty, !workspace.choosingRecruiterFile,
+              !polling || !refreshingMarketPay else { return }
         let address = workspace.address
         let load = UUID()
         latestLoad = load
@@ -759,6 +774,7 @@ struct MarketPayView: View {
     @Environment(\.dismiss) private var dismiss
     let jobID: Int
     let address: String
+    var onResearchUpdated: (@MainActor () async -> Void)? = nil
 
     @State private var report: Report?
     @State private var loading = false
@@ -774,7 +790,7 @@ struct MarketPayView: View {
         let citations: [Citation]
         let researchedAt: String
         let geography, dataPeriod: String?
-        let stale: Bool?
+        let stale, targetMatch: Bool?
     }
 
     private struct Response: Decodable {
@@ -785,8 +801,6 @@ struct MarketPayView: View {
         NavigationStack {
             List {
                 Section {
-                    Text("Salary check needed. Confirm base pay with the employer.")
-                        .font(.subheadline).foregroundStyle(.secondary)
                     if let report {
                         if let summary = report.summary {
                             if report.geography == nil || report.dataPeriod == nil {
@@ -794,6 +808,10 @@ struct MarketPayView: View {
                             }
                             Text(citedText(summary, citations: report.citations))
                                 .accessibilityIdentifier("marketPayEstimate")
+                            if let reachesTarget = report.targetMatch {
+                                Text(reachesTarget ? "Market range reaches your pay target" : "Market range is below your pay target")
+                                    .font(.subheadline.weight(.medium))
+                            }
                         } else {
                             Text("The research didn’t find enough reliable pay data for this role.")
                         }
@@ -852,6 +870,7 @@ struct MarketPayView: View {
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
             report = try decoder.decode(Response.self, from: data).research
+            if research { await onResearchUpdated?() }
         } catch is CancellationError {
         } catch {
             self.error = error.localizedDescription

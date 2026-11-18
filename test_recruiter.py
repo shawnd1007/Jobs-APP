@@ -366,17 +366,17 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(jobs[0]['salary_min'], 80000)
         self.assertEqual(jobs[0]['availability'], 'Needs Verification')
 
-    def test_pay_and_geography_constraints_override_ai(self):
+    def test_pay_leaves_fit_intact_and_posting_constraints_still_apply(self):
         self.analyze(); self.search()
         job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
-        for change, expected in [({'salary_max': 60000, 'salary_min': 50000}, 'avoid'),
+        for change, expected in [({'salary_max': 60000, 'salary_min': 50000}, 'close'),
                                  ({'salary_min': 60000}, 'close'), ({'salary_currency': 'CAD'}, 'close'),
                                  ({'availability': 'Closed'}, 'avoid'), ({'posting_verified': None}, 'review')]:
             with self.subTest(change=change):
                 result = recruiter.match(self.a, recruiter.read(self.a, True), dict(job, **change))
                 self.assertEqual(result['group'], expected)
-                if expected == 'close':
-                    self.assertIn('Salary check needed.', result['pay_notes'][0])
+                self.assertFalse(any('pay' in reason.lower() or 'salary' in reason.lower()
+                                     for reason in result['checks']))
 
     def test_pay_only_review_can_be_restored_from_legacy_comparison(self):
         self.analyze(); self.search()
@@ -388,7 +388,7 @@ class RecruiterTests(unittest.TestCase):
         match = recruiter.match(self.a, state, job)
         self.assertEqual(match['group'], 'close')
         match.pop('fit_group')
-        match.pop('pay_notes')
+        match['pay_notes'] = ['Salary check needed.']
         match['group'] = 'review'
         state['matches'] = [match]
         recruiter.write(self.a, state)
@@ -396,7 +396,7 @@ class RecruiterTests(unittest.TestCase):
              patch.object(self.a, 'run_pipeline', side_effect=AssertionError('Unexpected employer search')):
             restored = recruiter.read(self.a)['matches'][0]
             self.assertEqual(restored['group'], 'close')
-            self.assertTrue(restored['pay_notes'])
+            self.assertNotIn('pay_notes', restored)
             state['matches'][0]['evidence_checks'] = ['Résumé evidence could not be verified.']
             recruiter.write(self.a, state)
             self.assertEqual(recruiter.read(self.a)['matches'][0]['group'], 'review')
@@ -446,6 +446,55 @@ class RecruiterTests(unittest.TestCase):
         body['output'][1]['content'][0]['annotations'] = []
         self.assertEqual(recruiter.researched_pay(body['output']), {'summary': None, 'citations': []})
 
+    def test_market_pay_promotes_only_qualified_saved_matches_at_the_target(self):
+        self.analyze()
+        self.search()
+        state = recruiter.read(self.a, True)
+        job = next(job for job in self.a.records() if job['requisition'] == 'billing')
+        job.update(salary_min=None, salary_max=None, salary_text='Pay not disclosed',
+                   description='Responsibilities\nReview medical billing records.')
+        state['resume'] += ' Reviewed medical billing records.'
+        comparison = dict(group='review', reason='Related billing experience.', gaps=[],
+                          resume_evidence='Reviewed medical billing records.',
+                          job_evidence='Review medical billing records.', emphasis=[])
+
+        with self.a.connect() as c:
+            self.a.upsert(c, job)
+            unchecked = dict(job, requisition='unverified-billing',
+                             url='https://jobs.lever.co/fictional-clinic/unverified-billing', posting_verified=None)
+            unchecked['id'], _ = self.a.upsert(c, unchecked)
+            unsupported = dict(job, requisition='unsupported-billing',
+                               url='https://jobs.lever.co/fictional-clinic/unsupported-billing',
+                               description='Responsibilities\nSupport customer escalations.')
+            unsupported['id'], _ = self.a.upsert(c, unsupported)
+        with patch.object(recruiter, 'ai', side_effect=[comparison, dict(comparison, job_evidence='Support customer escalations.')]) as provider:
+            state['matches'] = [recruiter.match(self.a, state, candidate) for candidate in (job, unchecked, unsupported)]
+            self.assertNotIn('salary_text', provider.call_args.args[2]['job'])
+        recruiter.write(self.a, state)
+
+        def saved_groups():
+            return {item['job_id']: item['group'] for item in recruiter.read(self.a)['matches']}
+
+        self.assertEqual(set(saved_groups().values()), {'review'})
+        estimate = dict(summary='A sourced fictional market range.', geography='Oregon', data_period='2025',
+                        salary_min=60000, salary_max=70000, salary_period='year',
+                        citations=[dict(title='Fictional wage data', url='https://example.com/wages', end=20)])
+        key = recruiter.market_pay_key(recruiter.market_pay_facts(self.a, job, state['preferences']))
+        for price in (69000, 70000):
+            with self.a.connect() as c:
+                c.execute('DELETE FROM recruiter_match_cache WHERE fingerprint=?', (key,))
+            with patch.object(recruiter, 'ai', return_value=dict(estimate, salary_max=price)) as provider:
+                code, report = recruiter.market_pay(self.a, job['id'], research=True)
+                self.assertEqual(code, 200)
+                self.assertEqual(report['research']['target_match'], price == 70000)
+                self.assertEqual(saved_groups(), {job['id']: 'adjacent' if price == 70000 else 'review',
+                                                 unchecked['id']: 'review', unsupported['id']: 'review'})
+                provider.assert_called_once()
+        with self.a.connect() as c:
+            stale = dict(estimate, researched_at='2020-01-01T00:00:00+00:00')
+            c.execute('UPDATE recruiter_match_cache SET value=? WHERE fingerprint=?', (json.dumps(stale), key))
+        self.assertEqual(set(saved_groups().values()), {'review'})
+
     def test_unverified_match_is_reviewed_without_stopping_other_matches(self):
         self.analyze()
         def one_bad_quote(a, name, inputs, schema):
@@ -483,6 +532,8 @@ class RecruiterTests(unittest.TestCase):
         state['preferences']['salary'] = 999999
         job = next(j for j in self.a.records() if j['title'] == 'Revenue Cycle Supervisor')
         with patch.object(recruiter, 'ai', side_effect=AssertionError('Cached advice ignored')):
+            self.assertEqual(recruiter.match(self.a, state, job)['group'], 'close')
+            state['preferences']['remote_region'] = 'Florida, United States'
             self.assertEqual(recruiter.match(self.a, state, job)['group'], 'avoid')
 
     def test_provider_failure_is_redacted_and_reserves_budget(self):

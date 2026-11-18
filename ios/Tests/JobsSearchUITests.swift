@@ -42,7 +42,7 @@ final class JobsSearchUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 45))
         XCTAssertTrue(app.staticTexts["Medical Billing Specialist"].exists)
-        XCTAssertTrue(app.staticTexts["Salary check needed. Comparable base pay is not disclosed."].exists)
+        XCTAssertFalse(app.staticTexts["Salary check needed. Comparable base pay is not disclosed."].exists)
         let research = app.buttons["shortlistMarketPay"].firstMatch
         for _ in 0..<5 {
             if research.isHittable { break }
@@ -51,12 +51,12 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertTrue(research.isHittable)
         research.tap()
         XCTAssertTrue(app.navigationBars["Market pay estimate"].waitForExistence(timeout: 8))
-        XCTAssertTrue(app.staticTexts["Salary check needed. Confirm base pay with the employer."].exists)
         let query = app.buttons["Research market pay"]
         XCTAssertTrue(query.waitForExistence(timeout: 8))
         query.tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "75,000")).firstMatch
             .waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Market range reaches your pay target"].waitForExistence(timeout: 8))
         let source = app.descendants(matching: .any).matching(
             NSPredicate(format: "label CONTAINS %@", "Fictional wage data")).firstMatch
         for _ in 0..<3 {

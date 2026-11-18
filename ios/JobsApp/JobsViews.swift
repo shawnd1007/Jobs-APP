@@ -686,6 +686,7 @@ struct JobDetail: View {
     let workspace: Workspace
     let jobID: Int
     var recruiterMatch: RecruiterState.Match? = nil
+    var onMarketPayUpdated: (@MainActor () async -> Void)? = nil
     @State private var editor: Editor?
     @State private var interestError: String?
     @State private var requestingAdvice = false
@@ -707,8 +708,6 @@ struct JobDetail: View {
                         if !workspace.isSample && !job.isExternalApplication {
                             LabeledContent("Employer Pay Details", value: job.publishedPay)
                             if job.marketPayAvailable == true {
-                                Text("Salary check needed. Confirm base pay with the employer.")
-                                    .font(.subheadline).foregroundStyle(.secondary)
                                 Button("Market pay estimate", systemImage: "magnifyingglass") { editor = .marketPay }
                                     .accessibilityIdentifier("jobDetailMarketPay")
                             }
@@ -871,7 +870,8 @@ struct JobDetail: View {
                     case .tracking: TrackingEditor(workspace: workspace, job: job)
                     case .prep: ApplicationPrepSheet(job: job, address: workspace.address)
                     case .tailoredResume: TailoredResumeView(jobID: job.id, address: workspace.address)
-                    case .marketPay: MarketPayView(jobID: job.id, address: workspace.address)
+                    case .marketPay: MarketPayView(jobID: job.id, address: workspace.address,
+                                                   onResearchUpdated: onMarketPayUpdated)
                     }
                 }
                 .confirmationDialog("Request AI Career Advice?", isPresented: $confirmingAdvice) {
