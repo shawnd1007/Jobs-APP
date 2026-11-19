@@ -173,8 +173,12 @@ def ai_review(a, job_id):
 def _ai_review(a, job_id):
     cfg = a.config()
     if not cfg['ai_enabled'] or not ai_key(a): return 400, {'error': 'Enable AI in Preferences and configure the server API key first.'}
-    j = next((j for j in a.records() if j['id'] == job_id), None)
-    if not j: return 404, {'error': 'Job not found'}
+    if not -(2**63) <= job_id < 2**63:
+        return 404, {'error': 'Job not found'}
+    jobs = a.records(job_ids=[job_id])
+    if not jobs:
+        return 404, {'error': 'Job not found'}
+    j = jobs[0]
     if j.get('external_application'):
         return 400, {'error': 'AI review needs an employer posting checked by Jobs.'}
     digest = fingerprint(j, cfg)
@@ -214,6 +218,9 @@ def _ai_review(a, job_id):
         return 502, {'error': 'AI review failed or was incomplete. Check provider access and usage before retrying; the attempt counts toward the daily limit.'}
 
 
+DASHBOARD_ALERT_LIMIT = 200
+
+
 def enrich_snapshot(a, result, cfg, connection):
     prefs = public_preferences(cfg)
     result.update(api_version=1, preferences=prefs,
@@ -222,8 +229,8 @@ def enrich_snapshot(a, result, cfg, connection):
     searches = saved_searches(connection)
     result['saved_searches'] = searches
     result['unread_match_count'] = connection.execute('SELECT COUNT(*) FROM match_alerts WHERE unread=1').fetchone()[0]
-    alert_rows = connection.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200').fetchall()
-    advice = {r['job_id']: dict(r) for r in connection.execute('SELECT * FROM ai_reviews')}
+    alert_rows = connection.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT ?',
+                                    (DASHBOARD_ALERT_LIMIT,)).fetchall()
     usage = connection.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
     searches_by_id = {search['id']: search for search in searches}
     jobs_by_id = {job['id']: job for job in result['jobs']}
@@ -237,10 +244,25 @@ def enrich_snapshot(a, result, cfg, connection):
     if cfg.get('us_postings_only'):
         result['unread_match_count'] = sum(alert['unread'] for alert in visible_alerts)
     result['ai_attempts_today'] = usage[0] if usage else 0
-    for j in result['jobs']:
+    enrich_job_advice(result['jobs'], cfg, connection)
+    return result
+
+
+def dashboard_alerts_reference(connection, job_ids):
+    placeholders = ','.join('?' for _ in job_ids)
+    return connection.execute(f'''SELECT 1
+        FROM (SELECT job_id FROM match_alerts ORDER BY id DESC LIMIT ?) AS recent
+        WHERE job_id IN ({placeholders}) LIMIT 1''', (DASHBOARD_ALERT_LIMIT, *job_ids)).fetchone() is not None
+
+
+def enrich_job_advice(jobs, cfg, connection, *, job_ids=None):
+    query = 'SELECT job_id, fingerprint, created, model, advice FROM ai_reviews'
+    if job_ids is not None:
+        query += ' WHERE job_id IN (' + ','.join('?' for _ in job_ids) + ')'
+    advice = {r['job_id']: r for r in connection.execute(query, () if job_ids is None else job_ids)}
+    for j in jobs:
         saved = advice.get(j['id'])
         j['ai_advice'] = dict(advice=json.loads(saved['advice']), model=saved['model'], created=saved['created'], stale=saved['fingerprint'] != fingerprint(j, cfg)) if saved else None
-    return result
 
 
 def saved_searches(c):

@@ -705,6 +705,9 @@ struct JobDetail: View {
                     Section {
                         JobCard(job: job, showScore: !job.isExternalApplication && recruiterMatch == nil)
                             .accessibilityAddTraits(.isHeader)
+                        if let match = recruiterMatch, match.group == "review" {
+                            ConfirmationReasonsView(reasons: match.confirmationReasons, fallback: match.reason)
+                        }
                         if !workspace.isSample && !job.isExternalApplication {
                             LabeledContent("Employer Pay Details", value: job.publishedPay)
                             if job.marketPayAvailable == true {

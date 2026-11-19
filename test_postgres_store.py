@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import postgres_store
+import dashboard_sync
 
 TEST_DSN = 'host=/tmp/jobs-pg-socket port=15432 dbname=postgres'
 
@@ -100,6 +101,52 @@ class LocalPostgresTests(unittest.TestCase):
         postgres_store.initialize_empty_schema(self.connection)
         self.addCleanup(self.connection.close)
         self.addCleanup(self.connection.rollback)
+
+    def test_dashboard_revisions_follow_postgres_transaction_and_update_scope(self):
+        c = postgres_store.Connection(self.connection)
+        dashboard_sync.init(c)
+        dashboard_sync.init(c)
+        job_id = c.execute('INSERT INTO jobs(identity,listing,created,updated) VALUES (?,?,?,?) RETURNING id',
+                           ('fictional', '{}', 'today', 'today')).fetchone()[0]
+        c.execute('INSERT INTO tracking(job_id,updated) VALUES (?,?)', (job_id, 'today'))
+        c.execute('INSERT INTO recruiter_state VALUES (1,?)', ('{"preferences":{"salary":80000}}',))
+        before = tuple(c.execute('SELECT revision,global_revision FROM dashboard_revision').fetchone())
+        c.execute('SAVEPOINT fictional_edit')
+        c.execute('UPDATE tracking SET notes=? WHERE job_id=?', ('Fictional interview details', job_id))
+        self.assertEqual(dashboard_sync.changed_jobs(c, before[0]), [job_id])
+        c.execute('ROLLBACK TO SAVEPOINT fictional_edit')
+        self.assertEqual(dashboard_sync.changed_jobs(c, before[0]), [])
+        c.execute('UPDATE recruiter_state SET value=? WHERE id=1',
+                  ('{"stage":"matching","preferences":{"salary":80000}}',))
+        self.assertEqual(tuple(c.execute('SELECT revision,global_revision FROM dashboard_revision').fetchone()), before)
+        c.execute('UPDATE tracking SET notes=? WHERE job_id=?', ('Fictional saved note', job_id))
+        c.execute('INSERT INTO job_interests VALUES (?,?,?,?)', (job_id, 'saved', 1, 'today'))
+        after = tuple(c.execute('SELECT revision,global_revision FROM dashboard_revision').fetchone())
+        self.assertEqual(after, (before[0] + 2, before[1]))
+        self.assertEqual(dashboard_sync.changed_jobs(c, before[0]), [job_id])
+        c.execute('UPDATE recruiter_state SET value=? WHERE id=1', ('{"preferences":{"salary":90000}}',))
+        self.assertEqual(tuple(c.execute('SELECT revision,global_revision FROM dashboard_revision').fetchone()),
+                         (after[0] + 1, after[0] + 1))
+
+    def test_dashboard_tracks_run_and_listing_revisions_independently(self):
+        c = postgres_store.Connection(self.connection)
+        dashboard_sync.init(c)
+        job_id = c.execute('INSERT INTO jobs(identity,listing,created,updated) VALUES (?,?,?,?) RETURNING id',
+                           ('fictional', '{"url":"https://fictional.example/job"}', 'today', 'today')).fetchone()[0]
+        c.execute('INSERT INTO tracking(job_id,updated) VALUES (?,?)', (job_id, 'today'))
+        baseline = c.execute('SELECT revision FROM dashboard_revision').fetchone()[0]
+        c.execute('INSERT INTO runs(started,state,report) VALUES (?,?,?)', ('today', 'running', '{}'))
+        c.execute('UPDATE jobs SET listing=? WHERE id=?',
+                  ('{"url":"https://fictional.example/job","title":"Updated fictional job"}', job_id))
+        self.assertEqual(tuple(c.execute(
+            'SELECT runs_revision,listings_revision FROM dashboard_metadata_revision').fetchone()),
+                         (baseline + 1, baseline + 2))
+        self.assertEqual(dashboard_sync.changed_jobs(c, baseline), [job_id])
+        self.assertEqual(tuple(c.execute('SELECT revision,global_revision FROM dashboard_revision').fetchone()),
+                         (baseline + 2, baseline))
+        c.execute('UPDATE jobs SET listing=? WHERE id=?', ('{"description":"Fictional \\u0000 text"}', job_id))
+        self.assertEqual(tuple(c.execute('SELECT revision,global_revision FROM dashboard_revision').fetchone()),
+                         (baseline + 3, baseline + 3))
 
     def test_schema_is_repeatable_and_preserves_tracking(self):
         c = self.connection

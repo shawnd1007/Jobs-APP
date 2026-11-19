@@ -11,7 +11,7 @@ struct RecruiterState: Decodable {
         let stopRequested: Bool?
     }
 
-    struct Progress: Decodable {
+    struct Progress: Decodable, Equatable {
         let stage: String
         let completed, total, issues: Int?
         let source, reason: String?
@@ -33,20 +33,36 @@ struct RecruiterState: Decodable {
         let omittedUnverified: Int?
     }
     struct Match: Decodable, Identifiable {
-        var id: Int { jobId }
-        let jobId: Int
+        let jobId: Int?
+        let openingId, postingUrl, workArrangement, discoveredAt: String?
         let title, employer, location, salary, group, reason, resumeEvidence, jobEvidence: String
         let gaps, emphasis, checks: [String]
+        let confirmationReasons: [RecruiterConfirmationReason]?
         let marketPayAvailable, marketPayTargetMatch: Bool?
-        let publishedPayTargetMatch: Bool?
-        var label: String {
-            switch group {
-            case "close": "Close match"
-            case "adjacent": "Worth considering"
-            case "review": "Needs confirmation"
-            default: "Not recommended"
-            }
+        let publishedPayTargetMatch, publishedPayCeilingMatch: Bool?
+
+        var id: String {
+            if let openingId { return "opening:\(openingId)" }
+            if let jobId { return "job:\(jobId)" }
+            return "unavailable:\(employer):\(title):\(location)"
         }
+
+        fileprivate var opening: RecruiterOpening? {
+            guard let openingId, openingId.utf8.count == 64, openingId.utf8.allSatisfy({
+                (48...57).contains($0) || (97...102).contains($0)
+            }) else { return nil }
+            return RecruiterOpening(id: openingId, title: title, employer: employer, location: location,
+                                    workArrangement: workArrangement ?? "", salary: salary,
+                                    postingUrl: postingUrl ?? "", discoveredAt: discoveredAt ?? "")
+        }
+
+        fileprivate var payTarget: RecruiterMarketPayTarget? {
+            if let jobId { return .job(jobId) }
+            return opening.map { .opening($0.id) }
+        }
+
+        fileprivate var resultGroup: RecruiterResultGroup { RecruiterResultGroup(rawValue: group) ?? .avoid }
+        var label: String { resultGroup.matchLabel }
     }
     let version: Int
     let stage: String
@@ -62,14 +78,76 @@ struct RecruiterState: Decodable {
     var busy: Bool { ["analyzing", "discovering", "matching"].contains(stage) }
 }
 
+fileprivate enum RecruiterResultGroup: String, CaseIterable {
+    case close, adjacent, review, avoid
+
+    var matchLabel: String {
+        switch self {
+        case .close: "Close match"
+        case .adjacent: "Worth considering"
+        case .review: "Needs confirmation"
+        case .avoid: "Not recommended"
+        }
+    }
+
+    var title: String { self == .close ? "Close matches" : matchLabel }
+
+    var guidance: String {
+        switch self {
+        case .close: "Start with roles that closely match your experience."
+        case .adjacent: "Compare the duties with the experience you can bring to a related role."
+        case .review: "Each opening shows what Jobs couldn’t confirm and what to check."
+        case .avoid: "Review the reasons these roles were screened out."
+        }
+    }
+
+    var emptyTitle: String {
+        switch self {
+        case .close: "No close matches in this search"
+        case .adjacent: "No related roles in this search"
+        case .review: "No openings need confirmation"
+        case .avoid: "No screened-out openings"
+        }
+    }
+}
+
 struct RecruiterPreferences: Codable {
     var salary = 70000
+    var salaryCeiling: Int?
     var currency = "USD"
     var period = "year"
     var flexible = false
     var commute = ""
     var remoteRegion = ""
     var modes = ["remote"]
+    var levels: [String]?
+
+    var validPayRange: Bool { salaryCeiling.map { $0 >= salary } ?? true }
+
+    mutating func setPayPeriod(_ period: String) {
+        guard self.period != period else { return }
+        func converted(_ amount: Int) -> Int {
+            let value = period == "hour" ? Double(amount) / 2080 : Double(amount) * 2080
+            return min(1_000_000, max(0, Int(value.rounded())))
+        }
+        salary = converted(salary)
+        salaryCeiling = salaryCeiling.map(converted)
+        self.period = period
+    }
+}
+
+private enum RecruiterPositionLevel: String, CaseIterable {
+    case entry, mid, senior, management, executive
+
+    var title: String {
+        switch self {
+        case .entry: "Entry level"
+        case .mid: "Mid level"
+        case .senior: "Senior"
+        case .management: "Management"
+        case .executive: "Executive"
+        }
+    }
 }
 
 struct ForYou: View {
@@ -87,7 +165,11 @@ struct ForYou: View {
 }
 
 struct RecruiterHome: View {
-    @Environment(\.dynamicTypeSize) private var textSize
+    private struct PollSchedule: Equatable {
+        let address: String
+        let searchActive: Bool
+    }
+
     let workspace: Workspace
     @State private var state: RecruiterState?
     @State private var preferences = RecruiterPreferences()
@@ -95,7 +177,7 @@ struct RecruiterHome: View {
     @State private var reading = false
     @State private var submissionTitle: String?
     @State private var error: String?
-    @State private var selectedGroup = "recommended"
+    @State private var selectedGroup: RecruiterResultGroup?
     @State private var editingPreferences = false
     @State private var importedText: String?
     @State private var importedFileName: String?
@@ -131,6 +213,14 @@ struct RecruiterHome: View {
                     Label("Your personal recruiter", systemImage: "sparkles")
                         .font(.caption.weight(.semibold)).foregroundStyle(JobsTheme.accent)
                     Text("Version 2 preview").font(.caption2).foregroundStyle(.secondary)
+                }
+                if !workspace.address.isEmpty {
+                    NavigationLink {
+                        RecruiterOpeningsView(address: workspace.address)
+                    } label: {
+                        Label("Pulled Openings", systemImage: "tray.full")
+                    }
+                    .buttonStyle(.bordered)
                 }
                 if state == nil {
                     if error == nil { ProgressView("Opening your recruiter…") }
@@ -183,6 +273,7 @@ struct RecruiterHome: View {
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent).controlSize(.large)
+                .disabled(!preferences.validPayRange)
                 .padding(.horizontal, 20).padding(.vertical, 10)
                 .background(.regularMaterial)
             }
@@ -191,8 +282,9 @@ struct RecruiterHome: View {
         .navigationTitle("For You")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: Int.self) { id in
-            JobDetail(workspace: workspace, jobID: id, recruiterMatch: state?.matches.first(where: { $0.jobId == id }),
-                      onMarketPayUpdated: { await refreshAfterPayResearch(for: id) })
+            let match = state?.matches.first(where: { $0.jobId == id })
+            JobDetail(workspace: workspace, jobID: id, recruiterMatch: match,
+                      onMarketPayUpdated: { await refreshAfterPayResearch(for: match?.id) })
         }
         .toolbar {
             if state?.strategy != nil {
@@ -233,14 +325,17 @@ struct RecruiterHome: View {
         .onChange(of: importing) { _, presented in
             if !presented { workspace.choosingRecruiterFile = false }
         }
+        .onChange(of: workspace.address) { _, _ in selectedGroup = nil }
         .onDisappear { workspace.choosingRecruiterFile = false }
         .sheet(isPresented: $showingResume) { MasterResumeView(workspace: workspace) }
         .sheet(isPresented: $showingActivity) { RecruiterActivityView(address: workspace.address) }
         .sheet(item: $researchingPay) { match in
-            MarketPayView(jobID: match.jobId, address: workspace.address,
-                          onResearchUpdated: { await refreshAfterPayResearch(for: match.jobId) })
+            if let target = match.payTarget {
+                MarketPayView(target: target, address: workspace.address,
+                              onResearchUpdated: { await refreshAfterPayResearch(for: match.id) })
+            }
         }
-        .task(id: workspace.address) {
+        .task(id: PollSchedule(address: workspace.address, searchActive: state?.busy == true)) {
             while !Task.isCancelled {
                 if !workspace.choosingRecruiterFile { await reload(polling: true) }
                 do { try await Task.sleep(for: .seconds(state?.busy == true ? 3 : 10)) }
@@ -351,18 +446,15 @@ struct RecruiterHome: View {
     private var preferenceForm: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("What works for you?").font(.title2.bold())
-            Text("Your roles and skills are ready. Just tell us what you need to earn and where you can work.")
-                .font(.subheadline).foregroundStyle(.secondary)
+            positionLevels
+            Divider()
             Text("Pay target").font(.headline)
             HStack {
                 Picker("Currency", selection: $preferences.currency) {
                     ForEach(["USD", "CAD", "GBP", "EUR"], id: \.self) { Text($0) }
                 }
                 Picker("Pay period", selection: Binding(get: { preferences.period }, set: { new in
-                    guard new != preferences.period else { return }
-                    let converted = new == "hour" ? Double(preferences.salary) / 2080 : Double(preferences.salary) * 2080
-                    preferences.salary = min(1_000_000, max(0, Int(converted.rounded())))
-                    preferences.period = new
+                    preferences.setPayPeriod(new)
                 })) {
                     Text("Per year").tag("year")
                     Text("Per hour").tag("hour")
@@ -370,11 +462,23 @@ struct RecruiterHome: View {
             }
             Picker("Minimum base pay", selection: $preferences.salary) {
                 ForEach(salaryOptions, id: \.self) { amount in
-                    Text(amount.formatted(.currency(code: preferences.currency).precision(.fractionLength(0))) + (preferences.period == "hour" ? " / hour" : " / year"))
-                        .tag(amount)
+                    Text(payOption(amount)).tag(amount)
                 }
             }.pickerStyle(.menu)
-            Text("Choose your minimum base pay. Changing the period estimates a full-time year of 2,080 hours; check the amount.")
+            Picker("Maximum base pay", selection: $preferences.salaryCeiling) {
+                Text("No maximum").tag(nil as Int?)
+                ForEach(salaryOptions, id: \.self) { amount in
+                    Text(payOption(amount)).tag(Optional(amount))
+                }
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("recruiterSalaryCeiling")
+            if !preferences.validPayRange {
+                Text("Choose a maximum at or above your minimum, or remove the maximum.")
+                    .font(.footnote).foregroundStyle(.red)
+                    .accessibilityIdentifier("recruiterPayRangeError")
+            }
+            Text("Changing the pay period estimates a full-time year of 2,080 hours. Check the converted amounts.")
                 .font(.footnote).foregroundStyle(.secondary)
             Toggle("Consider jobs below this target", isOn: $preferences.flexible)
             Divider()
@@ -396,11 +500,46 @@ struct RecruiterHome: View {
         }.jobCardSurface()
     }
 
+    private var positionLevels: some View {
+        let selected = RecruiterPositionLevel.allCases.filter { preferences.levels?.contains($0.rawValue) == true }
+        return DisclosureGroup {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Leave all levels unselected to consider any level.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                ForEach(RecruiterPositionLevel.allCases, id: \.self) { level in
+                    Toggle(level.title, isOn: Binding(get: {
+                        preferences.levels?.contains(level.rawValue) == true
+                    }, set: { enabled in
+                        var updated = (preferences.levels ?? []).filter { $0 != level.rawValue }
+                        if enabled { updated.append(level.rawValue) }
+                        preferences.levels = updated.isEmpty ? nil : updated
+                    }))
+                    .accessibilityIdentifier("recruiterLevel-\(level.rawValue)")
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Position levels").font(.headline)
+                Text(selected.isEmpty ? "Any level" : selected.map(\.title).joined(separator: ", "))
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier("recruiterPositionLevels")
+    }
+
+    private func payOption(_ amount: Int) -> String {
+        amount.formatted(.currency(code: preferences.currency).precision(.fractionLength(0)))
+            + (preferences.period == "hour" ? " / hour" : " / year")
+    }
+
     private var salaryOptions: [Int] {
         let values = preferences.period == "hour"
             ? Array(stride(from: 0, through: 150, by: 1)) + Array(stride(from: 155, through: 500, by: 5))
             : Array(stride(from: 0, through: 200_000, by: 1_000)) + Array(stride(from: 205_000, through: 300_000, by: 5_000)) + Array(stride(from: 310_000, through: 1_000_000, by: 10_000))
-        return Array(Set(values + [preferences.salary])).sorted()
+        var options = Set(values + [preferences.salary])
+        if let ceiling = preferences.salaryCeiling { options.insert(ceiling) }
+        return options.sorted()
     }
 
     private func mode(_ label: String, _ value: String) -> some View {
@@ -410,101 +549,200 @@ struct RecruiterHome: View {
         }))
     }
 
-    private var matchPicker: some View {
-        Picker("Show matches", selection: $selectedGroup) {
-            Text("Recommended").tag("recommended")
-            Text("To confirm").tag("review")
-            Text("Other").tag("avoid")
-        }
-    }
-
     private var results: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Your shortlist").font(.title.bold())
-            if state?.stage == "complete", state?.error.isEmpty == true {
+        let groups = Dictionary(grouping: state?.matches ?? [], by: \.resultGroup)
+        let active = selectedGroup ?? RecruiterResultGroup.allCases.first { groups[$0] != nil } ?? .close
+        let matches = groups[active] ?? []
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("Your shortlist").font(.title.bold()).accessibilityAddTraits(.isHeader)
+            if state?.stage == "stopped" {
+                Label(groups.isEmpty ? "Search stopped" : "Search stopped. Saved comparisons are still available.",
+                      systemImage: "stop.circle")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else if state?.stage == "complete", state?.error.isEmpty == true {
                 Label("Search complete", systemImage: "checkmark.circle")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
-            if state?.coverage != nil && state?.coverage != "success" {
-                Label("Some sources couldn’t finish. Coverage is partial.", systemImage: "wifi.exclamationmark")
+            if let coverage = state?.coverage, coverage != "success" && coverage != "stopped" {
+                Label(coverage == "failed" ? "Employer discovery couldn’t finish."
+                      : "Some employer sources couldn’t finish. Coverage is partial.",
+                      systemImage: "wifi.exclamationmark")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if let count = state?.deferred, count > 0 {
-                Text("\(count) additional openings are awaiting analysis.").font(.footnote).foregroundStyle(.secondary)
+                Text(count == 1 ? "1 additional opening is awaiting comparison."
+                     : "\(count) additional openings are awaiting comparison.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
-            if textSize.isAccessibilitySize {
-                matchPicker.pickerStyle(.menu)
-            } else {
-                matchPicker.pickerStyle(.segmented)
+
+            VStack(spacing: 8) {
+                ForEach(RecruiterResultGroup.allCases, id: \.self) { group in
+                    resultGroupButton(group, count: groups[group]?.count ?? 0, selected: group == active)
+                }
             }
-            let matches = (state?.matches ?? []).filter {
-                selectedGroup == "recommended" ? ["close", "adjacent"].contains($0.group) : $0.group == selectedGroup
-            }
+
             if matches.isEmpty && state?.busy != true {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(selectedGroup == "recommended" ? "No close matches yet" : "Nothing in this group").font(.headline)
-                    Text("We won’t relax your requirements to fill this list. Check roles needing confirmation or adjust your preferences.")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                    Button("Adjust preferences") { editingPreferences = true }
+                    Text(active.emptyTitle).font(.headline)
+                    if groups.isEmpty {
+                        Text("Review your search preferences or browse Pulled Openings.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                        Button("Adjust preferences") { editingPreferences = true }
+                    }
                 }.jobCardSurface()
             }
             ForEach(matches) { match in
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(match.label.uppercased()).font(.caption.weight(.bold)).foregroundStyle(JobsTheme.accent)
-                    Text(match.title).font(.title3.bold())
-                    Text(match.employer).font(.subheadline.weight(.medium))
-                    Text(match.location).font(.footnote).foregroundStyle(.secondary)
-                    LabeledContent("Employer pay", value: match.salary)
-                        .font(.footnote).foregroundStyle(.secondary)
-                    if match.group != "close" {
-                        ForEach(match.checks, id: \.self) { check in
-                            Text(check).font(.subheadline.weight(.medium))
-                        }
-                    }
-                    if match.marketPayTargetMatch == true {
-                        Label("Market range reaches your pay target", systemImage: "checkmark.circle")
-                            .font(.footnote.weight(.medium))
-                    } else if match.marketPayTargetMatch == false {
-                        Label("Market estimate is below your target", systemImage: "info.circle")
-                            .font(.footnote.weight(.medium))
-                    }
-                    if match.publishedPayTargetMatch == false {
-                        Label("Employer pay is below your target", systemImage: "info.circle")
-                            .font(.footnote.weight(.medium))
-                    }
-                    if selectedGroup != "avoid", match.marketPayAvailable == true {
-                        Button("Market pay estimate", systemImage: "magnifyingglass") { researchingPay = match }
-                            .buttonStyle(.bordered)
-                            .accessibilityIdentifier("shortlistMarketPay")
-                    }
-                    Text(match.reason).font(.subheadline)
-                    DisclosureGroup("Why this match?") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Your experience").font(.subheadline.bold())
-                            Text(match.resumeEvidence).font(.footnote)
-                            Text("Employer duties").font(.subheadline.bold())
-                            Text(match.jobEvidence).font(.footnote)
-                            ForEach(match.checks + match.gaps, id: \.self) { Text($0).font(.footnote).foregroundStyle(.secondary) }
-                            if !match.emphasis.isEmpty {
-                                Text("What to emphasize").font(.subheadline.bold())
-                                ForEach(match.emphasis, id: \.self) { Text($0).font(.footnote) }
-                            }
-                        }.padding(.top, 8)
-                    }
-                    NavigationLink("View job & next steps", value: match.jobId).buttonStyle(.bordered)
-                }.jobCardSurface()
+                resultCard(match)
             }
         }
     }
 
-    @MainActor private func refreshAfterPayResearch(for jobID: Int) async {
+    private func resultGroupButton(_ group: RecruiterResultGroup, count: Int, selected: Bool) -> some View {
+        Button { selectedGroup = group } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(group.title).font(.headline)
+                    Text(group.guidance).font(.footnote).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+                Text(count.formatted()).font(.title3.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(JobsTheme.accent)
+                    .fixedSize()
+                Image(systemName: selected ? "checkmark.circle.fill" : "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(selected ? JobsTheme.accent : Color.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(minHeight: 44)
+            .contentShape(.rect(cornerRadius: 12))
+            .background(selected ? JobsTheme.accent.opacity(0.10) : JobsTheme.surface,
+                        in: .rect(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(selected ? JobsTheme.accent : JobsTheme.border)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(group.title)
+        .accessibilityValue(count == 1 ? "1 opening" : "\(count) openings")
+        .accessibilityHint(group.guidance)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityIdentifier("shortlistGroup-\(group.rawValue)")
+    }
+
+    private func resultCard(_ match: RecruiterState.Match) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(match.label).font(.caption.weight(.semibold)).foregroundStyle(JobsTheme.accent)
+            Text(match.title).font(.title3.bold()).accessibilityAddTraits(.isHeader)
+            Text(match.employer).font(.subheadline.weight(.medium))
+            if match.resultGroup == .review {
+                ConfirmationReasonsView(reasons: match.confirmationReasons, fallback: match.reason)
+            }
+            if !match.location.isEmpty {
+                Text(match.location).font(.footnote).foregroundStyle(.secondary)
+            }
+            LabeledContent("Employer pay", value: match.salary)
+                .font(.footnote).foregroundStyle(.secondary)
+            if !match.reason.isEmpty && match.resultGroup != .review {
+                Text(match.reason).font(.subheadline)
+            }
+            if match.resultGroup == .review,
+               !match.checks.isEmpty || !match.gaps.isEmpty || match.confirmationReasons?.isEmpty == false {
+                DisclosureGroup("Full comparison") {
+                    if !match.reason.isEmpty && match.confirmationReasons?.isEmpty == false {
+                        Text(match.reason).font(.subheadline).padding(.top, 6)
+                    }
+                    comparisonChecks(match)
+                }
+            } else {
+                comparisonChecks(match)
+            }
+            if match.marketPayTargetMatch == true {
+                Label("Market range reaches your pay target", systemImage: "checkmark.circle")
+                    .font(.footnote.weight(.medium))
+            } else if match.marketPayTargetMatch == false {
+                Label("Market estimate is below your target", systemImage: "info.circle")
+                    .font(.footnote.weight(.medium))
+            }
+            if match.publishedPayTargetMatch == false {
+                Label("Employer pay is below your target", systemImage: "info.circle")
+                    .font(.footnote.weight(.medium))
+            }
+            if match.publishedPayCeilingMatch == false {
+                Label("Employer pay is above your maximum", systemImage: "info.circle")
+                    .font(.footnote.weight(.medium))
+            }
+            if match.resultGroup != .avoid, match.marketPayAvailable == true, match.payTarget != nil {
+                Button("Market pay estimate", systemImage: "magnifyingglass") { researchingPay = match }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("shortlistMarketPay")
+            }
+            if !match.resumeEvidence.isEmpty || !match.jobEvidence.isEmpty || !match.emphasis.isEmpty {
+                DisclosureGroup("Supporting evidence") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !match.resumeEvidence.isEmpty {
+                            Text("Your experience").font(.subheadline.bold())
+                            Text(match.resumeEvidence).font(.footnote)
+                        }
+                        if !match.jobEvidence.isEmpty {
+                            Text("Employer duties").font(.subheadline.bold())
+                            Text(match.jobEvidence).font(.footnote)
+                        }
+                        if !match.emphasis.isEmpty {
+                            Text("What to emphasize").font(.subheadline.bold())
+                            ForEach(Array(match.emphasis.enumerated()), id: \.offset) { point in
+                                Text(point.element).font(.footnote)
+                            }
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+            }
+            if let jobID = match.jobId {
+                NavigationLink("View job & next steps", value: jobID).buttonStyle(.bordered)
+            } else if let opening = match.opening {
+                NavigationLink {
+                    RecruiterOpeningDetail(opening: opening, address: workspace.address, shortlistMatch: match,
+                                           onMarketPayUpdated: { await refreshAfterPayResearch(for: match.id) })
+                } label: {
+                    Text("View opening")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("shortlistViewOpening")
+            }
+        }
+        .jobCardSurface()
+    }
+
+    @ViewBuilder private func comparisonChecks(_ match: RecruiterState.Match) -> some View {
+        comparisonItems("What Jobs checked", match.checks)
+        comparisonItems("Gaps to review", match.gaps)
+    }
+
+    @ViewBuilder private func comparisonItems(_ heading: String, _ items: [String]) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(heading).font(.subheadline.bold())
+                ForEach(Array(items.enumerated()), id: \.offset) { item in
+                    Text(item.element).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    @MainActor private func refreshAfterPayResearch(for matchID: String?) async {
         refreshingMarketPay = true
         defer { refreshingMarketPay = false }
-        let wasInReview = state?.matches.first(where: { $0.jobId == jobID })?.group == "review"
+        let wasInReview = state?.matches.first(where: { $0.id == matchID })?.resultGroup == .review
         await reload()
-        if wasInReview, let group = state?.matches.first(where: { $0.jobId == jobID })?.group,
-           ["close", "adjacent"].contains(group) {
-            selectedGroup = "recommended"
+        if wasInReview, selectedGroup == .review,
+           let group = state?.matches.first(where: { $0.id == matchID })?.resultGroup,
+           group == .close || group == .adjacent {
+            selectedGroup = group
         }
     }
 
@@ -529,7 +767,9 @@ struct RecruiterHome: View {
                 guard latestLoad == load, workspace.address == address,
                       !Task.isCancelled, !workspace.choosingRecruiterFile else { return }
                 let status = try decoder.decode(RecruiterState.Status.self, from: statusData)
-                if current.version == status.version && current.stage == status.stage {
+                // A matching progress change can publish a new comparison, posting check, or estimate.
+                let resultsChanged = status.stage == "matching" && current.progress != status.progress
+                if current.version == status.version && current.stage == status.stage && !resultsChanged {
                     state?.progress = status.progress
                     state?.stopRequested = status.stopRequested
                     if statusUnavailable { error = nil }
@@ -538,7 +778,8 @@ struct RecruiterHome: View {
                     return
                 }
             }
-            let data = try await DashboardAPI.request("/api/recruiter", at: address)
+            let data = try await DashboardAPI.request("/api/recruiter", at: address,
+                                                      query: [URLQueryItem(name: "openings", value: "1")])
             guard latestLoad == load, workspace.address == address,
                   !Task.isCancelled, !workspace.choosingRecruiterFile else { return }
             let next = try decoder.decode(RecruiterState.self, from: data)
@@ -552,7 +793,13 @@ struct RecruiterHome: View {
             lastRecruiterLoad = .now
             statusUnavailable = false
             state = next
-            if finished { await workspace.refresh() }
+            if finished {
+                // The polling task restarts when the search leaves its active state.
+                Task {
+                    guard workspace.address == address else { return }
+                    await workspace.refresh()
+                }
+            }
         } catch is CancellationError { } catch {
             guard latestLoad == load, workspace.address == address,
                   !Task.isCancelled, !workspace.choosingRecruiterFile else { return }
@@ -573,6 +820,10 @@ struct RecruiterHome: View {
     }
 
     @MainActor private func search() async {
+        guard preferences.validPayRange else {
+            editingPreferences = true
+            return
+        }
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         do {
@@ -612,6 +863,227 @@ struct RecruiterHome: View {
             editingPreferences = false
             await reload()
         } catch { self.error = error.localizedDescription }
+    }
+}
+
+private struct RecruiterOpeningsView: View {
+    let address: String
+    @State private var query = ""
+    @State private var displayedQuery: String?
+    @State private var openings: [RecruiterOpening] = []
+    @State private var nextBefore: String?
+    @State private var latestRequest = UUID()
+    @State private var loading = true
+    @State private var error: String?
+
+    var body: some View {
+        let filter = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        List {
+            if let error {
+                Text(error).foregroundStyle(.secondary)
+                if openings.isEmpty && !loading {
+                    Button("Retry") { Task { await load(query: filter) } }
+                }
+            }
+            if openings.isEmpty {
+                if loading {
+                    ProgressView("Loading openings…")
+                } else if error == nil {
+                    if filter.isEmpty {
+                        ContentUnavailableView("No openings yet", systemImage: "tray",
+                                               description: Text("Openings will appear here as your recruiter finds them."))
+                    } else {
+                        ContentUnavailableView.search(text: filter)
+                    }
+                }
+            }
+            ForEach(openings) { opening in
+                NavigationLink {
+                    RecruiterOpeningDetail(opening: opening, address: address)
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(opening.title).font(.headline)
+                        if !opening.employer.isEmpty { Text(opening.employer).font(.subheadline) }
+                        if !opening.location.isEmpty {
+                            Text(opening.location).font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+            if let nextBefore {
+                if loading {
+                    ProgressView("Loading more openings…")
+                } else {
+                    Button("Load more openings") {
+                        Task { await load(query: filter, before: nextBefore) }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Pulled Openings")
+        .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $query, prompt: "Search titles or employers")
+        .task(id: filter) { await load(query: filter, debounce: !filter.isEmpty) }
+        .refreshable { await load(query: filter) }
+    }
+
+    @MainActor private func load(query filter: String, before: String? = nil, debounce: Bool = false) async {
+        guard before == nil || (!loading && displayedQuery == filter) else { return }
+        let request = UUID()
+        latestRequest = request
+        loading = true
+        error = nil
+        if displayedQuery != filter {
+            displayedQuery = filter
+            openings = []
+            nextBefore = nil
+        }
+        defer {
+            if latestRequest == request { loading = false }
+        }
+        do {
+            if debounce { try await Task.sleep(for: .milliseconds(300)) }
+            let page = try await DashboardAPI.recruiterOpenings(at: address, before: before, filter: filter)
+            guard latestRequest == request, !Task.isCancelled else { return }
+            if before == nil {
+                openings = page.openings
+            } else {
+                var seen = Set(openings.map(\.id))
+                openings.append(contentsOf: page.openings.filter { seen.insert($0.id).inserted })
+            }
+            nextBefore = page.nextBefore
+        } catch {
+            guard latestRequest == request, !Task.isCancelled else { return }
+            self.error = DashboardAPI.connectionMessage(for: error)
+        }
+    }
+}
+
+struct ConfirmationReasonsView: View {
+    let reasons: [RecruiterConfirmationReason]?
+    let fallback: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Why this needs confirmation", systemImage: "exclamationmark.circle")
+                .font(.subheadline.bold())
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("shortlistConfirmationHeading")
+            if let reasons, !reasons.isEmpty {
+                ForEach(Array(reasons.enumerated()), id: \.offset) { reason in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(reason.element.reason).font(.subheadline.weight(.medium))
+                        Text(reason.element.whatToCheck).font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                Text(fallback.isEmpty ? "Review the employer’s requirements and the evidence in the comparison." : fallback)
+                    .font(.subheadline)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.orange.opacity(0.12), in: .rect(cornerRadius: 10))
+    }
+}
+
+private struct RecruiterOpeningDetail: View {
+    let opening: RecruiterOpening
+    let address: String
+    var shortlistMatch: RecruiterState.Match? = nil
+    var onMarketPayUpdated: (@MainActor () async -> Void)? = nil
+    @State private var comparison: RecruiterOpeningMatch?
+    @State private var comparing = false
+    @State private var error: String?
+    @State private var showingMarketPay = false
+
+    var body: some View {
+        let displayed = comparison ?? shortlistMatch.map { match in
+            RecruiterOpeningMatch(group: match.group, reason: match.reason, resumeEvidence: match.resumeEvidence,
+                                  jobEvidence: match.jobEvidence, checks: match.checks, gaps: match.gaps,
+                                  confirmationReasons: match.confirmationReasons)
+        }
+        List {
+            Section {
+                Text(opening.title).font(.title2.bold())
+                if !opening.employer.isEmpty { LabeledContent("Employer", value: opening.employer) }
+                if let displayed, displayed.group == RecruiterResultGroup.review.rawValue {
+                    ConfirmationReasonsView(reasons: displayed.confirmationReasons, fallback: displayed.reason)
+                }
+                if !opening.location.isEmpty { LabeledContent("Location", value: opening.location) }
+                if !opening.workArrangement.isEmpty {
+                    LabeledContent("Work arrangement", value: opening.workArrangement.capitalized)
+                }
+                LabeledContent("Employer pay", value: opening.salary.isEmpty ? "Not disclosed" : opening.salary)
+                if let shortlistMatch, shortlistMatch.resultGroup != .avoid,
+                   shortlistMatch.marketPayAvailable == true {
+                    Button("Market pay estimate", systemImage: "magnifyingglass") { showingMarketPay = true }
+                }
+                if !opening.discoveredAt.isEmpty {
+                    LabeledContent("Found", value: displayTimestamp(opening.discoveredAt))
+                }
+                if let url = DashboardAPI.webURL(opening.postingUrl), url.scheme?.lowercased() == "https" {
+                    Link(destination: url) {
+                        Label("Open employer posting", systemImage: "arrow.up.right")
+                    }
+                }
+            }
+            Section("Fit comparison") {
+                if comparing {
+                    ProgressView("Comparing with your experience…")
+                } else if let displayed {
+                    Text((RecruiterResultGroup(rawValue: displayed.group) ?? .avoid).matchLabel).font(.headline)
+                    if !displayed.reason.isEmpty,
+                       displayed.group != RecruiterResultGroup.review.rawValue || displayed.confirmationReasons?.isEmpty == false {
+                        Text(displayed.reason)
+                    }
+                } else {
+                    Text("Awaiting comparison").foregroundStyle(.secondary)
+                }
+                if !comparing && (displayed == nil || shortlistMatch != nil) {
+                    Button("Compare with my experience") { Task { await compare() } }
+                }
+                if let error { Text(error).foregroundStyle(.secondary) }
+            }
+            if let displayed {
+                if !displayed.resumeEvidence.isEmpty || !displayed.jobEvidence.isEmpty {
+                    Section("Evidence") {
+                        if !displayed.resumeEvidence.isEmpty {
+                            LabeledContent("Your experience", value: displayed.resumeEvidence)
+                        }
+                        if !displayed.jobEvidence.isEmpty {
+                            LabeledContent("Employer duties", value: displayed.jobEvidence)
+                        }
+                    }
+                }
+                let issues = displayed.checks + displayed.gaps
+                if !issues.isEmpty {
+                    Section("Fit checks and gaps") {
+                        ForEach(Array(issues.enumerated()), id: \.offset) { issue in
+                            Text(issue.element)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Opening")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showingMarketPay) {
+            MarketPayView(target: .opening(opening.id), address: address, onResearchUpdated: onMarketPayUpdated)
+        }
+    }
+
+    @MainActor private func compare() async {
+        guard !comparing else { return }
+        comparing = true
+        error = nil
+        defer { comparing = false }
+        do {
+            comparison = try await DashboardAPI.compareRecruiterOpening(opening.id, at: address)
+        } catch {
+            self.error = DashboardAPI.connectionMessage(for: error)
+        }
     }
 }
 
@@ -809,15 +1281,38 @@ struct MasterResumeView: View {
     }
 }
 
+fileprivate enum RecruiterMarketPayTarget {
+    case job(Int)
+    case opening(String)
+
+    var path: String {
+        switch self {
+        case .job(let id): "/api/jobs/\(id)/market-pay"
+        case .opening(let id): "/api/recruiter/openings/\(id)/market-pay"
+        }
+    }
+}
+
 struct MarketPayView: View {
     @Environment(\.dismiss) private var dismiss
-    let jobID: Int
+    private let target: RecruiterMarketPayTarget
     let address: String
-    var onResearchUpdated: (@MainActor () async -> Void)? = nil
+    private let onResearchUpdated: (@MainActor () async -> Void)?
 
     @State private var report: Report?
     @State private var loading = false
     @State private var error: String?
+
+    init(jobID: Int, address: String, onResearchUpdated: (@MainActor () async -> Void)? = nil) {
+        self.init(target: .job(jobID), address: address, onResearchUpdated: onResearchUpdated)
+    }
+
+    fileprivate init(target: RecruiterMarketPayTarget, address: String,
+                     onResearchUpdated: (@MainActor () async -> Void)? = nil) {
+        self.target = target
+        self.address = address
+        self.onResearchUpdated = onResearchUpdated
+    }
 
     private struct Report: Decodable {
         struct Citation: Decodable {
@@ -904,7 +1399,7 @@ struct MarketPayView: View {
         error = nil
         defer { loading = false }
         do {
-            let data = try await DashboardAPI.request("/api/jobs/\(jobID)/market-pay", at: address,
+            let data = try await DashboardAPI.request(target.path, at: address,
                                                       body: research ? Data("{}".utf8) : nil)
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase

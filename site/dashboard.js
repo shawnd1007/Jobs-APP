@@ -6,6 +6,7 @@ const unapplied=['Not Applied','Planning to Apply','Needs Verification'];
 const bucketInfo={review:['Review Inbox','Check details and decide what moves forward.'],ready:['Ready to Apply','Approved by you; no application recorded yet.'],applied:['Applied','Submitted applications and assessments.'],interviews:['Interviews','Scheduled or completed interviews.'],offers:['Offers','Offers received.'],hold:['On Hold','Waiting for more information or a later decision.'],archive:['Closed / Dismissed','Closed, rejected, withdrawn or dismissed jobs.'],all:['All History','Every record, including out-of-area jobs.']};
 let state,activeBucket=bucketInfo[location.hash.slice(1)]?location.hash.slice(1):'review';
 const drafts=new Set();
+let dashboardRevision, dashboardLoad=Promise.resolve(), dashboardChangesSupported=true;
 let searchRunning=false, searchPolling=false, searchNeedsSync=false;
 function searchMessage(running,run){
  if(running){
@@ -37,7 +38,7 @@ async function pollSearch(){
    if(!searchRunning)searchNeedsSync=true;
   }
   if(searchNeedsSync&&!drafts.size&&!preferencesDirty){
-   await load();searchNeedsSync=false;
+   if(await load({background:true}))searchNeedsSync=false;
   }
  }catch{
   $('search-progress').textContent=searchRunning
@@ -64,7 +65,65 @@ function shownInBucket(job, key) {
   && Boolean(job.application_date || job.follow_up || job.notes || !unapplied.includes(job.status));
 }
 function discardCheck(){if(drafts.size&&!confirm('Discard unsaved changes?'))return false;drafts.clear();return true;}
-async function load(){const r=await fetch('/api/dashboard',{signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error('Could not load the shared job database.');state=await r.json();render();}
+function applyDashboardUpdate(update){
+ if(typeof update?.revision!=='string'||!update.revision)return false;
+ if(Array.isArray(update.dashboard?.jobs)){
+  state=update.dashboard;
+ }else{
+  if(!state||!dashboardRevision||update.dashboard!==undefined)return false;
+  const {jobs=[],removed=[],metadata}=update;
+  if(!Array.isArray(jobs)||!Array.isArray(removed)
+     ||(metadata!==undefined&&(!metadata||typeof metadata!=='object'||Array.isArray(metadata))))return false;
+  let merged=state.jobs;
+  if(jobs.length||removed.length){
+   const byId=new Map(merged.map(job=>[job.id,job]));
+   for(const job of jobs)byId.set(job.id,job);
+   for(const id of removed)byId.delete(id);
+   merged=[...byId.values()].sort((a,b)=>a.id-b.id);
+  }
+  state={...state,...metadata,jobs:merged};
+ }
+ dashboardRevision=update.revision;
+ return true;
+}
+async function loadDashboard(background){
+ const editing=()=>background&&(drafts.size||preferencesDirty);
+ if(editing())return false;
+ const options={signal:AbortSignal.timeout(15000),cache:'no-store'};
+ if(dashboardChangesSupported){
+  const query=new URLSearchParams({metadata:'1'});
+  if(dashboardRevision)query.set('since',dashboardRevision);
+  const response=await fetch('/api/v1/dashboard/changes?'+query,options);
+  if([404,405].includes(response.status)){
+   dashboardChangesSupported=false;
+  }else{
+   if(!response.ok)throw Error('Could not load the shared job database.');
+   const update=await response.json().catch(error=>{
+    if(error instanceof SyntaxError)return null;
+    throw error;
+   });
+   if(editing())return false;
+   if(applyDashboardUpdate(update)){
+    if(!background||update.dashboard||update.jobs?.length||update.removed?.length||update.metadata)render();
+    return true;
+   }
+  }
+ }
+ const response=await fetch('/api/dashboard',options);
+ if(!response.ok)throw Error('Could not load the shared job database.');
+ const snapshot=await response.json();
+ if(editing())return false;
+ state=snapshot;
+ dashboardRevision=undefined;
+ render();
+ return true;
+}
+function load({background=false}={}){
+ const refresh=()=>loadDashboard(background);
+ // Patches apply to the exact snapshot used to request them.
+ dashboardLoad=dashboardLoad.then(refresh,refresh);
+ return dashboardLoad;
+}
 function selectBucket(key){if(!discardCheck())return;followupOnly=false;activeBucket=key;history.replaceState(null,'','#'+key);document.querySelectorAll('.controls input').forEach(e=>e.value='');document.querySelectorAll('.controls select').forEach(e=>e.selectedIndex=0);render();$('bucket-title').scrollIntoView({behavior:'smooth',block:'start'});}
 function fillSelect(id,values,label){const old=$(id).value;$(id).innerHTML=option('',label)+values.map(v=>option(v)).join('');if([...$(id).options].some(o=>o.value===old))$(id).value=old;}
 function render(){

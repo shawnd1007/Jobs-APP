@@ -251,8 +251,11 @@ class PrototypeTests(unittest.TestCase):
         response = dict(status='completed', output=[{'content': [{'type': 'output_text', 'text': json.dumps(advice)}]}], usage={'total_tokens': 50})
         with patch.object(app, 'config', return_value=cfg), patch.object(prototype, 'ai_key', return_value='fake-test-key'), patch('prototype.urllib.request.urlopen', return_value=io.BytesIO(json.dumps(response).encode())) as network:
             original = app.records()[0]
-            self.assertEqual(prototype.ai_review(app, original['id'])[0], 200)
+            with patch.object(app, 'records', wraps=app.records) as records:
+                self.assertEqual(prototype.ai_review(app, original['id'])[0], 200)
+                records.assert_called_once_with(job_ids=[original['id']])
             self.assertEqual(prototype.ai_review(app, original['id'])[1], {'cached': True})
+            self.assertEqual(prototype.ai_review(app, 2**63), (404, {'error': 'Job not found'}))
             self.assertEqual(network.call_count, 1)
             self.assertEqual(prototype.ai_review(app, app.records()[1]['id'])[0], 429)
             saved = app.records()[0]

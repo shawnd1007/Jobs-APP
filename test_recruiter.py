@@ -2,6 +2,7 @@
 import json
 import base64
 from http.client import HTTPConnection
+from io import BytesIO
 import threading
 import time
 import unittest
@@ -67,6 +68,138 @@ class RecruiterTests(unittest.TestCase):
         with self.a.connect() as c:
             self.assertEqual(c.execute('SELECT COUNT(*) FROM recruiter_match_cache').fetchone()[0], 0)
 
+    def test_first_search_can_recommend_and_research_an_opening_without_saving_it(self):
+        import recruiter_openings
+
+        self.assertEqual(self.a.records(), [])
+        self.assertEqual(recruiter_openings.page(self.a)['openings'], [])
+        self.assertEqual(recruiter.read(self.a)['stage'], 'empty')
+        with self.a.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM recruiter_match_cache').fetchone()[0], 0)
+        self.analyze()
+        cfg = dict(self.a.config(), max_new_candidates=0)
+        board_jobs = self.a.board_jobs
+
+        def without_pay(*args):
+            jobs = board_jobs(*args)
+            for job in jobs:
+                if job['requisition'] == 'unknown':
+                    for field in ('salary_min', 'salary_max', 'salary_period', 'salary_currency', 'salary_type'):
+                        job.pop(field, None)
+                    job['salary_text'] = 'Pay not disclosed'
+            return jobs
+
+        def provider(a, kind, inputs, schema):
+            if kind == 'market_pay':
+                return dict(summary='Fictional annual pay estimate.', geography='United States', data_period='May 2025',
+                            salary_min=75000, salary_max=95000, salary_period='year',
+                            citations=[dict(url='https://example.com/fictional-pay', title='Fictional wage data', end=30)])
+            result = fake_ai(a, kind, inputs, schema)
+            if kind == 'candidate_match' and inputs['job']['title'] == 'Medical Billing Specialist':
+                result['resume_evidence'] = ('"Supervised eight billing specialists supporting outpatient clinics."\n'
+                                             '"Built monthly Excel reports on accounts receivable and payer turnaround."')
+                result['job_evidence'] = ('"Fictional employer opening."\n'
+                                          '"Review denial queues and coach billing specialists."')
+            return result
+
+        with patch.object(self.a, 'config', return_value=cfg), patch.object(self.a, 'board_jobs', side_effect=without_pay), \
+             patch.object(recruiter, 'ai', side_effect=provider) as ai:
+            result = self.search()
+        match = next(m for m in result['matches'] if m['posting_url'].endswith('/unknown'))
+        self.assertEqual(match['group'], 'close')
+        self.assertIn('\n', match['resume_evidence'])
+        self.assertIn('\n', match['job_evidence'])
+        self.assertIsNone(match['job_id'])
+        self.assertRegex(match['opening_id'], r'^[a-f0-9]{64}$')
+        self.assertTrue(match['market_pay_target_match'])
+        self.assertEqual(sum(call.args[1] == 'market_pay' for call in ai.call_args_list), 1)
+        self.assertEqual(self.a.records(), [])
+
+        with self.a.ThreadingHTTPServer(('127.0.0.1', 0), self.a.Handler) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                def get(path):
+                    with_connection = HTTPConnection(*server.server_address, timeout=2)
+                    try:
+                        with_connection.request('GET', path)
+                        response = with_connection.getresponse()
+                        self.assertEqual(response.status, 200)
+                        return json.load(response)
+                    finally:
+                        with_connection.close()
+
+                self.assertEqual(get('/api/recruiter')['matches'], [])
+                self.assertIn(match['opening_id'], {m['opening_id'] for m in get('/api/recruiter?openings=1')['matches']})
+                pay = get(f"/api/recruiter/openings/{match['opening_id']}/market-pay")
+                self.assertEqual(pay['research']['salary_max'], 95000)
+            finally:
+                server.shutdown()
+                thread.join()
+
+    def test_fresh_openings_fill_the_comparison_budget_before_older_saved_jobs(self):
+        import recruiter_openings
+
+        self.analyze()
+        state = dict(recruiter.read(self.a, private=True), preferences=PREFS)
+        cfg = recruiter.search_config(self.a, state)
+        fictional = dict(title='Revenue Cycle Supervisor', employer='Fictional Clinic',
+                         location='Remote — Oregon, United States', workplace_type='remote',
+                         availability='Open', description='Review denial queues and coach billing specialists.')
+        recruiter_openings.capture(self.a, [dict(fictional, url=f'https://example.com/current/{i}')
+                                           for i in range(26)], 1)
+        older = dict(fictional, id=30, url='https://example.com/older', score=100)
+        with patch.object(self.a, 'saved_comparison_jobs', return_value=[older]), \
+             patch.object(self.a, 'assess', wraps=self.a.assess) as assess, \
+             patch.object(recruiter.prototype, 'unlimited_personal_testing', return_value=False):
+            queue, deferred = recruiter.comparison_queue(self.a, state, cfg, 1)
+        self.assertEqual(len(queue), 24)
+        self.assertEqual(deferred, 3)
+        self.assertTrue(all(job['url'].startswith('https://example.com/current/') for job in queue))
+        self.assertTrue(all(call.args[0]['id'] != 30 for call in assess.call_args_list))
+        self.assertEqual(self.a.records(), [])
+
+    def test_search_queries_project_saved_facts_and_keep_legacy_filters(self):
+        facts = dict(title='Fictional Analyst', employer='Fictional Clinic', description='Fictional details',
+                     queue='Review', pending_match_alert=True, posting_location_terms=['Remote, U.S.'])
+        cases = {
+            'old': {},
+            'empty-flag': {'external_application': {}},
+            'external': {'external_application': '0'},
+            'closed': {'availability': 'Closed'},
+            'held': {'identity_review': True},
+            'reused': {'recruitee_offer_changed': True},
+            'untracked': {},
+        }
+        ids = {}
+        with self.a.connect() as c:
+            for name, fields in cases.items():
+                url = f'https://example.com/{name}'
+                listing = json.dumps(dict(facts, url=url, **fields))
+                ids[name] = c.execute('INSERT INTO jobs(identity,listing,created,updated) VALUES(?,?,?,?) RETURNING id',
+                                      (url, listing, self.a.now(), self.a.now())).fetchone()[0]
+                if name != 'untracked':
+                    c.execute('INSERT INTO tracking(job_id,updated) VALUES (?,?)', (ids[name], self.a.now()))
+
+        with patch.object(self.a, 'records', side_effect=AssertionError('Broad listing read')):
+            headers = self.a.discovery_job_headers()
+            self.assertEqual(self.a.manual_review_count(), 4)
+            candidates = self.a.saved_comparison_jobs()
+        self.assertEqual([job['id'] for job in headers], [ids[key] for key in ('old', 'empty-flag', 'closed', 'held', 'reused')])
+        self.assertEqual([job['id'] for job in candidates], [ids['old'], ids['empty-flag']])
+        self.assertEqual(headers[0]['posting_location_terms'], facts['posting_location_terms'])
+        self.assertIs(headers[0]['pending_match_alert'], True)
+        self.assertNotIn('description', headers[0])
+        self.assertEqual(candidates[0]['description'], facts['description'])
+
+    def test_repeat_search_uses_scoped_saved_job_reads(self):
+        self.analyze()
+        self.search()
+        with patch.object(self.a, 'records', wraps=self.a.records) as records:
+            result = self.search()
+        self.assertTrue(result['matches'])
+        self.assertTrue(all(call.kwargs.get('job_ids') is not None for call in records.call_args_list))
+
     def test_evidence_accepts_formatting_but_not_changed_claims(self):
         source = 'Mara managed 80 billing projects and resolved client issues.'
         self.assertTrue(recruiter.quote_in('“managed 80 billing projects”', source))
@@ -75,18 +208,39 @@ class RecruiterTests(unittest.TestCase):
         self.assertFalse(recruiter.quote_in('managed billing projects and hired staff', source))
         self.assertFalse(recruiter.quote_in('""', source))
 
-    def test_preferred_gap_saying_not_required_does_not_become_essential(self):
+    def test_comparison_verifies_each_separately_quoted_passage(self):
+        source = "Managed 80 claims. Reviewed policies and recorded the team's results. Used HCPT2 exports."
+        for text in (
+            '“Managed 80 claims.”\n“recorded the team’s results.”',
+            '1. "Managed 80 claims."\n2. "recorded the team\'s results."',
+            '["Managed 80 claims.", "Used HCPT2 exports."]',
+            "'Managed 80 claims.'; 'recorded the team\'s results.'",
+            '- "Managed 80 claims."',
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(recruiter.comparison_quote_in(text, source))
+        for text in (
+            '"Managed 80 claims."\n"Processed payroll."',
+            'Managed 80 claims.\nProcessed payroll.',
+            '"Managed 80 claims." and fired the staff.',
+            '"Managed 80 claims."\n"CPT"',
+            '"Managed 80 claims."\n"Recorded the team\'s results.',
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(recruiter.comparison_quote_in(text, source))
+
+    def test_legacy_gap_cannot_establish_a_requirement_unsupported_by_the_posting(self):
         self.analyze()
         state = recruiter.read(self.a, True)
         job = dict(title='Billing Specialist', description='Review billing records.')
         optional = dict(group='close', gaps=['Preferred: CRM experience is not required.'])
-        self.assertEqual(recruiter.fit_assessment(self.a, optional, [], job, state)[0], 'adjacent')
+        self.assertEqual(recruiter.fit_assessment(self.a, optional, [], job, state)[0], 'close')
         for gap in ('Required: CRM experience is preferred but a license is required.',
                     'Preferred: CRM experience is not required, but clearance is mandatory.',
                     'Preferred: The posting lists this as a minimum qualification.'):
             with self.subTest(gap=gap):
                 self.assertEqual(recruiter.fit_assessment(self.a, dict(group='close', gaps=[gap]),
-                                                          [], job, state)[0], 'review')
+                                                          [], job, state)[0], 'close')
 
     def test_comparison_uses_complete_resume_and_invalidates_cache_when_it_changes(self):
         self.analyze()
@@ -108,6 +262,46 @@ class RecruiterTests(unittest.TestCase):
             state['resume'] += ' Documented a separate reporting workflow.'
             recruiter.match(self.a, state, job)
             self.assertEqual(provider.call_count, 2)
+
+    def test_employer_accepted_spreadsheet_alternative_is_not_a_required_gap(self):
+        self.analyze()
+        self.search()
+        state = recruiter.read(self.a, private=True)
+        job = next(job for job in self.a.records() if job['requisition'] == 'billing')
+        requirement = 'Experience with Excel or Google Sheets.'
+        duty = 'Review denial queues and coach billing specialists.'
+        job['description'] = f'{duty}\nRequired:\n{requirement}'
+        response = dict(
+            group='close', reason='The candidate lacks Google Sheets.', emphasis=[],
+            resume_evidence='Built monthly Excel reports on accounts receivable and payer turnaround.',
+            job_evidence=duty, gaps=[
+                dict(detail='No Google Sheets experience.', kind='required', employer_quote=requirement),
+            ],
+        )
+        with self.a.connect() as c:
+            self.a.upsert(c, job)
+        with patch.object(recruiter, 'ai', return_value=response):
+            match = recruiter.match(self.a, state, job)
+        self.assertEqual(match['group'], 'close')
+        self.assertEqual(match['gaps'], [])
+        self.assertIn('a tool the employer accepts', match['reason'])
+
+        state['matches'] = [dict(match, group='review', fit_group='review', gaps=['No Google Sheets experience.'],
+                                 gap_evidence=response['gaps'])]
+        recruiter.write(self.a, state)
+        with patch.object(recruiter, 'ai', side_effect=AssertionError('Refresh should use recorded evidence')):
+            refreshed = recruiter.read(self.a)['matches'][0]
+        self.assertEqual(refreshed['group'], 'close')
+        self.assertEqual(refreshed['gaps'], [])
+
+        required = 'An active medical coding license.'
+        job['description'] += f'\n{required}'
+        response['gaps'].append(dict(detail='Missing medical coding license.', kind='required', employer_quote=required))
+        with patch.object(recruiter, 'ai', return_value=response):
+            checked = recruiter.match(self.a, state, job)
+        self.assertEqual(checked['group'], 'review')
+        self.assertEqual(checked['gaps'], ['Missing medical coding license.'])
+        self.assertIn(required, checked['confirmation_reasons'][0]['reason'])
 
     def setUp(self):
         self.context = environment()
@@ -136,6 +330,77 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(state['stage'], 'complete', state.get('error'))
         return state
 
+    def test_pulled_openings_http_comparison_reuses_cache_without_changing_shortlist(self):
+        import recruiter_openings
+
+        opening = dict(title='Fictional Revenue Recovery Specialist', employer='Fictional Benefits Group',
+                       location='Remote — United States', workplace_type='remote', availability='Open',
+                       url='https://jobs.lever.co/fictional-benefits/recovery',
+                       description='Review denial queues and coach billing specialists.')
+        recruiter_openings.capture(self.a, [opening], run_id=0)
+        opening_id = recruiter_openings.opening_id(self.a, opening['url'])
+        listing_path = '/api/recruiter/openings'
+        compare_path = f'{listing_path}/{opening_id}/compare'
+
+        def request(method, path, body=b'{}', trusted=True):
+            handler = object.__new__(self.a.Handler)
+            handler.path = path
+            handler.headers = {'Content-Length': str(len(body))}
+            if trusted:
+                handler.headers['X-Jobs-Client'] = 'dashboard'
+            handler.rfile = BytesIO(body)
+            with patch.object(handler, 'send') as response:
+                getattr(handler, f'do_{method}')()
+                response.assert_called_once()
+                return response.call_args.args
+
+        with patch.object(recruiter, 'ai', side_effect=fake_ai) as provider:
+            status, listed = request('GET', listing_path + '?q=Recovery')
+            self.assertEqual(status, 200)
+            self.assertEqual([item['id'] for item in listed['openings']], [opening_id])
+            self.assertEqual(request('GET', listing_path + '?q=one&q=two')[0], 400)
+            self.assertEqual(request('POST', compare_path, body=b'[]')[0], 400)
+            self.assertEqual(request('POST', compare_path, trusted=False)[0], 403)
+            self.assertEqual(request('POST', compare_path)[0], 409)
+            provider.assert_not_called()
+
+        self.analyze()
+        before = self.search()
+        records_before = self.a.records()
+        ineligible = dict(opening, url='https://jobs.lever.co/fictional-benefits/other-state',
+                          location='Remote — United States, excluding Oregon')
+        recruiter_openings.capture(self.a, [ineligible], run_id=0)
+        ineligible_id = recruiter_openings.opening_id(self.a, ineligible['url'])
+
+        with patch.object(recruiter, 'ai', side_effect=recruiter.AIRequestError('Fictional timeout')) as provider:
+            status, error = request('POST', compare_path)
+            self.assertEqual(status, 502)
+            self.assertIn('Trying again may use another AI request.', error['error'])
+            provider.assert_called_once()
+
+        with patch.object(recruiter, 'ai', side_effect=fake_ai) as provider:
+            self.assertEqual(request('POST', f'{listing_path}/{ineligible_id}/compare')[0], 422)
+            self.assertEqual(request('POST', f'{listing_path}/' + '0' * 64 + '/compare')[0], 404)
+            with recruiter.LOCK:
+                self.assertEqual(request('POST', compare_path)[0], 409)
+            provider.assert_not_called()
+
+            status, result = request('POST', compare_path)
+            self.assertEqual(status, 200)
+            self.assertEqual(result['match']['job_id'], opening_id)
+            self.assertEqual(result['match']['group'], 'review')
+            self.assertIn('The exact employer posting needs verification.', result['match']['checks'])
+            self.assertEqual(result['match']['job_evidence'], opening['description'])
+            repeat_status, repeat = request('POST', compare_path)
+            self.assertEqual(repeat_status, 200)
+            self.assertEqual(repeat['match']['reason'], result['match']['reason'])
+            self.assertEqual(repeat['match']['job_evidence'], result['match']['job_evidence'])
+            provider.assert_called_once()
+            self.assertEqual(provider.call_args.args[1], 'candidate_match')
+
+        self.assertEqual(recruiter.read(self.a), before)
+        self.assertEqual(self.a.records(), records_before)
+
     def test_complete_retrieval_changes_with_resume_and_preserves_owner_settings(self):
         before = dict(self.a.config())
         self.assertEqual(self.a.records(), [])
@@ -144,11 +409,11 @@ class RecruiterTests(unittest.TestCase):
         self.assertTrue(any('bing.com' in url for url in self.calls))
         self.assertTrue(any('api.lever.co' in url for url in self.calls))
         self.assertEqual(len(self.a.records()), 6)
-        self.assertEqual(len(state['matches']), 6)
+        self.assertEqual(len(state['matches']), 5)
         groups = {m['title'] + m['location']: m['group'] for m in state['matches']}
         self.assertEqual(groups['Revenue Cycle SupervisorRemote — Oregon, United States'], 'close')
         self.assertEqual(groups['Medical Billing SpecialistRemote — United States'], 'close')
-        self.assertEqual(groups['Medical Billing SpecialistRemote — United States, excluding Oregon'], 'avoid')
+        self.assertNotIn('Medical Billing SpecialistRemote — United States, excluding Oregon', groups)
         self.assertEqual(groups['Clinical Laboratory ScientistRemote — Oregon, United States'], 'avoid')
         self.assertEqual(groups['Patient Accounts LeadPortland, Oregon'], 'review')
         self.analyze(JULES)
@@ -170,24 +435,83 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA))[0], 409)
 
     def test_invalid_evidence_never_becomes_profile(self):
-        bad = strategy(MARA)
-        bad['skills'][0]['evidence'] = 'Invented clinical license'
-        with patch.object(recruiter, 'ai', return_value=bad):
+        def unknown_passage(a, name, inputs, schema):
+            result = fake_ai(a, name, inputs, schema)
+            result['skills'][0]['evidence_id'] = 9999
+            return result
+
+        with patch.object(recruiter, 'ai', side_effect=unknown_passage):
             recruiter.start(self.a, dict(action='analyze', version=0, resume=MARA))
             state = self.wait()
         self.assertEqual(state['stage'], 'ready')
-        self.assertNotIn('Invented clinical license', [s['evidence'] for s in state['strategy']['skills']])
+        self.assertEqual([s['label'] for s in state['strategy']['skills']], ['Team coaching'])
         self.assertEqual(state['strategy']['omitted_unverified'], 1)
 
     def test_unverified_caution_is_omitted(self):
-        response = strategy(MARA)
-        response['cautions'] = [dict(title='Pilot', reason='Training needed', evidence='Invented flight license')]
-        with patch.object(recruiter, 'ai', return_value=response):
+        def unknown_passage(a, name, inputs, schema):
+            result = fake_ai(a, name, inputs, schema)
+            result['cautions'][0]['evidence_id'] = -1
+            return result
+
+        with patch.object(recruiter, 'ai', side_effect=unknown_passage):
             result = recruiter.strategy(self.a, MARA)
         self.assertEqual(result['cautions'], [])
         self.assertEqual(result['omitted_unverified'], 1)
         self.assertTrue(result['skills'])
         self.assertTrue(result['roles'])
+
+    def test_strategy_resolves_numbered_passages_from_both_pdf_pages(self):
+        first = '• Reviewed 80 medical billing claims weekly\n  and corrected denials before resubmission.'
+        second = '• Reconciled payer remittances and documented patient payment plans.'
+        resume = f'Fictional candidate\nsample@example.com\n\n{first}\fPAGE TWO\n{second}'
+
+        def provider(request, **kwargs):
+            payload = json.loads(request.data)
+            inputs = json.loads(payload['input'])
+            self.assertNotIn('sample@example.com', payload['input'])
+            self.assertIn('set evidence_id', payload['instructions'])
+            self.assertNotIn('For job matching', payload['instructions'])
+            passages = {passage['text']: passage['id'] for passage in inputs['resume_passages']}
+            fields = payload['text']['format']['schema']['properties']
+            for section in ('skills', 'roles', 'adjacent_roles', 'cautions'):
+                self.assertEqual(fields[section]['items']['properties']['evidence_id'],
+                                 {'type': 'integer', 'enum': list(passages.values())})
+            result = dict(summary='Fictional medical billing experience.',
+                          skills=[dict(label='Denial management', kind='stated', evidence_id=passages[first])],
+                          roles=[dict(title='Patient Accounts Specialist', reason='Reconciles payer remittances.',
+                                      evidence_id=passages[second])], adjacent_roles=[], cautions=[])
+            return BytesIO(json.dumps(dict(status='completed', output=[dict(content=[
+                dict(type='output_text', text=json.dumps(result))])])).encode())
+
+        cfg = dict(self.a.config(), ai_enabled=True)
+        with patch.object(self.a, 'config', return_value=cfg), \
+             patch.object(recruiter, 'ai', side_effect=REAL_AI), \
+             patch.object(recruiter.prototype, 'ai_key', return_value='fictional-test-token'), \
+             patch('urllib.request.urlopen', side_effect=provider) as network:
+            result = self.analyze(resume)['strategy']
+        network.assert_called_once()
+        self.assertEqual(result['skills'][0]['evidence'], first)
+        self.assertEqual(result['roles'][0]['evidence'], second)
+        self.assertNotIn('evidence_id', json.dumps(result))
+        self.assertEqual(result['omitted_unverified'], 0)
+
+    def test_fragmented_resume_keeps_passages_beyond_enum_limit(self):
+        early = '\n'.join(f'• Verified transaction batch {index}.' for index in range(120))
+        late = '• Reconciled patient billing and payer remittances.'
+
+        def provider(a, name, inputs, schema):
+            last = inputs['resume_passages'][-1]
+            self.assertEqual(last, {'id': 121, 'text': late})
+            self.assertEqual(schema['properties']['skills']['items']['properties']['evidence_id'],
+                             {'type': 'integer'})
+            return dict(summary='Fictional medical billing experience.',
+                        skills=[dict(label='Payment reconciliation', kind='stated', evidence_id=last['id'])],
+                        roles=[dict(title='Medical Biller', reason='Reconciles payments.', evidence_id=last['id'])],
+                        adjacent_roles=[], cautions=[])
+
+        with patch.object(recruiter, 'ai', side_effect=provider):
+            result = self.analyze(f'{early}\f{late}')['strategy']
+        self.assertEqual(result['skills'][0]['evidence'], late)
 
     def test_interrupted_analysis_keeps_resume_for_retry(self):
         recruiter.write(self.a, dict(version=1, stage='analyzing', resume=MARA, matches=[], error=''))
@@ -202,12 +526,13 @@ class RecruiterTests(unittest.TestCase):
 
     def test_current_search_progress_and_failed_attempt_history_survive_retry(self):
         state = self.analyze()
-        board_progress, comparison_progress = [], []
+        board_progress, compact_progress, comparison_progress = [], [], []
         board_jobs = self.a.board_jobs
         actual_match = recruiter.match
 
         def observed_board(platform, board):
             board_progress.append(recruiter.read(self.a)['progress'])
+            compact_progress.append(recruiter.read(self.a, status_only=True))
             return board_jobs(platform, board)
 
         def fail_second_comparison(a, state, job):
@@ -224,9 +549,11 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(failed['stage'], 'failed')
         self.assertEqual(board_progress[0]['stage'], 'Checking employer boards')
         self.assertEqual(board_progress[0]['source'], 'fictional-clinic')
+        self.assertEqual(compact_progress[0], dict(version=failed['version'], stage='discovering',
+                                                    progress=board_progress[0], stop_requested=False))
         self.assertGreaterEqual(len(comparison_progress), 2)
         self.assertTrue(all(p['stage'] == 'Comparing jobs with your experience' for p in comparison_progress))
-        self.assertTrue(all(p['total'] == 6 for p in comparison_progress))
+        self.assertTrue(all(p['total'] == 5 for p in comparison_progress))
         self.assertEqual(failed['progress']['completed'], len(failed['matches']))
 
         completed = self.search()
@@ -236,7 +563,7 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(failed_events[-1]['progress']['reason'], 'The AI service timed out.')
         self.assertEqual(events[-1]['operation'], completed['version'])
         self.assertEqual(events[-1]['progress']['stage'], 'Search complete')
-        self.assertEqual(events[-1]['progress']['completed'], 6)
+        self.assertEqual(events[-1]['progress']['completed'], 5)
         self.assertNotIn(MARA, json.dumps(events))
         earlier = recruiter.activity(self.a, before=failed_events[-1]['id'])['entries']
         self.assertEqual(earlier[0]['id'], failed_events[-2]['id'])
@@ -390,6 +717,8 @@ class RecruiterTests(unittest.TestCase):
                 self.a.init()
                 current = recruiter.read(self.a)
                 self.assertEqual(current['stage'], expected)
+                self.assertEqual(recruiter.read(self.a, status_only=True), dict(
+                    version=current['version'], stage=expected, progress=current['progress']))
                 self.assertEqual(self.a.search_status()['run']['state'], expected)
                 self.assertEqual(current['matches'], previous['matches'])
                 self.assertNotIn('previous_matches', current)
@@ -402,26 +731,28 @@ class RecruiterTests(unittest.TestCase):
                    salary_min=55000, salary_max=65000, salary_text='USD 55,000–65,000 per year')
         with self.a.connect() as c:
             low_id, _ = self.a.upsert(c, low)
-            for index in range(12):
-                self.a.upsert(c, dict(low, requisition=f'junior-{index}',
-                                     url=f'https://jobs.lever.co/fictional-clinic/junior-{index}'))
+            for index in range(26):
+                self.a.upsert(c, dict(job, title='Fictional Office Analyst', description='Handle office inventory.',
+                                     requisition=f'office-{index}',
+                                     url=f'https://jobs.lever.co/fictional-clinic/office-{index}'))
 
         def no_new_jobs(*args, **kwargs):
             self.a.LOCK.release()
             return {'state': 'success'}
 
-        with patch.object(self.a, 'run_pipeline', side_effect=no_new_jobs):
+        with patch.object(self.a, 'run_pipeline', side_effect=no_new_jobs), \
+             patch.object(recruiter.prototype, 'unlimited_personal_testing', return_value=False):
             result = self.search()
+            state = recruiter.read(self.a)
+            self.assertEqual(recruiter.start(self.a, dict(action='search', version=state['version'],
+                preferences=dict(PREFS, flexible=True)))[0], 202)
+            flexible = {match['job_id']: match for match in self.wait()['matches']}
         self.assertGreater(result['deferred'], 0)
         by_id = {match['job_id']: match for match in result['matches']}
         self.assertEqual(by_id[job['id']]['group'], 'close')
         self.assertTrue(by_id[job['id']]['published_pay_target_match'])
-        self.assertEqual(by_id[low_id]['group'], 'avoid')
-        self.assertFalse(by_id[low_id]['published_pay_target_match'])
-        edited = recruiter.read(self.a, True)
-        edited['preferences']['flexible'] = True
-        recruiter.write(self.a, edited)
-        flexible = {match['job_id']: match for match in recruiter.read(self.a)['matches']}
+        self.assertNotIn(low_id, by_id)
+        self.assertIn(low_id, {record['id'] for record in self.a.records()})
         self.assertEqual(flexible[low_id]['group'], 'close')
         self.assertFalse(flexible[low_id]['published_pay_target_match'])
 
@@ -454,6 +785,49 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(connect.call_count, 1)
         self.assertEqual(status['stage'], 'matching')
         self.assertFalse(status['stop_requested'])
+
+    def test_compact_status_reads_one_query_without_resumes_or_run_reports(self):
+        initial = recruiter.read(self.a, status_only=True)
+        self.assertEqual(initial, dict(version=0, stage='empty', progress=None))
+        state = recruiter.read(self.a, private=True)
+        state.update(version=3, stage='discovering', resume=MARA)
+        recruiter.write(self.a, state)
+        progress = {'stage': 'Checking employer boards', 'completed': 1, 'total': 3}
+        with self.a.connect() as connection:
+            recruiter.update_discovery_progress(connection, state['version'], progress)
+            recruiter.update_discovery_progress(connection, state['version'] - 1, {'stage': 'Older search'})
+        with self.assertRaisesRegex(RuntimeError, 'rollback marker'):
+            with self.a.connect() as connection:
+                recruiter.update_discovery_progress(connection, state['version'], {'stage': 'Uncommitted'})
+                raise RuntimeError('rollback marker')
+        self.assertEqual(recruiter.stop(self.a, {'version': state['version']})[0], 202)
+
+        statements = []
+        original_connect = self.a.connect
+
+        def traced_connect():
+            connection = original_connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        with patch.object(self.a, 'connect', side_effect=traced_connect):
+            status = recruiter.read(self.a, status_only=True)
+        self.assertEqual(status, dict(version=3, stage='discovering', progress=progress, stop_requested=True))
+        self.assertEqual(len(statements), 1)
+        self.assertIn('recruiter_status', statements[0])
+        self.assertNotIn('recruiter_state', statements[0])
+        self.assertNotIn('runs', statements[0])
+
+    def test_startup_backfills_compact_status_without_changing_existing_recruiter_state(self):
+        self.analyze()
+        self.search()
+        state = recruiter.read(self.a, private=True)
+        with self.a.connect() as connection:
+            connection.execute('DROP TABLE recruiter_status')
+        self.a.init()
+        self.assertEqual(recruiter.read(self.a, private=True), state)
+        self.assertEqual(recruiter.read(self.a, status_only=True), {
+            key: state.get(key) for key in ('version', 'stage', 'progress')})
 
     def test_saved_match_refresh_reads_only_referenced_listings(self):
         self.analyze()
@@ -577,6 +951,110 @@ class RecruiterTests(unittest.TestCase):
         self.assertEqual(saved[director['id']]['group'], 'review')
         self.assertIn('Experience managing managers or team leads needs confirmation.', saved[director['id']]['checks'])
         self.assertIn('Leadership at the scale described by the employer needs confirmation.', saved[director['id']]['checks'])
+        self.assertIn({
+            'reason': 'Experience managing managers or team leads needs confirmation.',
+            'what_to_check': 'Check whether your résumé documents responsibility for managing managers or team leads.',
+        }, saved[director['id']]['confirmation_reasons'])
+
+    def test_confirmation_explains_the_posting_blocker_without_repeating_passed_checks(self):
+        self.analyze(); self.search()
+        state = recruiter.read(self.a, private=True)
+        job = next(job for job in self.a.records() if job['requisition'] == 'billing')
+        stale = dict(job, posting_verified=False)
+        with patch.object(recruiter, 'ai', side_effect=AssertionError('Cached matches need no AI call')):
+            match = recruiter.match(self.a, state, stale)
+        self.assertEqual(match['group'], 'review')
+        self.assertIn('The exact employer posting needs verification.', match['checks'])
+        self.assertGreater(len(match['checks']), 1)
+        self.assertEqual(match['confirmation_reasons'], [{
+            'reason': 'The exact employer posting needs verification.',
+            'what_to_check': 'Open the employer’s careers page and confirm the same job is still open and accepting applications.',
+        }])
+
+    def test_required_confirmation_uses_the_posting_and_is_rebuilt_from_cache(self):
+        self.analyze(); self.search()
+        state = recruiter.read(self.a, private=True)
+        job = next(job for job in self.a.records() if job['requisition'] == 'billing')
+        job['description'] = ('Review denial queues and coach billing specialists.\n'
+                              'Required qualifications: An active medical coding license.\n'
+                              'Preferred qualifications: A healthcare analytics certificate.')
+        with self.a.connect() as connection:
+            self.a.upsert(connection, job)
+        response = dict(
+            group='close', reason='Billing and coaching duties are documented.', emphasis=[],
+            resume_evidence='Reviewed denial queues',
+            job_evidence='Review denial queues and coach billing specialists.',
+            gaps=[
+                {'detail': 'Active medical coding license is unverified.', 'kind': 'preferred',
+                 'employer_quote': 'An active medical coding license.'},
+                {'detail': 'Healthcare analytics certificate is unverified.', 'kind': 'required',
+                 'employer_quote': 'A healthcare analytics certificate.'},
+                {'detail': 'PMP certification is unverified.', 'kind': 'required', 'employer_quote': ''},
+            ],
+        )
+        with patch.object(recruiter, 'ai', return_value=response):
+            match = recruiter.match(self.a, state, job)
+        self.assertEqual(match['group'], 'review')
+        expected = [{
+            'reason': 'The employer’s requirement needs confirmation. “An active medical coding license.”',
+            'what_to_check': 'Check whether your résumé documents this qualification or an alternative the employer accepts.',
+        }]
+        self.assertEqual(match['confirmation_reasons'], expected)
+        self.assertEqual([gap['kind'] for gap in match['gap_evidence']], ['required', 'preferred', 'unclear'])
+        match.pop('confirmation_reasons')
+        state['matches'] = [match]
+        recruiter.write(self.a, state)
+        with patch.object(recruiter, 'ai', side_effect=AssertionError('Refreshing matches needs no AI call')):
+            refreshed = recruiter.read(self.a)['matches'][0]
+        self.assertEqual(refreshed['confirmation_reasons'], expected)
+
+    def test_cached_quote_lists_remove_only_reverified_evidence_checks(self):
+        self.analyze()
+        self.search()
+        state = recruiter.read(self.a, private=True)
+        job = next(j for j in self.a.records() if j['requisition'] == 'billing')
+        job['description'] = 'Review denial queues. Follow privacy rules. Coach billing specialists.'
+        with self.a.connect() as c:
+            self.a.upsert(c, job)
+
+        response = dict(group='close', reason='Documented billing and coaching work.', gaps=[], emphasis=[],
+                        resume_evidence='"15 years in medical billing and revenue cycle."\n"Reviewed denial queues"',
+                        job_evidence='"Review denial queues."\n"Coach billing specialists."')
+        with patch.object(recruiter, 'ai', return_value=response):
+            match = recruiter.match(self.a, state, job)
+        self.assertEqual(match['group'], 'close')
+
+        stale_checks = list(recruiter.COMPARISON_EVIDENCE_ERRORS.values())
+        old_match = dict(match, group='review', fit_group='review', resume_evidence='', job_evidence='',
+                         evidence_checks=stale_checks)
+        state['matches'] = [old_match]
+        with patch.object(recruiter, 'ai', side_effect=AssertionError('Unexpected paid comparison')):
+            recruiter.write(self.a, state)
+            restored = recruiter.read(self.a)['matches'][0]
+            self.assertEqual(restored['group'], 'close')
+            self.assertEqual(restored['evidence_checks'], [])
+            self.assertEqual(restored['confirmation_reasons'], [])
+            for field in recruiter.COMPARISON_EVIDENCE_ERRORS:
+                self.assertEqual(restored[field], response[field])
+
+            old_match['evidence_checks'] = stale_checks + ['An unrelated evidence check.']
+            recruiter.write(self.a, state)
+            restored = recruiter.read(self.a)['matches'][0]
+            self.assertEqual(restored['group'], 'review')
+            self.assertEqual(restored['evidence_checks'], ['An unrelated evidence check.'])
+
+            key, _, _ = recruiter.match_cache_keys(state['strategy'], recruiter.match_facts(job),
+                                                    self.a.config()['ai_model'], state['resume'])
+            with self.a.connect() as c:
+                c.execute('UPDATE recruiter_match_cache SET value=? WHERE fingerprint=?',
+                          (json.dumps(dict(response, job_evidence='"Review denial queues."\n"Fabricated duty."')), key))
+            old_match['evidence_checks'] = stale_checks
+            recruiter.write(self.a, state)
+            restored = recruiter.read(self.a)['matches'][0]
+            self.assertEqual(restored['group'], 'review')
+            self.assertEqual(restored['resume_evidence'], response['resume_evidence'])
+            self.assertEqual(restored['job_evidence'], '')
+            self.assertEqual(restored['evidence_checks'], [recruiter.COMPARISON_EVIDENCE_ERRORS['job_evidence']])
 
     def test_search_rechecks_the_employer_posting_for_a_strong_match(self):
         self.analyze()
@@ -888,7 +1366,7 @@ class RecruiterTests(unittest.TestCase):
             return result
         with patch.object(recruiter, 'ai', side_effect=one_bad_quote):
             state = self.search()
-        self.assertEqual(len(state['matches']), 6)
+        self.assertEqual(len(state['matches']), 5)
         candidate = next(m for m in state['matches'] if m['title'] == 'Revenue Cycle Supervisor')
         self.assertEqual(candidate['group'], 'review')
         self.assertEqual(candidate['resume_evidence'], '')
@@ -990,13 +1468,16 @@ class RecruiterTests(unittest.TestCase):
     def test_personal_override_compares_more_than_twelve(self):
         self.analyze()
         state = recruiter.read(self.a)
-        jobs = [dict(id=i, updated=str(i), availability='Open') for i in range(15)]
+        with self.a.connect() as c:
+            for index in range(15):
+                self.a.upsert(c, dict(url=f'https://example.com/fictional/{index}', title='Fictional Analyst',
+                                    employer='Fictional Employer', location='Portland, Oregon',
+                                    workplace_type='onsite', availability='Open'))
         def finish_search(*args, **kwargs):
             self.a.LOCK.release()
             return {'state': 'success'}
         with patch.dict('os.environ', {'JOBS_PERSONAL_UNLIMITED_AI': '1'}), \
              patch.object(self.a, 'run_pipeline', side_effect=finish_search), \
-             patch.object(self.a, 'records', return_value=jobs), \
              patch.object(recruiter, 'match', side_effect=lambda a, s, j: {'job_id': j['id'], 'group': 'avoid'}):
             self.assertEqual(recruiter.start(self.a, dict(action='search', version=state['version'], preferences=PREFS))[0], 202)
             until = time.monotonic() + 10
@@ -1029,6 +1510,200 @@ class RecruiterTests(unittest.TestCase):
         for change in ({'remote_region': ''}, {'commute': ''}, {'modes': []}, {'salary': True}, {'currency': 'FAKE'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 recruiter.preferences({'preferences': dict(PREFS, **change)})
+
+    def test_optional_position_levels_and_maximum_pay_preferences(self):
+        self.assertEqual(recruiter.preferences({'preferences': PREFS}), PREFS)
+        for change in (
+            {'levels': [], 'salary_ceiling': None},
+            {'levels': ['entry', 'mid', 'senior', 'management', 'executive'], 'salary_ceiling': 90000},
+            {'salary_ceiling': PREFS['salary']},
+            {'period': 'hour', 'salary': 25, 'salary_ceiling': 40},
+        ):
+            with self.subTest(change=change):
+                saved = dict(PREFS, **change)
+                self.assertEqual(recruiter.preferences({'preferences': saved}), saved)
+        for change in (
+            {'levels': 'entry'}, {'levels': [None]}, {'levels': [[]]}, {'levels': ['associate']},
+            {'salary_ceiling': 0}, {'salary_ceiling': -1}, {'salary_ceiling': True},
+            {'salary_ceiling': 90_000.0}, {'salary_ceiling': '90000'},
+            {'salary_ceiling': PREFS['salary'] - 1, 'flexible': True},
+        ):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                recruiter.preferences({'preferences': dict(PREFS, **change)})
+
+    def test_position_level_uses_explicit_job_evidence_and_keeps_ambiguity_eligible(self):
+        selected = dict(PREFS, levels=['entry', 'mid'])
+        examples = (
+            ('Junior Help Desk Technician', '', 'entry'),
+            ('Billing Analyst', 'Experience level: Mid-level', 'mid'),
+            ('Sr. Billing Analyst', '', 'senior'),
+            ('Director of Customer Support', '', 'management'),
+            ('Vice President, Billing Operations', '', 'executive'),
+            ('Senior Project Manager', 'Manage customer deadlines.', 'senior'),
+            ('Project Manager', 'You will have seven direct reports.', 'management'),
+            ('Account Manager', 'You will have no direct reports.', None),
+            ('Project Manager', 'Manage timelines, vendors, and deliverables.', None),
+            ('Billing Analyst II', 'Reports to the senior billing director.', None),
+            ('Senior Living Account Manager', 'Manage accounts for retirement homes.', None),
+            ('Junior Analyst', 'Seniority: Senior', None),
+        )
+        for title, description, level in examples:
+            with self.subTest(title=title, description=description):
+                job = dict(title=title, description=description)
+                self.assertEqual(recruiter.position_level(self.a, job), level)
+                checks = recruiter.comparison_guardrails(self.a, job, selected)
+                expected = 'avoid' if level and level not in selected['levels'] else 'close'
+                self.assertEqual(recruiter.checked_group('close', checks), expected)
+                if level is None:
+                    self.assertTrue(any('did not clearly indicate' in reason for _, reason in checks))
+
+    def test_maximum_pay_uses_comparable_employer_minimum_even_when_flexible(self):
+        selected = dict(PREFS, salary_ceiling=90000, flexible=True)
+        job = dict(title='Billing Analyst', salary_min=92000, salary_max=105000,
+                   salary_currency='USD', salary_period='year', salary_type='base')
+        for change, expected in (
+            ({}, 'avoid'), ({'salary_max': None}, 'avoid'),
+            ({'salary_min': 90000}, 'close'), ({'salary_min': 80000}, 'close'),
+            ({'salary_min': None}, 'close'), ({'salary_currency': 'CAD'}, 'close'),
+            ({'salary_period': 'hour'}, 'close'), ({'salary_type': 'total'}, 'close'),
+            ({'salary_min': None, 'salary_max': None, 'market_pay': {'salary_min': 95000}}, 'close'),
+        ):
+            with self.subTest(change=change):
+                checks = recruiter.comparison_guardrails(self.a, dict(job, **change), selected)
+                self.assertEqual(recruiter.checked_group('close', checks), expected)
+        hourly = dict(PREFS, salary=28, period='hour', salary_ceiling=40)
+        self.assertIs(recruiter.published_pay_ceiling_match(
+            self.a, dict(job, salary_min=42, salary_max=47, salary_period='hour'), hourly), False)
+        self.assertIs(recruiter.published_pay_ceiling_match(
+            self.a, dict(job, salary_min=40, salary_max=47, salary_period='hour'), hourly), True)
+        self.assertIsNone(recruiter.published_pay_ceiling_match(
+            self.a, dict(job, salary_min=None, salary_max=47, salary_period='hour'), hourly))
+        self.assertIsNone(recruiter.published_pay_ceiling_match(
+            self.a, dict(job, salary_min=42, salary_max=47, salary_period='hour'), PREFS))
+
+    def test_ranking_prioritizes_eligible_jobs_without_dropping_guardrail_misses(self):
+        posting = dict(title='Billing Analyst', employer='Fictional Employer', description='Review denial queues.',
+                       location_eligibility='Eligible', category='Billing', matched_duty_count=1,
+                       score=80, salary_min=80000, salary_max=100000, salary_currency='USD',
+                       salary_period='year', salary_type='base')
+        senior = dict(posting, id=1, title='Senior Billing Analyst', score=100)
+        above_maximum = dict(posting, id=2, salary_min=95000, score=100)
+        eligible = dict(posting, id=3, title='Mid-level Billing Analyst')
+        unknown_level = dict(posting, id='fictional-opening-hash', title='Billing Account Manager')
+        cfg = dict(categories=['Billing Analyst'], salary_floor=PREFS['salary'],
+                   recruiter_pay=dict(PREFS, levels=['mid'], salary_ceiling=90000))
+        ordered = recruiter.rank_openings(self.a, [senior, above_maximum, eligible, unknown_level], cfg)
+        self.assertEqual({job['id'] for job in ordered[:2]}, {3, 'fictional-opening-hash'})
+        self.assertEqual({job['id'] for job in ordered[2:]}, {1, 2})
+
+
+    def test_ranking_varies_target_roles_employers_and_arrangements_at_similar_fit(self):
+        common = dict(description='Review denial queues.', category='Billing', location_eligibility='Eligible',
+                      matched_duty_count=2, score=75, salary_min=80000, salary_max=90000,
+                      salary_currency='USD', salary_period='year', salary_type='base', workplace_type='remote')
+        postings = [dict(common, id=1, title='Revenue Cycle Denials Analyst', employer='Fictional Health', posted='2026-10-31'),
+                    dict(common, id=2, title='Healthcare Revenue Cycle Analyst', employer='Fictional Clinic', posted='2026-10-30'),
+                    dict(common, id=3, title='Patient Accounts Analyst', employer='Fictional Health', posted='2026-10-29'),
+                    dict(common, id=4, title='Claims Operations Analyst', employer='Fictional Insurer', posted='2026-10-28'),
+                    dict(common, id=5, title='Medical Billing Analyst', employer='Fictional Local', posted='2026-10-27',
+                         workplace_type='hybrid'),
+                    dict(common, id=6, title='Payment Processing Analyst', employer='Fictional Other', posted='2026-10-31',
+                         workplace_type='onsite', matched_duty_count=1, score=100)]
+        cfg = dict(salary_floor=PREFS['salary'], recruiter_pay=PREFS,
+                   categories=['Revenue Cycle Analyst', 'Patient Accounts Analyst', 'Claims Operations Analyst',
+                               'Medical Billing Analyst', 'Payment Processing Analyst'])
+        ranked = recruiter.rank_openings(self.a, postings, cfg)
+        self.assertEqual([job['id'] for job in ranked[:3]], [1, 5, 4])
+        self.assertEqual(ranked[-1]['id'], 6)
+
+    def test_comparison_queue_skips_known_misses_and_keeps_them_browsable(self):
+        self.analyze()
+        state = recruiter.read(self.a, private=True)
+        state['preferences'] = dict(PREFS, modes=['remote', 'onsite'], levels=['mid'], salary_ceiling=100000)
+        base = dict(title='Revenue Cycle Supervisor', employer='Fictional Clinic', location='Remote - United States',
+                    workplace_type='remote', availability='Open', description='Review denial queues and coach billing staff.')
+        comparable = dict(salary_currency='USD', salary_period='year', salary_type='base')
+        changes = {
+            'eligible': {},
+            'unknown': dict(workplace_type=None, location='Portland, Oregon'),
+            'conflict': dict(workplace_type='onsite'),
+            'wrong-city': dict(workplace_type='onsite', location='Denver, Colorado'),
+            'wrong-arrangement': dict(workplace_type='hybrid', location='Portland, Oregon'),
+            'wrong-state': dict(location='Remote - United States, excluding Oregon'),
+            'wrong-country': dict(location='Remote - Canada'),
+            'low-pay': dict(comparable, salary_min=40000, salary_max=50000),
+            'low-pay-text': dict(description='Review denial queues. Annual base salary: $40,000 to $50,000.'),
+            'high-pay': dict(comparable, salary_min=110000, salary_max=150000),
+            'wrong-level': dict(title='Senior Revenue Cycle Supervisor'),
+            'closed': dict(availability='Closed'),
+        }
+        recruiter.recruiter_openings.capture(self.a, [dict(base, **fields, url=f'https://example.com/{name}')
+                                                    for name, fields in changes.items()], 1)
+
+        def queued():
+            cfg = recruiter.search_config(self.a, state)
+            queue, deferred = recruiter.comparison_queue(self.a, state, cfg, 1)
+            self.assertEqual(deferred, 0)
+            return {job['url'].rsplit('/', 1)[-1]: job['location_eligibility'] for job in queue}
+
+        strict = queued()
+        self.assertEqual(strict, {'eligible': 'Eligible', 'unknown': 'Review', 'conflict': 'Review'})
+        state['preferences']['flexible'] = True
+        self.assertEqual(set(queued()), {*strict, 'low-pay', 'low-pay-text'})
+        browsable = recruiter.recruiter_openings.page(self.a)['openings']
+        self.assertEqual({job['posting_url'].rsplit('/', 1)[-1] for job in browsable}, set(changes))
+
+    def test_comparison_queue_expands_fresh_coverage_with_fixed_caps(self):
+        self.analyze()
+        state = dict(recruiter.read(self.a, private=True), preferences=PREFS)
+        cfg = recruiter.search_config(self.a, state)
+        base = dict(title='Revenue Cycle Supervisor', employer='Fictional Clinic', location='Remote - United States',
+                    workplace_type='remote', availability='Open', description='Review denial queues and coach billing staff.')
+        recruiter.recruiter_openings.capture(self.a, [dict(base, url=f'https://example.com/{index}')
+                                                    for index in range(120)], 1)
+        for personal, maximum in ((False, 24), (True, 100)):
+            with self.subTest(personal=personal), \
+                    patch.object(recruiter.prototype, 'unlimited_personal_testing', return_value=personal), \
+                    patch.object(recruiter, 'ai', side_effect=AssertionError('Queue cannot call the provider')):
+                selected, deferred = recruiter.comparison_queue(self.a, state, cfg, 1)
+            self.assertEqual(len(selected), maximum)
+            self.assertEqual(deferred, 120 - maximum)
+
+    def test_standard_comparison_keeps_cached_jobs_after_daily_headroom_is_used(self):
+        self.analyze()
+        state = dict(recruiter.read(self.a, private=True), preferences=PREFS)
+        cfg = dict(recruiter.search_config(self.a, state), ai_enabled=True, ai_daily_limit=3)
+        base = dict(title='Revenue Cycle Supervisor', employer='Fictional Clinic', location='Remote - United States',
+                    workplace_type='remote', availability='Open', description='Review denial queues and coach billing staff.')
+        first = dict(base, url='https://example.com/first', posted='2026-10-31')
+        second = dict(base, description='Review denial queues and record claims.', posted='2026-10-30',
+                      url='https://example.com/second')
+        cached = dict(base, description='Review denial queues and track aged claims.', posted='2026-10-29',
+                      url='https://example.com/cached')
+        duplicate = dict(first, url='https://example.com/duplicate', posted='2026-10-28')
+        recruiter.recruiter_openings.capture(self.a, [first, second, cached, duplicate], 1)
+        previous_key = recruiter.match_cache_keys(state['strategy'], recruiter.match_facts(cached),
+                                                  cfg['ai_model'], state['resume'])[1]
+        comparison = dict(group='close', reason='Fictional comparison.', resume_evidence='', job_evidence='',
+                          gaps=[], emphasis=[])
+        with self.a.connect() as c:
+            c.execute('INSERT INTO ai_usage VALUES(?,?)', (self.a.now()[:10], 2))
+            c.execute('INSERT INTO recruiter_match_cache VALUES(?,?)', (previous_key, json.dumps(comparison)))
+        with patch.object(recruiter.prototype, 'unlimited_personal_testing', return_value=False):
+            selected, deferred = recruiter.comparison_queue(self.a, state, cfg, 1)
+        self.assertEqual([job['url'] for job in selected], [first['url'], cached['url'], duplicate['url']])
+        self.assertEqual(deferred, 1)
+
+    def test_search_explains_an_exhausted_allowance_and_keeps_the_previous_shortlist(self):
+        self.analyze()
+        first = self.search()
+        with patch.object(recruiter, 'comparison_queue', return_value=([], 2)), \
+                patch.object(recruiter, 'ai', side_effect=AssertionError('Exhausted daily allowance')):
+            retry = self.search()
+        self.assertEqual(retry['progress']['stage'], 'Daily comparison limit reached')
+        self.assertEqual(retry['deferred'], 2)
+        self.assertEqual([recruiter.match_reference(item) for item in retry['matches']],
+                         [recruiter.match_reference(item) for item in first['matches']])
 
 
 if __name__ == '__main__': unittest.main()

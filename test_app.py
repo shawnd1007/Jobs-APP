@@ -1,4 +1,5 @@
 """Regression tests with fictional listings, profiles, and tracking records."""
+from contextlib import contextmanager
 import json
 import tempfile
 import threading
@@ -60,6 +61,110 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(cached['jobs'], snapshot['jobs'])
   for job in snapshot['jobs']:
    self.assertEqual(job['review_blockers'], app.review_blockers(job, app.config()))
+ def test_dashboard_poll_skips_unchanged_and_only_reads_edited_job(self):
+  first = app.dashboard_changes(None)
+  jobs = first['dashboard']['jobs']
+  job_id = jobs[6]['id']
+  self.assertEqual([job['id'] for job in jobs], sorted(job['id'] for job in jobs))
+  with patch.object(app, 'snapshot', side_effect=AssertionError('full dashboard read')), \
+       patch.object(app, 'records', wraps=app.records) as records:
+   self.assertEqual(app.dashboard_changes(first['revision']), {'revision': first['revision']})
+   records.assert_not_called()
+   with app.connect() as c:
+    c.execute("UPDATE tracking SET notes='Uncommitted fictional note' WHERE job_id=?", (job_id,))
+    c.rollback()
+   self.assertEqual(app.dashboard_changes(first['revision']), {'revision': first['revision']})
+   with app.connect() as c:
+    c.execute("UPDATE tracking SET notes='Fictional cross-device note' WHERE job_id=?", (job_id,))
+    c.execute('INSERT INTO job_interests VALUES(?,?,?,?)', (job_id, 'saved', 1, app.now()))
+   update = app.dashboard_changes(first['revision'])
+   self.assertEqual([job['id'] for job in update['jobs']], [job_id])
+   self.assertEqual(update['jobs'][0]['notes'], 'Fictional cross-device note')
+   self.assertEqual(update['jobs'][0]['interest']['state'], 'saved')
+   self.assertEqual(update['removed'], [])
+   records.assert_called_once()
+   self.assertEqual(records.call_args.kwargs['job_ids'], [job_id])
+   self.assertEqual(app.dashboard_changes(update['revision']), {'revision': update['revision']})
+  with app.connect() as c:
+   app.recruiter.store_state(c, dict(version=1, stage='complete', preferences={'salary': 80000}))
+  self.assertIn('dashboard', app.dashboard_changes(update['revision']))
+  current = app.dashboard_changes(None)
+  with app.connect() as c:
+   app.recruiter.store_state(c, dict(version=2, stage='matching', preferences={'salary': 80000}))
+  self.assertEqual(app.dashboard_changes(current['revision']), {'revision': current['revision']})
+  self.assertIn('dashboard', app.dashboard_changes('invalid'))
+
+ def test_dashboard_progress_and_listing_refresh_skip_full_job_reads(self):
+  first = app.dashboard_changes(None, include_metadata=True)
+  legacy = app.dashboard_changes(None)
+  job_id = first['dashboard']['jobs'][0]['id']
+  with patch.object(app, 'snapshot', side_effect=AssertionError('full dashboard read')), \
+       patch.object(app, 'records', wraps=app.records) as records:
+   app.SEARCH_ACTIVE.set()
+   try:
+    started = app.dashboard_changes(first['revision'], include_metadata=True)
+    self.assertEqual(started['metadata'], {'running': True})
+    with app.connect() as c:
+     run_id = c.execute('INSERT INTO runs(started,state,report) VALUES(?,?,?) RETURNING id',
+                        (app.now(), 'running', '{"progress":{"stage":"Checking fictional board"}}')).fetchone()[0]
+    progress = app.dashboard_changes(started['revision'], include_metadata=True)
+    self.assertEqual(progress['metadata']['runs'][0]['report']['progress']['stage'], 'Checking fictional board')
+    self.assertNotIn('jobs', progress)
+    records.assert_not_called()
+    with app.connect() as c:
+     c.execute("UPDATE runs SET state='success' WHERE id=?", (run_id,))
+     c.execute("UPDATE jobs SET listing=json_set(listing,'$.title','Refreshed fictional title') WHERE id=?", (job_id,))
+     c.execute("UPDATE tracking SET notes='Kept fictional application note' WHERE job_id=?", (job_id,))
+   finally:
+    app.SEARCH_ACTIVE.clear()
+   updated = app.dashboard_changes(progress['revision'], include_metadata=True)
+   self.assertFalse(updated['metadata']['running'])
+   self.assertEqual(updated['metadata']['runs'][0]['state'], 'success')
+   self.assertEqual([job['id'] for job in updated['jobs']], [job_id])
+   self.assertEqual(updated['jobs'][0]['title'], 'Refreshed fictional title')
+   self.assertEqual(updated['jobs'][0]['notes'], 'Kept fictional application note')
+   records.assert_called_once()
+   self.assertEqual(records.call_args.kwargs['job_ids'], [job_id])
+   self.assertEqual(app.dashboard_changes(updated['revision'], include_metadata=True),
+                    {'revision': updated['revision']})
+  self.assertEqual(app.dashboard_changes(legacy['revision'])['dashboard']['runs'][0]['state'], 'success')
+
+ def test_dashboard_rebuilds_sources_and_linked_alerts_when_needed(self):
+  first = app.dashboard_changes(None, include_metadata=True)
+  job = next(j for j in first['dashboard']['jobs'] if not j.get('hidden_from_discovery'))
+  with app.connect() as c:
+   search_id = c.execute('INSERT INTO saved_searches(criteria) VALUES(?) RETURNING id',
+                         ('{"name":"Fictional search","enabled":false}',)).fetchone()[0]
+   c.execute('INSERT INTO match_alerts(search_id,job_id,created) VALUES(?,?,?)',
+             (search_id, job['id'], app.now()))
+  current = app.dashboard_changes(None, include_metadata=True)
+  with app.connect() as c:
+   c.execute("UPDATE tracking SET notes='Fictional alert job note' WHERE job_id=?", (job['id'],))
+  note_patch = app.dashboard_changes(current['revision'], include_metadata=True)
+  self.assertEqual(note_patch['jobs'][0]['notes'], 'Fictional alert job note')
+  with app.connect() as c:
+   c.execute("UPDATE jobs SET listing=json_set(listing,'$.availability','Closed') WHERE id=?", (job['id'],))
+  refreshed = app.dashboard_changes(note_patch['revision'], include_metadata=True)
+  self.assertEqual(refreshed['dashboard']['match_alerts'][0]['current_state'], 'closed')
+  with app.connect() as c:
+   c.execute("UPDATE jobs SET listing=json_set(listing,'$.url',?) WHERE id=?",
+             ('https://fictional.example/new-source', job['id']))
+  refreshed = app.dashboard_changes(refreshed['revision'], include_metadata=True)
+  self.assertIn('https://fictional.example/new-source', [source['source'] for source in refreshed['dashboard']['sources']])
+
+ def test_dashboard_poll_refreshes_at_posting_expiration(self):
+  stamp = app.dt.datetime(2040, 1, 2, 8, tzinfo=app.dt.timezone.utc)
+  deadline = stamp + app.dt.timedelta(seconds=10)
+  verified = deadline - app.dt.timedelta(hours=app.config()['verification_valid_hours'])
+  job = app.records()[0]
+  job.update(availability='Open', posting_verified=verified.isoformat())
+  with app.connect() as c:
+   app.upsert(c, job)
+  first = app.dashboard_changes(None, stamp=stamp)
+  self.assertTrue(first['dashboard']['jobs'][0]['posting_link_verified'])
+  updated = app.dashboard_changes(first['revision'], stamp=deadline + app.dt.timedelta(seconds=1))
+  self.assertFalse(updated['dashboard']['jobs'][0]['posting_link_verified'])
+
  def test_tracking_survives_closed_and_reopened(self):
   j=app.records()[0]
   note='Fictional fixture application note'
@@ -691,6 +796,73 @@ class PersistenceTests(unittest.TestCase):
    app.LOCK.acquire();report=app.run_pipeline()
   self.assertEqual(report['newly_closed'],1);self.assertEqual(len(app.records()),1)
   saved=app.records()[0];self.assertEqual(saved['availability'],'Closed');self.assertEqual(saved['status'],'Applied');self.assertEqual(saved['notes'],'Keep this history')
+
+ def test_board_hydration_and_posting_verification_release_database_connections(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(recruiter_discovery=True, categories=['Billing Analyst'], target_locations=[],
+             workplace_types=[], additional_boards={'smartrecruiters': ['fictional']})
+  detail_root = 'https://api.smartrecruiters.com/v1/companies/fictional/postings'
+  details = {
+      number: dict(id=number, name='Billing Analyst', company={'name': 'Fictional Employer'},
+                   location={'city': 'Austin', 'region': 'TX', 'country': 'US'},
+                   jobAd={'sections': {'jobDescription': {'text': 'Reconcile payments in Excel.'}}})
+      for number in ('101', '102')
+  }
+  retained = app.smartrecruiters_listing('fictional', details['101'])
+  with app.connect() as c:
+   retained_id, _ = app.upsert(c, dict(retained, posting_check_failed=True))
+  summaries = [app.smartrecruiters_listing('fictional', item, f'{detail_root}/{number}')
+               for number, item in details.items()]
+  connect = app.connect
+  checked_out = 0
+  network_calls = []
+
+  @contextmanager
+  def counted_connection():
+   nonlocal checked_out
+   with connect() as c:
+    checked_out += 1
+    try:
+     yield c
+    finally:
+     checked_out -= 1
+
+  def record_request(kind, url):
+   network_calls.append((kind, url.rsplit('/', 1)[-1], checked_out))
+   time.sleep(0.01)
+
+  def fetch_detail(url):
+   record_request('detail', url)
+   return details[url.rsplit('/', 1)[-1]]
+
+  def read_posting(request, **_kwargs):
+   url = request.full_url
+   record_request('posting', url)
+   if url == retained['url']:
+    with connect() as c:
+     c.execute("UPDATE tracking SET status='Applied', notes=? WHERE job_id=?",
+               ('Saved during the employer request.', retained_id))
+   return b'<h1>Billing Analyst</h1><form><input name="resume"></form>', url
+
+  def board_jobs(platform, board):
+   return summaries if (platform, board) == ('smartrecruiters', 'fictional') else []
+
+  with patch.object(app, 'connect', side_effect=counted_connection), \
+       patch.object(app, 'config', return_value=cfg), \
+       patch.object(app, 'board_jobs', side_effect=board_jobs), \
+       patch.object(app, 'fetch', side_effect=fetch_detail), \
+       patch.object(app, 'read_response', side_effect=read_posting):
+   app.LOCK.acquire()
+   report = app.run_pipeline()
+  self.assertEqual(report['state'], 'success')
+  self.assertEqual(report['reverified'], 1)
+  self.assertEqual(report['new_qualified'] + report['new_review'], 1)
+  self.assertEqual(network_calls, [('detail', '101', 0), ('posting', '101', 0),
+                                   ('detail', '102', 0), ('posting', '102', 0)])
+  refreshed = next(job for job in app.records() if job['id'] == retained_id)
+  self.assertTrue(refreshed.get('posting_verified'))
+  self.assertEqual((refreshed['status'], refreshed['notes']), ('Applied', 'Saved during the employer request.'))
+
  def test_provider_failure_retains_records(self):
   j,cfg=self.pipeline_fixture()
   with patch.object(app,'config',return_value=cfg),patch.object(app,'board_jobs',side_effect=TimeoutError('Test timeout')):
@@ -816,6 +988,74 @@ class PersistenceTests(unittest.TestCase):
    app.run_pipeline()
   saved = [job for job in app.records() if job['employer'] == 'Fictional']
   self.assertEqual([job['title'] for job in saved], ['Billing Analyst'])
+
+ def test_recruiter_diversifies_saved_candidates_and_keeps_the_rest_browsable(self):
+  original, cfg = self.pipeline_fixture()
+  cfg.update(recruiter_discovery=True, categories=['Technical Support Specialist', 'Cloud Support Specialist',
+             'Endpoint Operations Specialist'], preferred_skills=['Windows', 'Microsoft Intune', 'Azure'],
+             profile='Troubleshot Windows. Managed Microsoft Intune enrollment. Monitored Azure workloads.',
+             skill_groups=[], target_locations=[], workplace_types=['remote'], legacy_geography=False,
+             remote_hiring_locations=['Oregon, United States'], us_postings_only=True, salary_floor=70000,
+             max_new_candidates=3, additional_boards={'ashby': ['fictional']})
+
+  def posting(identifier, title, employer, duty, **extra):
+   job = dict(title=title, employer=employer, location='Remote - United States', workplace_type='remote',
+              availability='Open', description='Responsibilities:\n'+duty,
+              url=f'https://jobs.ashbyhq.com/fictional/{identifier}/application',
+              salary_min=80000, salary_max=90000, salary_currency='USD', salary_period='year', salary_type='base')
+   job.update(extra)
+   return job
+
+  repetition = [posting(f'desk-{index}', 'IT Support Technician', 'Fictional Systems',
+                        'Troubleshoot Windows devices.') for index in range(42)]
+  cloud = posting('cloud', 'Cloud Support Technician', 'Fictional Cloud', 'Monitor Azure workloads.')
+  endpoint = posting('endpoint', 'Endpoint Operations Analyst', 'Fictional Endpoint',
+                     'Maintain Microsoft Intune enrollment.')
+  executive = posting('director', 'Director of IT Support', 'Fictional Executive',
+                      'Manage Windows design. Maintain Microsoft Intune strategy.')
+  low_pay = posting('low-pay', 'Cloud Support Technician', 'Fictional Low Pay', 'Monitor Azure workloads.',
+                    salary_min=40000, salary_max=50000)
+  location = posting('restricted', 'Cloud Support Technician', 'Fictional Restricted', 'Monitor Azure workloads.',
+                     location='Remote - United States, excluding Oregon')
+  already_saved = posting('known', 'IT Support Technician', 'Fictional Known Support', 'Troubleshoot Windows devices.')
+  with app.connect() as c:
+   saved_id, _ = app.upsert(c, already_saved)
+   c.execute('UPDATE tracking SET notes=? WHERE job_id=?', ('Keep the workspace note', saved_id))
+  jobs = repetition + [cloud, endpoint, executive, low_pay, location]
+  rank = app.recruiter.rank_openings(app, [app.assess(dict(job), cfg) for job in jobs], cfg)
+  self.assertEqual({job['title'] for job in rank[:3]},
+                   {'IT Support Technician', 'Cloud Support Technician', 'Endpoint Operations Analyst'})
+  self.assertNotIn(executive['url'], {job['url'] for job in rank[:12]})
+  self.assertNotIn(low_pay['url'], {job['url'] for job in rank[:12]})
+
+  def boards(_, slug):
+   return jobs + [dict(already_saved, title='Platform Support Analyst')] if slug == 'fictional' else []
+
+  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', side_effect=boards), \
+       patch.object(app, 'verify_application', side_effect=lambda job, *_args, **_kwargs: job.update(posting_verified=app.now())):
+   app.LOCK.acquire()
+   report = app.run_pipeline()
+  self.assertEqual(report['pulled_openings'], 47)
+  self.assertEqual(report['deferred_candidates'], 43)
+  self.assertEqual({job['title'] for job in app.records() if job['id'] not in (original['id'], saved_id)},
+                   {'IT Support Technician', 'Cloud Support Technician', 'Endpoint Operations Analyst'})
+  first = app.recruiter_openings.page(app)
+  second = app.recruiter_openings.page(app, first['next_before'])
+  ids = [opening['id'] for opening in first['openings'] + second['openings']]
+  self.assertEqual(len(first['openings']), 40)
+  self.assertEqual(len(ids), len(set(ids)))
+  self.assertEqual(len(ids), 47)
+  self.assertIsNone(second['next_before'])
+  low_pay_id = app.recruiter_openings.opening_id(app, low_pay['url'])
+  self.assertIn(low_pay_id, ids)
+  self.assertNotIn(app.recruiter_openings.opening_id(app, location['url']), ids)
+  self.assertEqual([row['id'] for row in app.recruiter_openings.page(app, query='fictional low pay')['openings']],
+                   [low_pay_id])
+  self.assertEqual(app.recruiter_openings.page(app, query='%')['openings'], [])
+  self.assertEqual([row['id'] for row in app.recruiter_openings.page(app, query='platform support analyst')['openings']],
+                   [app.recruiter_openings.opening_id(app, already_saved['url'])])
+  self.assertEqual(next(job for job in app.records() if job['id'] == saved_id)['notes'], 'Keep the workspace note')
+  self.assertEqual(next(job for job in app.records() if job['id'] == original['id'])['notes'], 'Keep this history')
 
  def test_smartrecruiters_checks_saved_search_titles_before_general_postings(self):
   _, cfg = self.pipeline_fixture()
@@ -1159,4 +1399,80 @@ class PersistenceTests(unittest.TestCase):
   for decision in ('Hold','Dismissed','Pending'):
    self.assertEqual(app.save_review(j['id'],self.review_payload(j,decision))[0],200)
    j=app.records()[0];self.assertEqual(j['status'],'Needs Verification');self.assertEqual(j['review_decision'],decision)
+
+
+class TransferableSpreadsheetTests(unittest.TestCase):
+    def test_excel_work_supports_matching_google_sheets_duties_without_exact_points(self):
+        cfg = dict(categories=['Billing Analyst'], preferred_skills=['Excel reporting'], salary_floor=0,
+                   profile='Used Excel for general office tasks. Built monthly reports in Microsoft Excel.\n'
+                           'Reconciled vendor invoices using Excel.', legacy_geography=False)
+        description = ('Responsibilities:\nBuild weekly reports in Google Sheets.\n'
+                       'Build quarterly reports in Google Sheets.\nReconcile vendor invoices in Google Sheets.')
+        job = app.assess(dict(title='Billing Analyst', description=description), cfg)
+        self.assertEqual(job['matched_skills'], [])
+        self.assertEqual(job['score_breakdown']['selected_skills'], 0)
+        self.assertEqual(job['matched_duty_count'], 2)
+        self.assertEqual(job['duty_evidence'], [
+            dict(skill='Excel', posting_skill='Google Sheets', kind='transferable',
+                 duty='Build weekly reports in Google Sheets.'),
+            dict(skill='Excel', posting_skill='Google Sheets', kind='transferable',
+                 duty='Reconcile vendor invoices in Google Sheets.'),
+        ])
+        self.assertIn('Excel for comparable Google Sheets duties', job['explanation'])
+
+    def test_google_sheets_formulas_transfer_to_excel_and_exact_evidence_stays_exact(self):
+        duty = 'Maintain payment formulas in Excel.'
+        profile = 'Maintained payment formulas in Google Sheets.'
+        evidence = app.experience_evidence(duty, profile, ['Google Sheets', 'Excel'])
+        self.assertEqual(evidence, [dict(skill='Google Sheets', posting_skill='Excel', kind='transferable', duty=duty)])
+        evidence = app.experience_evidence(duty, profile + ' Maintained payment formulas in Excel.', ['Excel', 'Google Sheets'])
+        self.assertEqual(evidence, [dict(skill='Excel', duty=duty)])
+
+    def test_named_product_requirement_and_platform_specific_duties_stay_separate(self):
+        profile = 'Built monthly reports in Excel.'
+        duty = 'Build monthly reports in Google Sheets.'
+        required = duty + '\nMinimum Qualifications:\nProficiency with Google Sheets.'
+        self.assertEqual(app.experience_evidence(required, profile, ['Excel']), [])
+        either = duty + '\nMinimum Qualifications:\nExperience with either Excel / Google Sheets.'
+        self.assertEqual(len(app.experience_evidence(either, profile, ['Excel'])), 1)
+        automation = 'Build monthly reports in Google Sheets using Apps Script.'
+        self.assertEqual(app.experience_evidence(automation, profile, ['Excel']), [])
+        qualification = 'Qualifications:\nBuild monthly reports in Google Sheets.'
+        self.assertEqual(app.experience_evidence(qualification, profile, ['Excel']), [])
+
+    def test_actual_matching_resume_duty_is_required_for_transfer(self):
+        duty = 'Build monthly reports in Google Sheets.'
+        for profile in (
+            'Learning how to create reports in Excel.',
+            'Did not build reports in Excel.',
+            'Worked with Excel.',
+            'Built reports in Salesforce and used Excel to collect invoices.',
+            'Reconciled invoices in Excel.',
+            'Used feedback to excel at creating reports.',
+        ):
+            with self.subTest(profile=profile):
+                self.assertEqual(app.experience_evidence(duty, profile, ['Excel']), [])
+
+    def test_explicit_either_qualification_requires_documented_work_and_no_extra_requirement(self):
+        profile = 'Built monthly reports in Microsoft Excel.'
+        for requirement in ('Proficiency using Google Sheets or Microsoft Excel.',
+                            'Experience with either Excel / Google Sheets.',
+                            'Build reports using Excel or Google Sheets.'):
+            self.assertTrue(app.documented_spreadsheet_alternative(requirement, profile), requirement)
+        for requirement in ('Google Sheets required.', 'Excel / Google Sheets required.',
+                            'RN license and Excel or Google Sheets.',
+                            'SQL and Excel or Google Sheets experience.',
+                            'Experience with Excel or Google Sheets and Salesforce.',
+                            '3 years of Excel or Google Sheets are required.',
+                            'Advanced Excel or Google Sheets proficiency.',
+                            'Experience with Excel or Google Sheets Apps Script.',
+                            'Handle high-volume workloads with Excel or Google Sheets.',
+                            'Maintain pivot tables with Excel or Google Sheets.'):
+            self.assertFalse(app.documented_spreadsheet_alternative(requirement, profile), requirement)
+        self.assertFalse(app.documented_spreadsheet_alternative('Excel or Google Sheets.', 'Learning Excel reporting.'))
+        requirement = 'Experience wrangling data with Excel / Google Sheets, Looker or SQL.'
+        self.assertTrue(app.documented_spreadsheet_alternative(requirement, 'Cleaned datasets using Excel.'))
+        self.assertFalse(app.documented_spreadsheet_alternative(requirement, profile))
+
+
 if __name__=='__main__':unittest.main()
