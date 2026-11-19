@@ -17,6 +17,7 @@ function searchMessage(running,run){
  if(!run?.finished)return '';
  if(run.state==='failed')return 'The search couldn’t complete. Saved listings are still here. Try again.';
  if(run.state==='interrupted')return 'The last search was interrupted. Run it again to continue.';
+ if(run.state==='stopped')return 'Search stopped. Openings already saved are still here.';
  const found=(run.new_qualified??run.report?.new_qualified??0)+(run.new_review??run.report?.new_review??0);
  const saved=found===1?'1 new listing saved.':found+' new listings saved.';
  if(run.state==='partial')return 'Search finished with incomplete checks. '+saved+' Run again to retry.';
@@ -40,7 +41,7 @@ async function pollSearch(){
   }
  }catch{
   $('search-progress').textContent=searchRunning
-   ?'Can’t confirm the search status. The Mac may still be searching. Retrying…'
+   ?'Can’t confirm the search status. The search may still be running. Retrying…'
    :'Search finished. The dashboard hasn’t refreshed yet. Retrying…';
  }finally{searchPolling=false;}
 }

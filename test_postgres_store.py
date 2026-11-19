@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import postgres_store
 
+TEST_DSN = 'host=/tmp/jobs-pg-socket port=15432 dbname=postgres'
+
 
 class RowTests(unittest.TestCase):
     def test_timing_summary_is_bounded_and_uses_fixed_labels(self):
@@ -91,8 +93,7 @@ class RowTests(unittest.TestCase):
 class LocalPostgresTests(unittest.TestCase):
     def setUp(self):
         # Deliberately fixed to the temporary test cluster, never an app DSN.
-        self.connection = postgres_store.connect(
-            'host=/private/tmp/jobs-pg-socket port=15432 dbname=postgres')
+        self.connection = postgres_store.connect(TEST_DSN)
         self.schema = 'fictional_' + uuid4().hex
         self.connection.execute('CREATE SCHEMA ' + self.schema)
         self.connection.execute('SET LOCAL search_path TO ' + self.schema)
@@ -118,6 +119,24 @@ class LocalPostgresTests(unittest.TestCase):
         c.execute(statement, ('fictional', '{}', 'today', 'today'))
         with self.assertRaises(psycopg.errors.UniqueViolation):
             c.execute(statement, ('fictional', '{}', 'today', 'today'))
+
+    def test_workspace_pool_reuses_connection_and_rolls_back_failed_requests(self):
+        dsn = TEST_DSN + ' application_name=fictional_pool_check'
+        key = (dsn, 'fictional-ca')
+        with patch.object(postgres_store, 'connect_azure',
+                          side_effect=lambda conninfo, _: postgres_store.connect(conninfo)) as connect:
+            try:
+                with self.assertRaisesRegex(ValueError, 'fictional failure'):
+                    with postgres_store.workspace_connection(*key) as c:
+                        pid = c.execute('SELECT pg_backend_pid()').fetchone()[0]
+                        c.execute('CREATE TEMP TABLE fictional_failed_request (id INTEGER)')
+                        raise ValueError('fictional failure')
+                with postgres_store.workspace_connection(*key) as c:
+                    self.assertEqual(c.execute('SELECT pg_backend_pid()').fetchone()[0], pid)
+                    self.assertIsNone(c.execute("SELECT to_regclass('fictional_failed_request')").fetchone()[0])
+                connect.assert_called_once()
+            finally:
+                postgres_store._azure_pools.pop(key).close()
 
     def test_adapter_preserves_quoted_text_and_transaction_lock(self):
         c = postgres_store.Connection(self.connection)
@@ -182,7 +201,7 @@ class LocalPostgresTests(unittest.TestCase):
 
         self.connection.commit()  # commit only this randomly named, fictional test schema
         self.addCleanup(self.drop_committed_test_schema)
-        dsn = ('host=/private/tmp/jobs-pg-socket port=15432 dbname=postgres '
+        dsn = (TEST_DSN + ' '
                "options='-c search_path=" + self.schema + "'")
         def connect_test():
             return postgres_store.Connection(postgres_store.connect(dsn))
@@ -193,7 +212,7 @@ class LocalPostgresTests(unittest.TestCase):
             app.init()
             self.assertEqual(app.records(), [])
             job = {'url': 'https://jobs.lever.co/fictional/456', 'employer': 'Fictional Co',
-                   'title': 'Analyst', 'location': 'Remote', 'description': 'Fictional listing'}
+                   'title': 'Analyst', 'location': 'Remote — United States', 'description': 'Fictional listing'}
             with app.connect() as c:
                 job_id, _ = app.upsert(c, job)
                 c.execute('UPDATE tracking SET notes=? WHERE job_id=?', ('fictional note', job_id))
@@ -247,7 +266,7 @@ class LocalPostgresTests(unittest.TestCase):
         import app
         self.connection.commit()
         self.addCleanup(self.drop_committed_test_schema)
-        dsn = ('host=/private/tmp/jobs-pg-socket port=15432 dbname=postgres '
+        dsn = (TEST_DSN + ' '
                "options='-c search_path=" + self.schema + "'")
         barrier = threading.Barrier(2)
         outcomes, failures = [], []
@@ -282,7 +301,7 @@ class LocalPostgresTests(unittest.TestCase):
         self.connection.execute('CREATE SCHEMA ' + self.schema)
         self.connection.commit()
         self.addCleanup(self.drop_committed_test_schema)
-        dsn = ('host=/private/tmp/jobs-pg-socket port=15432 dbname=postgres '
+        dsn = (TEST_DSN + ' '
                "options='-c search_path=" + self.schema + "'")
         def connect_test():
             return postgres_store.Connection(postgres_store.connect(dsn))
@@ -303,7 +322,7 @@ class LocalPostgresTests(unittest.TestCase):
         from pathlib import Path
         self.connection.commit()
         self.addCleanup(self.drop_committed_test_schema)
-        dsn = ('host=/private/tmp/jobs-pg-socket port=15432 dbname=postgres '
+        dsn = (TEST_DSN + ' '
                "options='-c search_path=" + self.schema + "'")
         def connect_test():
             return postgres_store.Connection(postgres_store.connect(dsn))

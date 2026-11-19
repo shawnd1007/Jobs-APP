@@ -38,6 +38,7 @@ struct RecruiterState: Decodable {
         let title, employer, location, salary, group, reason, resumeEvidence, jobEvidence: String
         let gaps, emphasis, checks: [String]
         let marketPayAvailable, marketPayTargetMatch: Bool?
+        let publishedPayTargetMatch: Bool?
         var label: String {
             switch group {
             case "close": "Close match"
@@ -375,8 +376,7 @@ struct RecruiterHome: View {
             }.pickerStyle(.menu)
             Text("Choose your minimum base pay. Changing the period estimates a full-time year of 2,080 hours; check the amount.")
                 .font(.footnote).foregroundStyle(.secondary)
-            Text("Jobs compares market pay estimates with your target.")
-                .font(.footnote).foregroundStyle(.secondary)
+            Toggle("Consider jobs below this target", isOn: $preferences.flexible)
             Divider()
             Text("Where you work").font(.headline)
             mode("Remote", "remote")
@@ -464,6 +464,13 @@ struct RecruiterHome: View {
                     if match.marketPayTargetMatch == true {
                         Label("Market range reaches your pay target", systemImage: "checkmark.circle")
                             .font(.footnote.weight(.medium))
+                    } else if match.marketPayTargetMatch == false {
+                        Label("Market estimate is below your target", systemImage: "info.circle")
+                            .font(.footnote.weight(.medium))
+                    }
+                    if match.publishedPayTargetMatch == false {
+                        Label("Employer pay is below your target", systemImage: "info.circle")
+                            .font(.footnote.weight(.medium))
                     }
                     if selectedGroup != "avoid", match.marketPayAvailable == true {
                         Button("Market pay estimate", systemImage: "magnifyingglass") { researchingPay = match }
@@ -516,7 +523,7 @@ struct RecruiterHome: View {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         do {
             if polling, let current = state, let lastRecruiterLoad,
-               Date.now.timeIntervalSince(lastRecruiterLoad) < 45 {
+               current.busy || Date.now.timeIntervalSince(lastRecruiterLoad) < 45 {
                 let statusData = try await DashboardAPI.request("/api/recruiter", at: address,
                                                                query: [URLQueryItem(name: "status", value: "1")])
                 guard latestLoad == load, workspace.address == address,
@@ -576,13 +583,22 @@ struct RecruiterHome: View {
 
     @MainActor private func stopSearch() async {
         guard let version = state?.version else { return }
+        let address = workspace.address
         stoppingSearch = true
         defer { stoppingSearch = false }
         do {
             let body = try JSONSerialization.data(withJSONObject: ["action": "stop", "version": version])
-            _ = try await DashboardAPI.request("/api/recruiter", at: workspace.address, body: body)
-            await reload()
-        } catch { self.error = error.localizedDescription }
+            _ = try await DashboardAPI.request("/api/recruiter", at: address, body: body)
+            guard workspace.address == address else { return }
+            if state?.version == version, state?.busy == true { state?.stopRequested = true }
+            await reload(polling: true)
+        } catch {
+            guard workspace.address == address else { return }
+            await reload(polling: true)
+            if state?.version == version, state?.busy == true, state?.stopRequested != true {
+                self.error = error.localizedDescription
+            }
+        }
     }
 
     @MainActor private func submit(_ payload: [String: Any]) async {

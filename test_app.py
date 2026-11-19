@@ -50,9 +50,14 @@ class PersistenceTests(unittest.TestCase):
  def test_import_and_reimport(self):
   self.assertEqual(len(app.records()),50);app.init();self.assertEqual(len(app.records()),50)
  def test_snapshot_reuses_location_assessment_for_review(self):
+  app.assessed_listing.cache_clear()
   with patch.object(app, 'location_eligibility', wraps=app.location_eligibility) as eligibility:
    snapshot = app.snapshot()
-  self.assertEqual(eligibility.call_count, len(snapshot['jobs']))
+   self.assertEqual(eligibility.call_count, len(snapshot['jobs']))
+   eligibility.reset_mock()
+   cached = app.snapshot()
+   eligibility.assert_not_called()
+  self.assertEqual(cached['jobs'], snapshot['jobs'])
   for job in snapshot['jobs']:
    self.assertEqual(job['review_blockers'], app.review_blockers(job, app.config()))
  def test_tracking_survives_closed_and_reopened(self):

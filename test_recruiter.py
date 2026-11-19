@@ -1,6 +1,7 @@
 """V2 orchestration acceptance tests, isolated fictional profiles and feeds."""
 import json
 import base64
+from http.client import HTTPConnection
 import threading
 import time
 import unittest
@@ -289,7 +290,16 @@ class RecruiterTests(unittest.TestCase):
             self.assertEqual(recruiter.start(self.a, dict(action='stop', version=current['version']))[0], 202)
             self.assertTrue(recruiter.read(self.a, status_only=True)['stop_requested'])
             self.assertEqual(recruiter.start(self.a, dict(action='stop', version=previous['version']))[0], 409)
-            release.set()
+            token = recruiter.OPERATION.set(current['version'])
+            try:
+                cfg = dict(self.a.config(), ai_enabled=True)
+                with patch.object(self.a.prototype, 'ai_key', return_value='fictional'), \
+                     patch.object(self.a, 'config', return_value=cfg):
+                    with self.assertRaises(recruiter.SearchStopped):
+                        REAL_AI(self.a, 'candidate_match', {}, recruiter.MATCH)
+            finally:
+                recruiter.OPERATION.reset(token)
+                release.set()
             stopped = self.wait()
         self.assertEqual(stopped['stage'], 'stopped')
         self.assertEqual(len(calls), recruiter.MATCH_WORKERS)
@@ -316,6 +326,104 @@ class RecruiterTests(unittest.TestCase):
             stopped = self.wait()
         self.assertEqual(stopped['stage'], 'stopped')
         self.assertEqual([m['job_id'] for m in stopped['matches']], [m['job_id'] for m in previous['matches']])
+
+    def test_http_stop_returns_before_stalled_employer_and_keeps_results(self):
+        self.analyze()
+        previous = self.search()
+        entered, release = threading.Event(), threading.Event()
+
+        def stall(seconds):
+            entered.set()
+            release.wait(5)
+
+        def request(method, path, body=None):
+            with_connection = HTTPConnection(*server.server_address, timeout=2)
+            try:
+                with_connection.request(method, path, json.dumps(body) if body is not None else None,
+                                        {'X-Jobs-Client': 'dashboard'})
+                response = with_connection.getresponse()
+                return response.status, json.load(response)
+            finally:
+                with_connection.close()
+
+        with self.a.ThreadingHTTPServer(('127.0.0.1', 0), self.a.Handler) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                with patch.object(self.a, 'board_jobs', side_effect=lambda *_: self.a.network_call(stall)):
+                    self.assertEqual(request('POST', '/api/recruiter', dict(
+                        action='search', version=previous['version'], preferences=PREFS))[0], 202)
+                    self.assertTrue(entered.wait(2))
+                    _, current = request('GET', '/api/recruiter?status=1')
+                    self.assertEqual(current['stage'], 'discovering')
+                    self.assertEqual(request('POST', '/api/recruiter', dict(
+                        action='stop', version=current['version']))[0], 202)
+                    self.assertTrue(recruiter.LOCK.acquire(timeout=2))
+                    recruiter.LOCK.release()
+                    _, result = request('GET', '/api/recruiter')
+                    self.assertEqual(result['stage'], 'stopped')
+                    self.assertEqual(result['matches'], previous['matches'])
+                    self.assertEqual(request('GET', '/api/v1/search-status')[1]['run']['state'], 'stopped')
+                    self.assertFalse(self.a.LOCK.locked())
+                with patch.object(self.a, 'connect', side_effect=self.a.postgres_store.Unavailable):
+                    self.assertEqual(request('GET', '/api/v1/dashboard')[0], 503)
+                    self.assertEqual(request('GET', '/api/v1/health')[0], 200)
+            finally:
+                release.set()
+                server.shutdown()
+                thread.join()
+
+    def test_restart_distinguishes_an_accepted_stop_and_recovers_prior_shortlist(self):
+        self.analyze()
+        previous = self.search()
+        for stop_requested, expected in ((False, 'interrupted'), (True, 'stopped')):
+            with self.subTest(expected=expected):
+                state = recruiter.read(self.a, True)
+                state.update(version=state['version'] + 1, stage='matching',
+                             previous_matches=state['matches'], matches=[])
+                recruiter.write(self.a, state)
+                with self.a.connect() as c:
+                    c.execute('INSERT INTO runs(started,state,report,trigger) VALUES(?,?,?,?)',
+                              (self.a.now(), 'running', json.dumps({'recruiter_version': state['version']}), 'recruiter'))
+                if stop_requested:
+                    self.assertEqual(recruiter.stop(self.a, {'version': state['version']})[0], 202)
+                self.a.init()
+                current = recruiter.read(self.a)
+                self.assertEqual(current['stage'], expected)
+                self.assertEqual(self.a.search_status()['run']['state'], expected)
+                self.assertEqual(current['matches'], previous['matches'])
+                self.assertNotIn('previous_matches', current)
+
+    def test_comparison_limit_prioritizes_relevant_eligible_jobs_with_comparable_pay(self):
+        self.analyze()
+        self.search()
+        job = next(j for j in self.a.records() if j['requisition'] == 'billing')
+        low = dict(job, requisition='low', url='https://jobs.lever.co/fictional-clinic/low',
+                   salary_min=55000, salary_max=65000, salary_text='USD 55,000–65,000 per year')
+        with self.a.connect() as c:
+            low_id, _ = self.a.upsert(c, low)
+            for index in range(12):
+                self.a.upsert(c, dict(low, requisition=f'junior-{index}',
+                                     url=f'https://jobs.lever.co/fictional-clinic/junior-{index}'))
+
+        def no_new_jobs(*args, **kwargs):
+            self.a.LOCK.release()
+            return {'state': 'success'}
+
+        with patch.object(self.a, 'run_pipeline', side_effect=no_new_jobs):
+            result = self.search()
+        self.assertGreater(result['deferred'], 0)
+        by_id = {match['job_id']: match for match in result['matches']}
+        self.assertEqual(by_id[job['id']]['group'], 'close')
+        self.assertTrue(by_id[job['id']]['published_pay_target_match'])
+        self.assertEqual(by_id[low_id]['group'], 'avoid')
+        self.assertFalse(by_id[low_id]['published_pay_target_match'])
+        edited = recruiter.read(self.a, True)
+        edited['preferences']['flexible'] = True
+        recruiter.write(self.a, edited)
+        flexible = {match['job_id']: match for match in recruiter.read(self.a)['matches']}
+        self.assertEqual(flexible[low_id]['group'], 'close')
+        self.assertFalse(flexible[low_id]['published_pay_target_match'])
 
     def test_recruiter_status_loads_settings_once_for_the_shortlist(self):
         self.analyze()
@@ -643,6 +751,9 @@ class RecruiterTests(unittest.TestCase):
             twin = dict(job, requisition='billing-twin',
                         url='https://jobs.lever.co/fictional-clinic/billing-twin')
             twin['id'], _ = self.a.upsert(c, twin)
+            unverified = dict(job, requisition='unverified', title='Medical Billing Coordinator',
+                              url='https://jobs.lever.co/fictional-clinic/unverified', posting_verified=None)
+            unverified_id, _ = self.a.upsert(c, unverified)
 
         def pipeline(*args, **kwargs):
             self.a.LOCK.release()
@@ -658,12 +769,16 @@ class RecruiterTests(unittest.TestCase):
             return fake_ai(a, name, inputs, schema)
 
         with patch.object(self.a, 'run_pipeline', side_effect=pipeline), \
+             patch.object(self.a, 'recheck_recruiter_postings', return_value={}), \
              patch.object(recruiter, 'ai', side_effect=provider) as mock:
             result = self.search()
         self.assertEqual(sum(call.args[1] == 'market_pay' for call in mock.call_args_list), 1)
         matched = [m for m in result['matches'] if m['job_id'] in (job['id'], twin['id'])]
         self.assertEqual(len(matched), 2)
         self.assertTrue(all(m['market_pay_target_match'] for m in matched))
+        unchecked, = (m for m in result['matches'] if m['job_id'] == unverified_id)
+        self.assertEqual(unchecked['group'], 'review')
+        self.assertIsNone(unchecked['market_pay_target_match'])
 
         with self.a.connect() as c:
             c.execute("DELETE FROM recruiter_match_cache WHERE fingerprint LIKE 'market-pay:%'")
@@ -674,6 +789,7 @@ class RecruiterTests(unittest.TestCase):
             return fake_ai(a, name, inputs, schema)
 
         with patch.object(self.a, 'run_pipeline', side_effect=pipeline), \
+             patch.object(self.a, 'recheck_recruiter_postings', return_value={}), \
              patch.object(recruiter, 'ai', side_effect=failure):
             result = self.search()
         self.assertEqual(result['stage'], 'complete')

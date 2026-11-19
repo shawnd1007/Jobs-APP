@@ -11,9 +11,11 @@ from collections import deque
 
 _credential_lock = threading.Lock()
 _managed_identity_credential = None
+_pool_lock = threading.Lock()
+_azure_pools = {}
 _timing_lock = threading.Lock()
 _timings = {name: deque(maxlen=100) for name in (
-    'identity', 'postgres_connect', 'recruiter', 'recruiter_status', 'dashboard', 'search_status',
+    'identity', 'postgres_connect', 'postgres_checkout', 'recruiter', 'recruiter_status', 'dashboard', 'search_status',
     'sql_select', 'sql_write', 'sql_other', 'dashboard_load', 'dashboard_assess', 'dashboard_enrich',
     'dashboard_location', 'dashboard_fit', 'dashboard_market', 'dashboard_review',
     'assess_location', 'assess_arrangement', 'assess_salary', 'assess_skills', 'assess_evidence')}
@@ -102,7 +104,8 @@ def connect_azure(dsn, ca_file):
             token = _managed_identity_credential.get_token('https://ossrdbms-aad.database.windows.net/.default').token
         token_finished = time.monotonic()
         import psycopg
-        return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows)
+        return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows,
+                               connect_timeout=5, options='-c statement_timeout=8000 -c lock_timeout=5000')
     finally:
         finished = time.monotonic()
         identity_end = token_finished if token_finished is not None else finished
@@ -113,6 +116,51 @@ def connect_azure(dsn, ca_file):
             logging.getLogger('jobs.timing').warning(
                 'Slow PostgreSQL connection: identity=%.2fs connect=%.2fs',
                 identity_end - started, finished - identity_end)
+
+
+class Unavailable(Exception):
+    """The workspace database could not service this request."""
+
+
+def is_temporary_error(error):
+    if isinstance(error, Unavailable):
+        return True
+    import sqlite3
+    if isinstance(error, sqlite3.OperationalError):
+        code = getattr(error, 'sqlite_errorcode', 0)
+        return code & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    # Importing the PostgreSQL client is unnecessary for the SQLite app.
+    return getattr(error, 'sqlstate', None) in ('55P03', '57014', '57P01') or any(
+        cls.__name__ in ('OperationalError', 'InterfaceError') and cls.__module__.startswith('psycopg')
+        for cls in type(error).__mro__
+    )
+
+
+def workspace_connection(dsn, ca_file):
+    from psycopg import Connection as DriverConnection
+    from psycopg_pool import ConnectionPool, PoolTimeout, TooManyRequests
+
+    with _pool_lock:
+        key = (dsn, ca_file)
+        pool = _azure_pools.get(key)
+        if pool is None:
+            class AzureConnection(DriverConnection):
+                @classmethod
+                def connect(cls, conninfo='', **kwargs):
+                    return connect_azure(conninfo, ca_file)
+
+            pool = ConnectionPool(dsn, connection_class=AzureConnection, min_size=0, max_size=8,
+                                  max_waiting=24, timeout=6, check=ConnectionPool.check_connection,
+                                  open=True)
+            _azure_pools[key] = pool
+    started = time.monotonic()
+    try:
+        raw = pool.getconn()
+    except (PoolTimeout, TooManyRequests):
+        raise Unavailable() from None
+    finally:
+        record_timing('postgres_checkout', time.monotonic() - started)
+    return Connection(raw, release=pool.putconn)
 
 
 SCHEMA = (
@@ -228,8 +276,9 @@ class Connection:
 
     postgres_connection = True
 
-    def __init__(self, raw):
+    def __init__(self, raw, *, release=None):
         self.raw = raw
+        self.release = release
 
     @property
     def in_transaction(self):
@@ -271,4 +320,7 @@ class Connection:
             else:
                 self.raw.rollback()
         finally:
-            self.raw.close()
+            if self.release is None:
+                self.raw.close()
+            else:
+                self.release(self.raw)

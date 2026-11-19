@@ -6,13 +6,13 @@ import UserNotifications
 struct SearchScreen: View {
     let workspace: Workspace
 
-    private func searchOutcome(_ run: SearchRun) -> String {
-        let found = (run.report.newQualified ?? 0) + (run.report.newReview ?? 0)
+    private func searchOutcome(state: String, found: Int) -> String {
         let result = found == 1 ? "1 new listing saved." : "\(found) new listings saved."
-        switch run.state {
+        switch state {
         case "partial": return "Search finished with incomplete checks. " + result + " Run again to retry."
         case "failed": return "The search couldn’t complete. Previously saved listings are still here. Try again."
         case "interrupted": return "The last search was interrupted. Run it again to continue."
+        case "stopped": return "Search stopped. Openings already saved are still here."
         default: return found == 0 ? "Search finished. No new listings matched." : "Search finished. " + result
         }
     }
@@ -40,7 +40,7 @@ struct SearchScreen: View {
                     }
                     .disabled(!workspace.connected || workspace.searchRunning || workspace.startingSearch || workspace.saving)
                     if workspace.searchConnectionLost {
-                        Text("Can’t confirm the search status. The Mac may still be searching.")
+                        Text("Can’t confirm the search status. The search may still be running.")
                             .foregroundStyle(.secondary)
                         Button("Check search status") { Task { await workspace.checkSearchStatus() } }
                     } else if workspace.startingSearch {
@@ -54,12 +54,16 @@ struct SearchScreen: View {
                         } else {
                             ProgressView("Checking employer sources…")
                         }
-                        Text("You can keep browsing while the Mac searches.")
+                        Text("You can keep browsing while Jobs searches.")
                             .font(.footnote).foregroundStyle(.secondary)
                     } else if !workspace.connected {
                         Text("Reconnect to your Mac to find new jobs.").foregroundStyle(.secondary)
+                    } else if let run = workspace.searchStatus?.run, run.finished != nil {
+                        Text(searchOutcome(state: run.state, found: (run.newQualified ?? 0) + (run.newReview ?? 0)))
+                            .foregroundStyle(.secondary).accessibilityIdentifier("searchOutcome")
                     } else if let run = dashboard.runs.first, run.finished != nil {
-                        Text(searchOutcome(run)).foregroundStyle(.secondary)
+                        Text(searchOutcome(state: run.state, found: (run.report.newQualified ?? 0) + (run.report.newReview ?? 0)))
+                            .foregroundStyle(.secondary)
                             .accessibilityIdentifier("searchOutcome")
                     }
                     if let error = workspace.searchError { Text(error).foregroundStyle(.red) }

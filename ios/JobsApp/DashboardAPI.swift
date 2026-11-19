@@ -249,6 +249,9 @@ struct SearchStatus: Decodable {
         let id: Int
         let state: String
         let started: String
+        let finished: String?
+        let newQualified: Int?
+        let newReview: Int?
         let progress: Progress?
     }
 
@@ -413,6 +416,13 @@ enum DashboardAPI {
         return try decoder.decode(SearchStatus.self, from: data)
     }
 
+    static func isReachable(at address: String) async -> Bool {
+        struct Health: Decodable { let status: String }
+        guard let data = try? await request("/api/v1/health", at: address),
+              let health = try? JSONDecoder().decode(Health.self, from: data) else { return false }
+        return health.status == "ok"
+    }
+
     static func recruiterUsage(at address: String) async throws -> RecruiterUsage {
         let data = try await request("/api/recruiter/usage", at: address)
         let decoder = JSONDecoder()
@@ -472,8 +482,8 @@ enum DashboardAPI {
             timeout = 105
         case "/api/v1/dashboard":
             timeout = 30
-        case "/api/v1/search-status":
-            timeout = 15
+        case "/api/v1/health":
+            timeout = 5
         default:
             timeout = 15
         }

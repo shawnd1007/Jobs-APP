@@ -25,6 +25,8 @@ import postgres_store
 from us_locations import foreign_location, is_us_location, location_clauses, office_locations, remote_eligibility
 from contextvars import ContextVar
 from contextlib import nullcontext
+from copy import deepcopy
+from functools import lru_cache
 from queue import Empty, Queue
 import sys
 from html.parser import HTMLParser
@@ -40,6 +42,7 @@ LOCK = threading.Lock()
 SEARCH_ACTIVE = threading.Event()
 SEARCH_DEADLINE = ContextVar('search_deadline', default=None)
 BOARD_DEADLINE = ContextVar('board_deadline', default=None)
+EMPLOYER_STOP = ContextVar('employer_stop', default=None)
 NETWORK_SLOTS = threading.BoundedSemaphore(3)
 SEARCH_SECONDS = 240
 BOARD_SECONDS = 35
@@ -89,9 +92,9 @@ def connect():
     if postgres_enabled():
         import postgres_store
         ca_file = os.environ.get('JOBS_POSTGRES_CA_FILE', '/etc/ssl/certs/ca-certificates.crt')
-        return postgres_store.Connection(postgres_store.connect_azure(os.environ['JOBS_POSTGRES_DSN'], ca_file))
-    c=sqlite3.connect(DB, timeout=30, factory=Connection); c.row_factory=sqlite3.Row
-    c.execute('PRAGMA foreign_keys=ON'); c.execute('PRAGMA journal_mode=WAL'); return c
+        return postgres_store.workspace_connection(os.environ['JOBS_POSTGRES_DSN'], ca_file)
+    c=sqlite3.connect(DB, timeout=5, factory=Connection); c.row_factory=sqlite3.Row
+    c.execute('PRAGMA foreign_keys=ON'); return c
 def clean(s):
     text = s or ''
     # No tag can end after the final closing bracket. Excluding that suffix
@@ -187,6 +190,9 @@ PERSONIO_OPENER = ur.build_opener(NoRedirect())
 
 def network_call(operation, seconds=REQUEST_SECONDS):
     """Bound the whole network operation, including DNS, redirects and response reads."""
+    stop = EMPLOYER_STOP.get()
+    if stop is not None and stop.is_set():
+        raise recruiter.SearchStopped()
     search_deadline = SEARCH_DEADLINE.get()
     if search_deadline is None:
         return operation(seconds)
@@ -194,27 +200,41 @@ def network_call(operation, seconds=REQUEST_SECONDS):
     remaining = min(seconds, deadline - time.monotonic())
     if remaining <= 0:
         raise TimeoutError('Search time limit reached')
-    if not NETWORK_SLOTS.acquire(blocking=False):
-        raise TimeoutError('Previous employer requests are still timing out')
+    return bounded_request(operation, remaining, NETWORK_SLOTS, stop=stop)
+
+
+def bounded_request(operation, seconds, slots, *, stop=None):
+    if not slots.acquire(blocking=False):
+        raise TimeoutError('Previous requests are still timing out')
     result = Queue(1)
 
     def read():
         try:
-            result.put((True, operation(remaining)))
+            result.put((True, operation(seconds)))
         except Exception as error:
             result.put((False, error))
         finally:
-            NETWORK_SLOTS.release()
+            slots.release()
 
     try:
         threading.Thread(target=read, daemon=True).start()
     except Exception:
-        NETWORK_SLOTS.release()
+        slots.release()
         raise
-    try:
-        ok, value = result.get(timeout=remaining)
-    except Empty:
-        raise TimeoutError(f'Employer request exceeded {remaining:.0f} seconds') from None
+    end = time.monotonic() + seconds
+    while True:
+        if stop is not None and stop.is_set():
+            raise recruiter.SearchStopped()
+        wait = end - time.monotonic()
+        if wait <= 0:
+            raise TimeoutError(f'Request exceeded {seconds:.0f} seconds')
+        try:
+            ok, value = result.get(timeout=min(wait, .1) if stop is not None else wait)
+            break
+        except Empty:
+            continue
+    if stop is not None and stop.is_set():
+        raise recruiter.SearchStopped()
     if not ok:
         raise value
     return value
@@ -282,9 +302,9 @@ def init():
         if getattr(c, 'postgres_connection', False):
             import postgres_store
             postgres_store.initialize_empty_schema(c)
-            # Configuration opens a separate connection during startup.
             c.commit()
         else:
+            c.execute('PRAGMA journal_mode=WAL')
             c.executescript('''CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, identity TEXT UNIQUE NOT NULL, fallback TEXT, listing TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS jobs_fallback ON jobs(fallback);
         CREATE TABLE IF NOT EXISTS tracking(job_id INTEGER PRIMARY KEY REFERENCES jobs(id),status TEXT NOT NULL DEFAULT 'Needs Verification',application_date TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',follow_up TEXT NOT NULL DEFAULT '',updated TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 0);
@@ -301,7 +321,14 @@ def init():
             c.execute('PRAGMA user_version=4')
             prototype.init(c)
         recruiter.init(c, now)
-        c.execute("UPDATE runs SET state='interrupted',finished=? WHERE state='running'",(now(),))
+        for run in c.execute("SELECT id,report FROM runs WHERE state='running'").fetchall():
+            report = json.loads(run['report'])
+            operation = report.get('recruiter_version')
+            stopped = operation is not None and recruiter.stop_requested(service(), operation, connection=c)
+            report['state'] = 'stopped' if stopped else 'interrupted'
+            report['progress'] = {'stage': 'Search stopped' if stopped else 'Interrupted by a server restart'}
+            c.execute('UPDATE runs SET state=?,finished=?,report=? WHERE id=?',
+                      (report['state'], now(), json.dumps(report), run['id']))
         if not getattr(c, 'postgres_connection', False) and not c.execute('SELECT 1 FROM jobs LIMIT 1').fetchone():
             source=SEED.read_text(encoding='utf-8-sig')
             for a in re.findall(r'<article\b.*?</article>',source,re.S):
@@ -311,7 +338,7 @@ def init():
                 location=clean(re.findall(r'<em>(.*?)</em>',a,re.S)[-1]); posted=re.search(r'Posted (\d{4}-\d\d-\d\d)',location)
                 job={'employer':field('company'),'title':title,'url':url,'salary_text':field('salary'),'location':location,'description':field('why'),'explanation':field('why')+' '+field('note'),'score':int(re.search(r'data-fit="(\d)',a)[1])*20,'category':'Imported','posted':posted[1] if posted else '', 'availability':'Needs Verification','eligibility':'Review','last_verified':'','source':'Original HTML, November 5, 2026','history_confirmation':True}
                 upsert(c,job)
-        cfg = config()
+        cfg = config(connection=c)
         for row in c.execute('SELECT id,identity,listing FROM jobs').fetchall():
             j = json.loads(row['listing'])
             if j.get('external_application'):
@@ -328,7 +355,9 @@ def init():
             eligible,reason,area=location_eligibility(j,cfg)
             j.update(location_eligibility=eligible,location_reason=reason,area=area)
             if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
-            c.execute('UPDATE jobs SET listing=? WHERE id=?',(json.dumps(j),row['id']))
+            listing = json.dumps(j)
+            if listing != row['listing']:
+                c.execute('UPDATE jobs SET listing=? WHERE id=?', (listing, row['id']))
         migrate_posting_identities(c)
 
 
@@ -450,11 +479,26 @@ def upsert(c,j):
     job_id=c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?) RETURNING id',(ident,fallback,json.dumps(j),stamp,stamp)).fetchone()[0]
     c.execute('INSERT INTO tracking(job_id,updated) VALUES(?,?)',(job_id,stamp))
     return job_id,True
-def records(*, connection=None):
+def records(*, connection=None, assessment_config=None, listing_only=False):
+    if listing_only:
+        query = 'SELECT jobs.* FROM jobs JOIN tracking ON jobs.id=tracking.job_id'
+    else:
+        query = """SELECT jobs.*, tracking.status, tracking.application_date, tracking.notes, tracking.follow_up,
+                   tracking.updated tracking_updated, tracking.version, COALESCE(reviews.decision,'Pending') review_decision,
+                   COALESCE(reviews.note,'') review_note, COALESCE(reviews.reviewer,'') review_reviewer,
+                   COALESCE(reviews.checks,'{}') review_checks, COALESCE(reviews.updated,'') review_updated,
+                   COALESCE(reviews.version,0) review_version FROM jobs JOIN tracking ON jobs.id=tracking.job_id
+                   LEFT JOIN reviews ON reviews.job_id=jobs.id"""
     with (connect() if connection is None else nullcontext(connection)) as c:
         result=[]
-        for row in c.execute("SELECT jobs.*,tracking.status,tracking.application_date,tracking.notes,tracking.follow_up,tracking.updated tracking_updated,tracking.version,COALESCE(reviews.decision,'Pending') review_decision,COALESCE(reviews.note,'') review_note,COALESCE(reviews.reviewer,'') review_reviewer,COALESCE(reviews.checks,'{}') review_checks,COALESCE(reviews.updated,'') review_updated,COALESCE(reviews.version,0) review_version FROM jobs JOIN tracking ON jobs.id=tracking.job_id LEFT JOIN reviews ON reviews.job_id=jobs.id"):
-            d=dict(row);d['review_checks']=json.loads(d['review_checks']);j=json.loads(d.pop('listing')); j.update(d); result.append(j)
+        for row in c.execute(query):
+            d = dict(row)
+            if not listing_only:
+                d['review_checks'] = json.loads(d['review_checks'])
+            raw = d.pop('listing')
+            j = json.loads(raw) if assessment_config is None else deepcopy(assessed_listing(raw, assessment_config))
+            j.update(d)
+            result.append(j)
         return result
 
 UNAPPLIED={'Needs Verification','Not Applied','Planning to Apply'}
@@ -950,6 +994,25 @@ def assess(j,cfg):
         j['eligibility'] = pay_reason
     if eligible!='Eligible' and j['queue']!='Excluded':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
     return j
+
+
+ASSESSMENT_SETTINGS = ('profile', 'categories', 'preferred_skills', 'skill_groups', 'excluded_title_terms',
+                       'salary_floor', 'salary_policy', 'us_postings_only', 'legacy_geography',
+                       'target_locations', 'remote_hiring_locations', 'workplace_types', 'local_areas')
+
+
+@lru_cache(maxsize=512)
+def assessed_listing(raw, settings):
+    job = json.loads(raw)
+    previous_queue = job.get('queue')
+    if not job.get('external_application'):
+        started = time.monotonic()
+        assess(job, json.loads(settings))
+        postgres_store.record_timing('dashboard_fit', time.monotonic() - started)
+    job['previous_queue'] = previous_queue
+    return job
+
+
 def board_jobs(platform,board):
     if platform=='greenhouse':
         data=fetch('https://boards-api.greenhouse.io/v1/boards/'+up.quote(board,safe='')+'/jobs?content=true')
@@ -1402,10 +1465,12 @@ def recheck_recruiter_postings(job_ids, cfg, *, should_stop=None):
     if not LOCK.acquire(False):
         return {}
     checked = {}
+    deadline = time.monotonic() + BOARD_SECONDS
+    token = SEARCH_DEADLINE.set(deadline)
     try:
         cfg = dict(cfg, us_postings_only=True)
         for job_id in list(dict.fromkeys(job_ids))[:POSTING_CHECKS_PER_RUN]:
-            if should_stop and should_stop():
+            if time.monotonic() >= deadline or (should_stop and should_stop()):
                 break
             with connect() as c:
                 row = c.execute('SELECT listing FROM jobs WHERE id=?', (job_id,)).fetchone()
@@ -1438,6 +1503,7 @@ def recheck_recruiter_postings(job_ids, cfg, *, should_stop=None):
                 checked[job_id] = job
         return checked
     finally:
+        SEARCH_DEADLINE.reset(token)
         LOCK.release()
 
 
@@ -1537,9 +1603,10 @@ def firecrawl(endpoint,payload,report):
     with connect() as c:
         c.execute('INSERT INTO usage(day) VALUES(?) ON CONFLICT(day) DO NOTHING',(day,))
         usage=c.execute('SELECT requests,reserved FROM usage WHERE day=?',(day,)).fetchone();count=usage[0]
-        if count>=config()['max_firecrawl_requests_per_day']:raise ValueError('Daily Firecrawl request budget reached')
+        cfg = config(connection=c)
+        if count>=cfg['max_firecrawl_requests_per_day']:raise ValueError('Daily Firecrawl request budget reached')
         reserve=2*payload.get('limit',5)+2 if endpoint=='search' else 5
-        if usage[1]+reserve>config()['max_firecrawl_credit_units_per_day']:raise ValueError('Daily conservative Firecrawl credit-unit budget reached')
+        if usage[1]+reserve>cfg['max_firecrawl_credit_units_per_day']:raise ValueError('Daily conservative Firecrawl credit-unit budget reached')
         c.execute('UPDATE usage SET requests=requests+1,reserved=reserved+? WHERE day=?',(reserve,day))
     # No automatic billable retry: uncertain responses may already have consumed credits.
     req=ur.Request('https://api.firecrawl.dev/v2/'+endpoint,data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+key,'Content-Type':'application/json'})
@@ -1580,9 +1647,13 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
     if recruiter_version is not None:
         report['recruiter_version'] = recruiter_version
 
-    def progress(stage, completed=None, total=None, source=None):
-        if recruiter_version is not None and recruiter.stop_requested(service(), recruiter_version):
+    def check_stop():
+        signal = EMPLOYER_STOP.get()
+        if signal is not None and signal.is_set():
             raise recruiter.SearchStopped()
+
+    def progress(stage, completed=None, total=None, source=None):
+        check_stop()
         report['progress'] = dict(stage=stage, completed=completed, total=total, source=source)
         with connect() as c:
             c.execute('UPDATE runs SET report=? WHERE id=?', (json.dumps(report), run_id))
@@ -1597,13 +1668,20 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 })
 
     def time_left(remaining, kind):
+        check_stop()
         if time.monotonic() < deadline:
             return True
         report['failures'].append(f'Search time limit reached; {remaining} {kind} deferred. Run again to continue.')
         return False
 
     def pause():
-        time.sleep(max(0, min(cfg['request_delay_seconds'], deadline - time.monotonic())))
+        delay = max(0, min(cfg['request_delay_seconds'], deadline - time.monotonic()))
+        signal = EMPLOYER_STOP.get()
+        if signal is None:
+            time.sleep(delay)
+        else:
+            signal.wait(delay)
+            check_stop()
 
     try:
         with connect() as c:
@@ -1613,7 +1691,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
             searches = prototype.saved_searches(c)
         cfg = config_override if config_override is not None else config()
         backup()
-        existing = [job for job in records() if not job.get('external_application')]
+        existing = [job for job in records(listing_only=True) if not job.get('external_application')]
         boards = set()
         for j in existing:
             if j.get('identity_review'):
@@ -1629,17 +1707,23 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
         discoveries=[]
         key=firecrawl_key()
         if cfg.get('public_web_search_enabled'):
-            start=dt.date.today().toordinal()*cfg.get('public_web_queries_per_run',3)
-            total = cfg.get('public_web_queries_per_run',3)
+            budget = cfg.get('public_web_queries_per_run', 3)
+            start = dt.date.today().toordinal() * budget
+            regions = discovery_regions(cfg)
+            categories = cfg['categories']
+            total = min(budget, len(categories) * len(regions))
+            domains = ['jobs.ashbyhq.com', 'job-boards.greenhouse.io', 'jobs.lever.co',
+                       'myworkdayjobs.com', 'jobs.smartrecruiters.com', 'recruitee.com']
             for offset in range(total):
                 if not time_left(total - offset, 'public discovery queries'):
                     break
                 stage = 'Searching the web for employers' if recruiter_version is not None else 'Discovering employer sources'
                 progress(stage, offset, total)
-                category=cfg['categories'][(start+offset)%len(cfg['categories'])]
-                domains=['jobs.ashbyhq.com','job-boards.greenhouse.io','jobs.lever.co','myworkdayjobs.com','jobs.smartrecruiters.com','recruitee.com']
-                regions=discovery_regions(cfg)
-                query='"'+category+'" jobs '+regions[offset%len(regions)]+' site:'+domains[(start+offset)%len(domains)]
+                index = start + offset
+                category = categories[index % len(categories)]
+                region = regions[(index // len(categories) + index % len(categories)) % len(regions)]
+                domain = domains[(index // (len(categories) * len(regions)) + index) % len(domains)]
+                query = '"' + category + '" jobs ' + region + ' site:' + domain
                 try:
                     url='https://www.bing.com/search?format=rss&q='+up.quote(query)
                     raw, _ = read_response(ur.Request(url, headers={'User-Agent':'PersonalJobDashboard/1.0'}),
@@ -1650,6 +1734,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                         if b:boards.add(b)
                         elif url.startswith('https://') and re.search(r'(myworkdayjobs\.com|smartrecruiters\.com|/careers?/|/jobs?/)',url):discoveries.append(url)
                     report['log'].append('Public web discovery: '+category)
+                except recruiter.SearchStopped:
+                    raise
                 except Exception as e:
                     report['failures'].append('Public web discovery: '+type(e).__name__)
                     source_issue('Web discovery could not finish', None, e)
@@ -1671,6 +1757,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                         b=board_identity(hit.get('url',''))
                         if b:boards.add(b)
                         elif hit.get('url'): discoveries.append(hit['url'])
+                except recruiter.SearchStopped:
+                    raise
                 except Exception as e:
                     report['failures'].append('Firecrawl discovery: '+type(e).__name__+': '+str(e)[:160])
                     source_issue('Additional discovery could not finish', None, e)
@@ -1754,6 +1842,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 recheck_limit = min(cfg['max_rechecks'], 8) if platform == 'smartrecruiters' else cfg['max_rechecks']
                 with connect() as c:
                     for old in current[:recheck_limit]:
+                        check_stop()
                         if time.monotonic() >= deadline:
                             break
                         ident=identity(old['url']);fresh=by_id.get(ident)
@@ -1809,6 +1898,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                         new_listings += rotating_postings(other, run_id, 16 - len(new_listings))
                         report['deferred_source_details'] = report.get('deferred_source_details', 0) + len(fresh) - len(new_listings)
                     for j in new_listings:
+                        check_stop()
                         ident=identity(j['url'])
                         if ident in seen:report['duplicates']+=1;continue
                         seen.add(ident)
@@ -1826,6 +1916,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                             continue
                         candidates[ident] = (j, matched)
                 report['log'].append(platform+'/'+board+': '+str(len(live))+' live postings')
+            except recruiter.SearchStopped:
+                raise
             except Exception as e:
                 prototype.source_result(service(),platform+'/'+board,'error',error=type(e).__name__+': '+str(e))
                 report['failures'].append(platform+'/'+board+': '+type(e).__name__+': '+str(e)[:160]);logging.exception('Board failed %s/%s',platform,board)
@@ -1895,6 +1987,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                     report['duplicates'] += 1
                 else:
                     candidates[ident] = (j, matched)
+            except recruiter.SearchStopped:
+                raise
             except Exception as e:
                 prototype.source_result(service(),url,'manual review',error=type(e).__name__+': '+str(e))
                 source_issue('Posting needs manual review', up.urlsplit(url).hostname, e)
@@ -1905,11 +1999,8 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 pause()
         progress('Ranking results')
         if cfg.get('recruiter_discovery'):
-            ranked = sorted(candidates.values(), key=lambda item: (
-                item[0]['location_eligibility'] == 'Eligible',
-                item[0]['category'] != 'Other / Review', item[0]['matched_duty_count'],
-                item[0]['score'], item[0].get('posted') or '',
-            ), reverse=True)
+            ranked = sorted(candidates.values(), key=lambda item: recruiter.discovery_rank(service(), item[0], cfg),
+                            reverse=True)
         else:
             ranked = sorted(candidates.values(), key=lambda item: (
                 item[0]['queue'] == 'Confirmed', bool(item[1]), item[0]['matched_duty_count'],
@@ -1923,6 +2014,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
         else:
             progress('Saving results', 0, min(len(ranked), limit))
         for index, (job, matched) in enumerate(ranked):
+            check_stop()
             if new_count >= limit:
                 report['deferred_candidates'] = len(ranked) - index
                 break
@@ -1945,18 +2037,18 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 report['duplicates'] += 1
             else:
                 new_count += 1
-                if recruiter_version is not None:
-                    progress('Saving openings', new_count)
                 if job['queue'] == 'Confirmed':
                     report['new_qualified'] += 1
                     report['top_new'].append({key: job[key] for key in ('title', 'employer', 'url', 'score')})
                 else:
                     report['new_review'] += 1
+                if recruiter_version is not None:
+                    progress('Saving openings', new_count)
         report['unprocessed_employer_urls']=extra[attempted_pages:][:50]
         report['top_new']=sorted(report['top_new'],key=lambda j:-j['score'])[:10]
         report['manual_review'] = sum(
             j.get('queue') in ('Review', 'Location Review') and j.get('availability') != 'Closed'
-            for j in records() if not j.get('external_application')
+            for j in records(listing_only=True) if not j.get('external_application')
         )
         if time.monotonic() >= deadline and not any('Search time limit' in issue for issue in report['failures']):
             report['failures'].append('Search time limit reached; some checks may have been deferred.')
@@ -1976,7 +2068,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                               (stamp, report.get('state', 'failed'), json.dumps(report), run_id))
                     if recruiter_version is not None:
                         recruiter.record_activity(c, recruiter_version, stamp, {
-                            'stage': 'Employer checks finished',
+                            'stage': 'Employer checks stopped' if report['state'] == 'stopped' else 'Employer checks finished',
                             'issues': len(report['failures']),
                             'reason': report.get('state', 'failed'),
                         })
@@ -2028,9 +2120,9 @@ def schedule():
         time.sleep(30)
 
 def search_status():
-    running = SEARCH_ACTIVE.is_set()
     with connect() as c:
         row = c.execute('SELECT id,state,started,finished,report FROM runs ORDER BY id DESC LIMIT 1').fetchone()
+    running = SEARCH_ACTIVE.is_set()
     if not row:
         return {'running': running, 'run': None}
     run = dict(row)
@@ -2038,21 +2130,23 @@ def search_status():
     run.update(progress=report.get('progress') if running and run['state'] == 'running' else None,
                new_qualified=report.get('new_qualified', 0), new_review=report.get('new_review', 0),
                failures=len(report.get('failures', [])))
-    return {'running': SEARCH_ACTIVE.is_set(), 'run': run}
+    return {'running': running, 'run': run}
 
 
 def snapshot():
     with connect() as c:
         stage_start = time.monotonic()
         cfg = config(connection=c)
-        jobs = records(connection=c)
+        settings = json.dumps({key: cfg[key] for key in ASSESSMENT_SETTINGS if key in cfg}, sort_keys=True)
+        jobs = records(connection=c, assessment_config=settings)
         stamp = dt.datetime.now(dt.timezone.utc)
         recruiter_preferences = recruiter.saved_preferences(c)
         remote_region = recruiter_preferences.get('remote_region')
         postgres_store.record_timing('dashboard_load', time.monotonic() - stage_start)
         stage_start = time.monotonic()
-        location_time = fit_time = market_time = review_time = 0.0
+        location_time = market_time = review_time = 0.0
         for j in jobs:
+            previous_queue = j.pop('previous_queue')
             if j.get('external_application'):
                 j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
                 continue
@@ -2063,10 +2157,7 @@ def snapshot():
             j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
             if expires:
                 j['posting_verification_expires'] = expires.isoformat(timespec='seconds')
-            previous_queue=j.get('queue');previous_application=j.get('application_verified')
-            item_start = time.monotonic()
-            assess(j,cfg)
-            fit_time += time.monotonic() - item_start
+            previous_application = j.get('application_verified')
             item_start = time.monotonic()
             j['market_pay_available'] = not j['hidden_from_discovery'] and j.get('availability') != 'Closed' \
                 and recruiter.market_pay_needed(service(), j, recruiter_preferences)
@@ -2083,7 +2174,6 @@ def snapshot():
             j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
         postgres_store.record_timing('dashboard_assess', time.monotonic() - stage_start)
         postgres_store.record_timing('dashboard_location', location_time)
-        postgres_store.record_timing('dashboard_fit', fit_time)
         postgres_store.record_timing('dashboard_market', market_time)
         postgres_store.record_timing('dashboard_review', review_time)
         interests = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM job_interests')}
@@ -2196,6 +2286,10 @@ def timed_request(method):
         started = time.monotonic()
         try:
             return method(handler)
+        except Exception as error:
+            if not postgres_store.is_temporary_error(error):
+                raise
+            return handler.send(503, {'error': 'Jobs is reachable, but workspace data is temporarily unavailable. Try again shortly.'})
         finally:
             elapsed = time.monotonic() - started
             path = up.urlsplit(handler.path).path

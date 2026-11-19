@@ -181,8 +181,18 @@ final class Workspace {
             await MatchNotifications.deliver(for: self)
         } catch {
             guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
-            connected = false
-            connectionError = DashboardAPI.connectionMessage(for: error)
+            let serverError = error as? DashboardAPI.ServerError
+            let timeout = (error as? URLError)?.code == .timedOut
+            let reachable: Bool
+            if timeout {
+                reachable = await DashboardAPI.isReachable(at: address)
+            } else {
+                reachable = (serverError?.status ?? 0) >= 500
+            }
+            guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
+            connected = reachable
+            connectionError = reachable ? "Jobs is reachable. Workspace data hasn’t refreshed yet."
+                : DashboardAPI.connectionMessage(for: error)
         }
     }
 
@@ -273,7 +283,7 @@ final class Workspace {
             if (error as? DashboardAPI.ServerError)?.status == 409 {
                 searchStatus = SearchStatus(running: true, run: nil)
             } else if error is URLError {
-                searchError = "Couldn’t confirm that the Mac started the search. Check its status before trying again."
+                searchError = "Couldn’t confirm that Jobs started the search. Check its status before trying again."
                 await checkSearchStatus()
             } else {
                 searchError = error.localizedDescription
@@ -282,7 +292,7 @@ final class Workspace {
     }
 
     func followDashboardSearch() {
-        if dashboard?.running == true, searchStatus?.running == false { searchStatus = nil }
+        if connectionError == nil, dashboard?.running == true, searchStatus?.running == false { searchStatus = nil }
     }
 
     func checkSearchStatus() async {
@@ -294,15 +304,10 @@ final class Workspace {
             let status = try await DashboardAPI.searchStatus(at: server)
             guard address == server, !Task.isCancelled else { return }
             searchConnectionLost = false
-            if status.running {
-                searchError = nil
-                searchStatus = status
-            } else {
-                // Sync new listings and alerts before the running task exits and cancels itself.
-                await refresh(replacingInFlight: true)
-                guard address == server, !Task.isCancelled else { return }
-                searchConnectionLost = !connected
-                if connected { searchStatus = status }
+            searchError = nil
+            searchStatus = status
+            if !status.running {
+                Task { await refresh(replacingInFlight: true) }
             }
         } catch {
             guard address == server, !Task.isCancelled else { return }
@@ -472,10 +477,11 @@ extension View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                     .background(.regularMaterial)
-            } else if !current.connected {
+            } else if !current.connected || current.connectionError != nil {
                 VStack(spacing: 3) {
-                    Label(current.loading && current.lastSyncedAt == nil ? "Connecting…" : "Offline · Read-only",
-                          systemImage: current.loading && current.lastSyncedAt == nil ? "wifi" : "wifi.slash")
+                    Label(current.connected ? "Workspace refresh pending"
+                          : (current.loading && current.lastSyncedAt == nil ? "Connecting…" : "Connection unavailable · Read-only"),
+                          systemImage: current.connected || current.loading ? "wifi" : "wifi.slash")
                         .font(.footnote.weight(.semibold))
                     if let synced = current.lastSyncedAt {
                         Text("Last synced \(synced.formatted(date: .abbreviated, time: .shortened))")
