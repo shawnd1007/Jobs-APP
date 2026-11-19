@@ -12,7 +12,7 @@ import prototype
 class PrototypeTests(unittest.TestCase):
     def setUp(self):
         base = json.loads((Path(__file__).resolve().parent / "config.example.json").read_text())
-        config = patch.object(app, "config", side_effect=lambda: app.prototype.settings(dict(base), app.DATA))
+        config = patch.object(app, "config", side_effect=lambda **_: app.prototype.settings(dict(base), app.DATA))
         config.start()
         self.addCleanup(config.stop)
         self.tmp = tempfile.TemporaryDirectory()
@@ -52,7 +52,9 @@ class PrototypeTests(unittest.TestCase):
         self.assertFalse(app.salary_qualifies(j, cfg))
 
     def test_preferences_conflicts_and_validation(self):
-        state = app.snapshot()
+        with patch.object(app, 'connect', wraps=app.connect) as connect:
+            state = app.snapshot()
+        connect.assert_called_once_with()
         payload = dict(revision=state['preferences_revision'], preferences={'salary_floor': 81000})
         self.assertEqual(prototype.save_preferences(app, payload)[0], 200)
         self.assertEqual(app.config()['salary_floor'], 81000)

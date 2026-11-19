@@ -7,7 +7,7 @@ from http.server import ThreadingHTTPServer
 import app
 app.SEED=Path(__file__).resolve().parent/'fixtures'/'seed.html'
 
-def fixture_config():
+def fixture_config(*, connection=None):
     base = json.loads((Path(__file__).resolve().parent / 'config.example.json').read_text())
     return app.prototype.settings(base, app.DATA)
 

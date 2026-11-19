@@ -2,6 +2,93 @@ import XCTest
 
 final class JobsSearchUITests: XCTestCase {
     @MainActor
+    func testRecruiterProgressAndActivity() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18087"]
+        app.launch()
+
+        let forYou = app.tabBars.buttons["For You"]
+        XCTAssertTrue(forYou.waitForExistence(timeout: 20))
+        forYou.tap()
+        let search = app.buttons["Find my matches"]
+        XCTAssertTrue(search.waitForExistence(timeout: 12))
+        search.tap()
+
+        XCTAssertTrue(app.staticTexts["Checking employer boards"].waitForExistence(timeout: 12))
+        XCTAssertTrue(app.staticTexts["Comparing jobs with your experience"].waitForExistence(timeout: 18))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "of 6 complete"))
+            .firstMatch.waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 22))
+        XCTAssertTrue(app.staticTexts["Medical Billing Specialist"].waitForExistence(timeout: 8))
+        app.buttons["Search activity"].tap()
+        XCTAssertTrue(app.navigationBars["Search activity"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 8))
+    }
+
+    @MainActor
+    func testRecommendedAndReviewCardsCanResearchUnpublishedPay() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18087"]
+        app.launch()
+
+        let forYou = app.tabBars.buttons["For You"]
+        XCTAssertTrue(forYou.waitForExistence(timeout: 20))
+        forYou.tap()
+        let search = app.buttons["Find my matches"]
+        XCTAssertTrue(search.waitForExistence(timeout: 12))
+        search.tap()
+
+        XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 45))
+        XCTAssertTrue(app.staticTexts["Medical Billing Specialist"].exists)
+        XCTAssertFalse(app.staticTexts["Salary check needed. Comparable base pay is not disclosed."].exists)
+        let research = app.buttons["shortlistMarketPay"].firstMatch
+        for _ in 0..<5 {
+            if research.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(research.isHittable)
+        research.tap()
+        XCTAssertTrue(app.navigationBars["Market pay estimate"].waitForExistence(timeout: 8))
+        let query = app.buttons["Research market pay"]
+        XCTAssertTrue(query.waitForExistence(timeout: 8))
+        query.tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "75,000")).firstMatch
+            .waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Market range reaches your pay target"].waitForExistence(timeout: 8))
+        let source = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "Fictional wage data")).firstMatch
+        for _ in 0..<3 {
+            if source.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(source.waitForExistence(timeout: 8))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(research.waitForExistence(timeout: 8))
+        research.tap()
+        XCTAssertTrue(app.staticTexts["marketPayEstimate"].waitForExistence(timeout: 8))
+        XCTAssertFalse(query.exists)
+        app.buttons["Done"].tap()
+
+        let review = app.buttons["To confirm"]
+        for _ in 0..<4 {
+            if review.isHittable { break }
+            app.swipeDown()
+        }
+        XCTAssertTrue(review.isHittable)
+        review.tap()
+        XCTAssertTrue(app.staticTexts["Fictional Revenue Cycle Director"].waitForExistence(timeout: 8))
+        for _ in 0..<5 {
+            if research.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(research.isHittable)
+        research.tap()
+        XCTAssertTrue(query.waitForExistence(timeout: 8))
+    }
+
+    @MainActor
     func testSampleBrowseFiltersAndOffersLiveConnection() {
         continueAfterFailure = false
         let app = XCUIApplication()

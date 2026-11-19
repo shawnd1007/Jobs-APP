@@ -17,6 +17,7 @@ function searchMessage(running,run){
  if(!run?.finished)return '';
  if(run.state==='failed')return 'The search couldn’t complete. Saved listings are still here. Try again.';
  if(run.state==='interrupted')return 'The last search was interrupted. Run it again to continue.';
+ if(run.state==='stopped')return 'Search stopped. Openings already saved are still here.';
  const found=(run.new_qualified??run.report?.new_qualified??0)+(run.new_review??run.report?.new_review??0);
  const saved=found===1?'1 new listing saved.':found+' new listings saved.';
  if(run.state==='partial')return 'Search finished with incomplete checks. '+saved+' Run again to retry.';
@@ -40,7 +41,7 @@ async function pollSearch(){
   }
  }catch{
   $('search-progress').textContent=searchRunning
-   ?'Can’t confirm the search status. The Mac may still be searching. Retrying…'
+   ?'Can’t confirm the search status. The search may still be running. Retrying…'
    :'Search finished. The dashboard hasn’t refreshed yet. Retrying…';
  }finally{searchPolling=false;}
 }
@@ -57,12 +58,17 @@ function bucket(j){
  return 'review';
 }
 function notify(message){$('notice').textContent=message;}
+function shownInBucket(job, key) {
+ if (!job.hidden_from_discovery) return true;
+ return ['applied','interviews','offers','archive'].includes(key)
+  && Boolean(job.application_date || job.follow_up || job.notes || !unapplied.includes(job.status));
+}
 function discardCheck(){if(drafts.size&&!confirm('Discard unsaved changes?'))return false;drafts.clear();return true;}
 async function load(){const r=await fetch('/api/dashboard',{signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error('Could not load the shared job database.');state=await r.json();render();}
 function selectBucket(key){if(!discardCheck())return;followupOnly=false;activeBucket=key;history.replaceState(null,'','#'+key);document.querySelectorAll('.controls input').forEach(e=>e.value='');document.querySelectorAll('.controls select').forEach(e=>e.selectedIndex=0);render();$('bucket-title').scrollIntoView({behavior:'smooth',block:'start'});}
 function fillSelect(id,values,label){const old=$(id).value;$(id).innerHTML=option('',label)+values.map(v=>option(v)).join('');if([...$(id).options].some(o=>o.value===old))$(id).value=old;}
 function render(){
- renderPrototype();const jobs=state.jobs,counts={};for(const key of Object.keys(bucketInfo))counts[key]=key==='all'?jobs.length:jobs.filter(j=>bucket(j)===key).length;
+ renderPrototype();const jobs=state.jobs,counts={};for(const key of Object.keys(bucketInfo))counts[key]=jobs.filter(j=>shownInBucket(j,key)&&(key==='all'||bucket(j)===key)).length;
  $('buckets').innerHTML=Object.entries(bucketInfo).map(([key,[label]])=>`<button type="button" data-bucket="${key}" class="bucket ${activeBucket===key?'selected':''}" aria-pressed="${activeBucket===key}"><strong>${counts[key]}</strong><span>${esc(label)}</span></button>`).join('');
  $('buckets').querySelectorAll('button').forEach(b=>b.onclick=()=>selectBucket(b.dataset.bucket));
  $('bucket-title').textContent=bucketInfo[activeBucket][0];$('bucket-description').textContent=bucketInfo[activeBucket][1];
@@ -161,7 +167,7 @@ function annualBaseMaximum(job) {
 }
 function filter(){
  const text=$('search').value.toLowerCase(),queue=$('queue').value;
- let list=state.jobs.filter(j=>(!followupOnly||(j.follow_up&&j.follow_up<=new Date().toLocaleDateString('en-CA')&&!['Rejected','Withdrawn','Position Closed'].includes(j.status)))&&(activeBucket==='all'||bucket(j)===activeBucket)&&(!text||[j.employer,j.title,j.description,j.notes,j.review_note].join(' ').toLowerCase().includes(text))&&(!$('status').value||j.status===$('status').value)&&(!$('company').value||j.employer===$('company').value)&&(!$('category').value||(j.category||'Imported')===$('category').value)&&(!$('area').value||j.area===$('area').value)&&(!$('score').value||j.score>=+$('score').value)&&(!$('salary').value||annualBaseMaximum(j)>=+$('salary').value)&&(!$('posted').value||(j.posted||'').slice(0,10)>=$('posted').value)&&(!$('verified').value||(j.application_verified||'').slice(0,10)>=$('verified').value)&&(queue==='all'||j.queue===queue));
+ let list=state.jobs.filter(j=>shownInBucket(j, activeBucket)&&(!followupOnly||(j.follow_up&&j.follow_up<=new Date().toLocaleDateString('en-CA')&&!['Rejected','Withdrawn','Position Closed'].includes(j.status)))&&(activeBucket==='all'||bucket(j)===activeBucket)&&(!text||[j.employer,j.title,j.description,j.notes,j.review_note].join(' ').toLowerCase().includes(text))&&(!$('status').value||j.status===$('status').value)&&(!$('company').value||j.employer===$('company').value)&&(!$('category').value||(j.category||'Imported')===$('category').value)&&(!$('area').value||j.area===$('area').value)&&(!$('score').value||j.score>=+$('score').value)&&(!$('salary').value||annualBaseMaximum(j)>=+$('salary').value)&&(!$('posted').value||(j.posted||'').slice(0,10)>=$('posted').value)&&(!$('verified').value||(j.application_verified||'').slice(0,10)>=$('verified').value)&&(queue==='all'||j.queue===queue));
  const sort=$('sort').value;list.sort((a,b)=>sort==='score'?b.score-a.score:sort==='salary'?annualBaseMaximum(b)-annualBaseMaximum(a):sort==='status'?a.status.localeCompare(b.status):String(b[sort]||'').localeCompare(String(a[sort]||''))||b.id-a.id);
  $('count').textContent=`${list.length} jobs in this view · ${state.jobs.length} retained in history. Human approval and employer verification are separate.`;
  $('jobs').innerHTML=list.map(j=>j.external_application?externalCard(j):`<article data-id="${j.id}"><div class="top"><span class="tag">${esc(j.match_label)} · ${j.score}/100</span><em>#${j.id}</em></div><div class="company">${esc(j.employer)}</div><h2>${esc(j.title)}</h2><div class="salary">${esc(j.salary_text||'Salary Not Published')}</div><em>${esc(j.location)}</em><div class="note">${esc(j.location_reason)}</div><div class="badges"><span class="tag decision-${esc(j.review_decision.toLowerCase())}">${esc(j.review_decision==='Approved'?'Approved by you':j.review_decision==='Pending'?'Awaiting review':j.review_decision)}</span><span class="tag">${esc(j.status)}</span><span class="tag">${j.queue==='Confirmed'?'Employer verified':'Automatic checks incomplete'}</span>${j.availability==='Closed'?'<span class="tag">Closed</span>':''}${listingBadges(j)}</div><div class="why">${esc(j.explanation)}</div>${j.duty_evidence?.length?`<details><summary>Experience matched to duties</summary><ul>${j.duty_evidence.map(item=>`<li><strong>${esc(item.skill)}</strong> · ${esc(item.duty)}</li>`).join('')}</ul></details>`:''}<details><summary>Employer description & verification</summary><p class="why">${esc(j.description)}</p><p class="note">${esc(j.application_evidence||'Not independently verified')}<br>Source: ${esc(j.source)}<br>Employer source checked: ${esc(date(j.last_verified))}<br>Direct posting checked: ${esc(date(j.posting_verified))}<br>Application form verified: ${esc(date(j.application_verified))}<br>Posted: ${esc(j.posted||'Unknown')}<br>Tracking updated: ${esc(date(j.tracking_updated))}</p></details><div class="actions">${employerPostingLink(j)}${state.application_prep_available?'<button class="btn secondary open-prep" type="button">Application Prep</button>':''}${unapplied.includes(j.status)?`<button class="btn secondary mark-applied">${bucket(j)==='ready'?'Mark as applied':'Already applied'}</button>`:''}</div>${aiPanel(j)}${reviewPanel(j)}${trackingPanel(j)}</article>`).join('')||`<div class="empty"><h2>No jobs in this bucket yet</h2><p>${activeBucket==='ready'?'Approve a job in Review Inbox to move it here.':activeBucket==='applied'?'Mark a job as applied to move it here.':'Try another bucket or clear your filters.'}</p></div>`;

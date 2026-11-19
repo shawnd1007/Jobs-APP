@@ -6,13 +6,13 @@ import UserNotifications
 struct SearchScreen: View {
     let workspace: Workspace
 
-    private func searchOutcome(_ run: SearchRun) -> String {
-        let found = (run.report.newQualified ?? 0) + (run.report.newReview ?? 0)
+    private func searchOutcome(state: String, found: Int) -> String {
         let result = found == 1 ? "1 new listing saved." : "\(found) new listings saved."
-        switch run.state {
+        switch state {
         case "partial": return "Search finished with incomplete checks. " + result + " Run again to retry."
         case "failed": return "The search couldn’t complete. Previously saved listings are still here. Try again."
         case "interrupted": return "The last search was interrupted. Run it again to continue."
+        case "stopped": return "Search stopped. Openings already saved are still here."
         default: return found == 0 ? "Search finished. No new listings matched." : "Search finished. " + result
         }
     }
@@ -40,7 +40,7 @@ struct SearchScreen: View {
                     }
                     .disabled(!workspace.connected || workspace.searchRunning || workspace.startingSearch || workspace.saving)
                     if workspace.searchConnectionLost {
-                        Text("Can’t confirm the search status. The Mac may still be searching.")
+                        Text("Can’t confirm the search status. The search may still be running.")
                             .foregroundStyle(.secondary)
                         Button("Check search status") { Task { await workspace.checkSearchStatus() } }
                     } else if workspace.startingSearch {
@@ -54,12 +54,16 @@ struct SearchScreen: View {
                         } else {
                             ProgressView("Checking employer sources…")
                         }
-                        Text("You can keep browsing while the Mac searches.")
+                        Text("You can keep browsing while Jobs searches.")
                             .font(.footnote).foregroundStyle(.secondary)
                     } else if !workspace.connected {
                         Text("Reconnect to your Mac to find new jobs.").foregroundStyle(.secondary)
+                    } else if let run = workspace.searchStatus?.run, run.finished != nil {
+                        Text(searchOutcome(state: run.state, found: (run.newQualified ?? 0) + (run.newReview ?? 0)))
+                            .foregroundStyle(.secondary).accessibilityIdentifier("searchOutcome")
                     } else if let run = dashboard.runs.first, run.finished != nil {
-                        Text(searchOutcome(run)).foregroundStyle(.secondary)
+                        Text(searchOutcome(state: run.state, found: (run.report.newQualified ?? 0) + (run.report.newReview ?? 0)))
+                            .foregroundStyle(.secondary)
                             .accessibilityIdentifier("searchOutcome")
                     }
                     if let error = workspace.searchError { Text(error).foregroundStyle(.red) }
@@ -172,30 +176,60 @@ struct EmployerBoards: View {
 
     var body: some View {
         List {
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Explore more opportunities", systemImage: "sparkles")
+                        .font(.title3.bold())
+                    Text("Jobs checks employer career pages to discover openings for you.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6)
+            }
             if let message { Text(message).foregroundStyle(.secondary) }
             if let dashboard = workspace.dashboard {
                 if dashboard.sources.isEmpty {
                     ContentUnavailableView("No Employer Sources", systemImage: "building.2",
-                                           description: Text("Add a board or posting URL in Preferences."))
+                                           description: Text("No employer sources are configured yet."))
                 }
-                ForEach(dashboard.sources) { source in
-                    Section {
-                        Text(source.source).font(.headline)
-                        LabeledContent("Status", value: source.disabled ? "Paused" : source.state.capitalized)
-                        Text("\(source.kind) · \(source.count) postings at last check")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                        if !source.checked.isEmpty { Text(displayTimestamp(source.checked)).font(.footnote) }
-                        if !source.error.isEmpty { Text(source.error).foregroundStyle(.secondary) }
-                        Button(source.disabled ? "Resume Source" : "Pause Source") {
-                            Task { await toggle(source, dashboard: dashboard) }
+                Section("Employers we search") {
+                    ForEach(dashboard.sources) { source in
+                        DisclosureGroup {
+                            LabeledContent("Status", value: source.disabled ? "Paused" : source.state.capitalized)
+                            if !source.checked.isEmpty {
+                                LabeledContent("Last checked", value: displayTimestamp(source.checked))
+                                LabeledContent("Openings at last check", value: "\(source.count)")
+                            }
+                            if !source.error.isEmpty { Text(source.error).foregroundStyle(.secondary) }
+                            Button(source.disabled ? "Resume Source" : "Pause Source") {
+                                Task { await toggle(source, dashboard: dashboard) }
+                            }
+                            .disabled(workspace.saving || dashboard.running)
+                        } label: {
+                            Label {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(sourceName(source)).font(.headline)
+                                    Text(source.disabled ? "Paused" : source.checked.isEmpty ? "Not checked yet" : "Career page")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            } icon: {
+                                Image(systemName: "building.2.fill").foregroundStyle(.tint)
+                            }
                         }
-                        .disabled(workspace.saving || dashboard.running)
                     }
                 }
             }
         }
         .navigationTitle("Employer Boards")
         .refreshable { await workspace.refresh() }
+    }
+
+    private func sourceName(_ source: EmployerSource) -> String {
+        if let url = URL(string: source.source), let host = url.host, source.source.hasPrefix("https:") {
+            return host.replacingOccurrences(of: "www.", with: "")
+        }
+        let identifier = source.source.split(separator: "/").last.map(String.init) ?? source.source
+        return identifier.replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ").capitalized
     }
 
     private func toggle(_ source: EmployerSource, dashboard: Dashboard) async {
@@ -220,6 +254,10 @@ struct PreferencesScreen: View {
     let openSample: () -> Void
     @State private var editingPreferences = false
     @State private var editingAdministration = false
+    @State private var viewingMasterResume = false
+    @State private var confirmingRecruiterReset = false
+    @State private var resettingRecruiter = false
+    @State private var resetMessage: String?
 
     var body: some View {
         List {
@@ -227,6 +265,9 @@ struct PreferencesScreen: View {
                 Section("Search Profile") {
                     Button("Edit Search Profile", systemImage: "slider.horizontal.3") {
                         editingPreferences = true
+                    }
+                    if !workspace.isSample {
+                        Button("View Master Résumé", systemImage: "doc.text") { viewingMasterResume = true }
                     }
                     LabeledContent("Role Phrases", value: String(dashboard.preferences.categories.count))
                     LabeledContent("Selected Skills", value: String(dashboard.preferences.preferredSkills?.count ?? 0))
@@ -244,6 +285,17 @@ struct PreferencesScreen: View {
                 Button("Workspace Administration", systemImage: "gearshape") { editingAdministration = true }
                 NavigationLink("Employer Boards") { EmployerBoards(workspace: workspace) }
             }
+            if !workspace.isSample {
+                Section("Recruiter") {
+                    NavigationLink("AI Usage and Cost") { RecruiterUsageScreen(workspace: workspace) }
+                    Button("Start a New Résumé", systemImage: "arrow.counterclockwise", role: .destructive) {
+                        confirmingRecruiterReset = true
+                    }.disabled(resettingRecruiter || workspace.address.isEmpty)
+                    Text("Clears the master résumé, profile, preferences and matches on this server. Saved jobs, tracking and tailored drafts remain; drafts may contain résumé information.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if let resetMessage { Text(resetMessage).font(.footnote) }
+                }
+            }
             Section("Connection") {
                 Button("Server Settings", systemImage: "desktopcomputer", action: editServer)
                 Text(workspace.address).font(.footnote).foregroundStyle(.secondary)
@@ -259,7 +311,13 @@ struct PreferencesScreen: View {
         .scrollContentBackground(.hidden)
         .background(JobsTheme.canvas.ignoresSafeArea())
         .navigationTitle("Settings")
+        .confirmationDialog("Start a new résumé?", isPresented: $confirmingRecruiterReset, titleVisibility: .visible) {
+            Button("Clear Recruiter Profile", role: .destructive) { Task { await resetRecruiter() } }
+        } message: {
+            Text("This clears the master résumé and recruiter results for every connected device. Saved jobs, applications and tailored drafts are kept.")
+        }
         .refreshable { await workspace.refresh() }
+        .sheet(isPresented: $viewingMasterResume) { MasterResumeView(workspace: workspace) }
         .sheet(isPresented: $editingAdministration) {
             if let dashboard = workspace.dashboard {
                 PreferencesEditor(workspace: workspace, dashboard: dashboard, administration: true)
@@ -270,6 +328,62 @@ struct PreferencesScreen: View {
                 PreferencesEditor(workspace: workspace, dashboard: dashboard)
             }
         }
+    }
+
+    @MainActor private func resetRecruiter() async {
+        resettingRecruiter = true
+        defer { resettingRecruiter = false }
+        do {
+            let data = try await DashboardAPI.request("/api/recruiter", at: workspace.address)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let state = try decoder.decode(RecruiterState.self, from: data)
+            let body = try JSONSerialization.data(withJSONObject: ["action": "reset", "version": state.version])
+            _ = try await DashboardAPI.request("/api/recruiter", at: workspace.address, body: body)
+            resetMessage = "Recruiter profile cleared. You can upload a new résumé."
+        } catch { resetMessage = error.localizedDescription }
+    }
+}
+
+private struct RecruiterUsageScreen: View {
+    let workspace: Workspace
+    @State private var usage: RecruiterUsage?
+    @State private var error: String?
+
+    var body: some View {
+        List {
+            if let usage {
+                Section("About these estimates") {
+                    Text(usage.note)
+                    Text("Pricing checked \(usage.pricingAsOf).")
+                }.font(.footnote)
+                if usage.operations.isEmpty { Text("No recorded recruiter AI calls yet.") }
+                ForEach(Array(usage.operations.enumerated()), id: \.offset) { _, operation in
+                    Section(operation.kind == "career_strategy" ? "Résumé analysis" : operation.kind == "resume_tailor" ? "Résumé tailoring" : "Job comparisons") {
+                        LabeledContent("Started", value: operation.started)
+                        LabeledContent("Model", value: operation.model)
+                        LabeledContent("AI calls", value: "\(operation.calls)")
+                        LabeledContent("Input tokens", value: "\(operation.inputTokens)")
+                        LabeledContent("Cached input tokens", value: "\(operation.cachedInputTokens)")
+                        LabeledContent("Output tokens", value: "\(operation.outputTokens)")
+                        LabeledContent("Estimated known cost", value: operation.estimatedCostUsd.formatted(.currency(code: "USD").precision(.fractionLength(4...6))))
+                        if operation.unknownCalls > 0 {
+                            Text("\(operation.unknownCalls) call(s) have incomplete usage or unknown pricing and are not included in this estimate.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } else if let error { Text(error).foregroundStyle(.red) }
+            else { ProgressView("Loading AI usage…") }
+        }
+        .navigationTitle("AI Usage and Cost")
+        .task { await load() }
+        .refreshable { await load() }
+    }
+
+    private func load() async {
+        do { usage = try await DashboardAPI.recruiterUsage(at: workspace.address); error = nil }
+        catch { self.error = DashboardAPI.connectionMessage(for: error) }
     }
 }
 
@@ -457,19 +571,29 @@ struct PreferencesEditor: View {
                     }
                 }
             } else {
-                Section("Matching Rules") {
+                Section("Advanced matching rules") {
+                    Text("These are workspace rules for the older job search, not skills from your résumé. The recruiter builds your skills from the résumé you provide.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     multiline("Excluded title terms, one per line", $draft.exclusions)
                     multiline("Skill groups: Name | Weight | term, term", $draft.skills)
                 }
-                Section("Employer Sources") {
-                    boardField("Ashby", "ashby")
-                    boardField("Greenhouse", "greenhouse")
-                    boardField("Lever", "lever")
-                    boardField("SmartRecruiters", "smartrecruiters")
-                    boardField("Personio", "personio")
-                    boardField("Recruitee", "recruitee")
-                    multiline("Employer posting URLs, one per line", $draft.employerURLs)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                Section("Advanced source configuration") {
+                    NavigationLink("Manage source identifiers") {
+                        Form {
+                            Section {
+                                boardField("Ashby", "ashby")
+                                boardField("Greenhouse", "greenhouse")
+                                boardField("Lever", "lever")
+                                boardField("SmartRecruiters", "smartrecruiters")
+                                boardField("Personio", "personio")
+                                boardField("Recruitee", "recruitee")
+                                ProfileTermsLink(title: "Individual Posting URLs", prompt: "Add a posting URL", terms: $draft.employerURLs)
+                            } footer: {
+                                Text("These technical settings are shared by the workspace and stay when you start a new résumé.")
+                            }
+                        }
+                        .navigationTitle("Source Configuration")
+                    }
                 }
                 Section("Schedule") {
                     Toggle("Daily Employer Search", isOn: $draft.preferences.scheduleEnabled)
@@ -564,11 +688,10 @@ struct PreferencesEditor: View {
     }
 
     private func boardField(_ name: String, _ platform: String) -> some View {
-        multiline("\(name) board slugs, one per line", Binding(
+        ProfileTermsLink(title: name, prompt: "Add an employer board identifier", terms: Binding(
             get: { draft.boards[platform, default: ""] },
             set: { draft.boards[platform] = $0 }
-        ))
-        .textInputAutocapitalization(.never).autocorrectionDisabled()
+        ), emptySummary: "No boards")
     }
 
     private func multiline(_ label: String, _ value: Binding<String>) -> some View {
@@ -579,7 +702,7 @@ struct PreferencesEditor: View {
     }
 }
 
-private struct ResumePreview: Identifiable, Codable {
+struct ResumePreview: Identifiable, Codable {
     var id: String { name }
     let name: String
     let text: String
@@ -628,7 +751,8 @@ private struct ResumePreview: Identifiable, Codable {
             return searchable.range(of: #"(?<![\p{L}\p{N}+#])"# + phrase + #"(?![\p{L}\p{N}+#])"#,
                                     options: [.regularExpression, .caseInsensitive]) != nil
         }
-        return Self(name: url.lastPathComponent, text: String(text.prefix(16_000)), skills: skills)
+        guard text.count <= 30_000 else { throw ImportError("This résumé is too long. Use a shorter document with your relevant work history.") }
+        return Self(name: url.lastPathComponent, text: text, skills: skills)
     }
 
     private struct ImportError: LocalizedError {

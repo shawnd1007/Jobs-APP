@@ -41,6 +41,8 @@ struct Job: Decodable, Identifiable {
     var postingVerified: String? = nil
     var postingVerificationExpires: String? = nil
     var externalApplication: Bool? = nil
+    var hiddenFromDiscovery: Bool? = nil
+    var marketPayAvailable: Bool? = nil
     var interest: Interest?
     var matchedSkills: [String]?
     let matchedGroups: [String]?
@@ -247,6 +249,9 @@ struct SearchStatus: Decodable {
         let id: Int
         let state: String
         let started: String
+        let finished: String?
+        let newQualified: Int?
+        let newReview: Int?
         let progress: Progress?
     }
 
@@ -332,6 +337,24 @@ struct SavedApplicationDraft: Decodable {
     let updated: String
 }
 
+struct RecruiterUsage: Decodable {
+    struct Operation: Decodable {
+        let operation: Int?
+        let kind: String
+        let model: String
+        let started: String
+        let calls: Int
+        let inputTokens: Int
+        let outputTokens: Int
+        let cachedInputTokens: Int
+        let unknownCalls: Int
+        let estimatedCostUsd: Double
+    }
+    let operations: [Operation]
+    let pricingAsOf: String
+    let note: String
+}
+
 enum DashboardAPI {
     struct Snapshot {
         let dashboard: Dashboard
@@ -357,12 +380,13 @@ enum DashboardAPI {
         return parts.url
     }
 
-    static func endpoint(_ path: String, at address: String) -> URL? {
+    static func endpoint(_ path: String, at address: String, query: [URLQueryItem]? = nil) -> URL? {
         guard let base = webURL(address),
               var parts = URLComponents(url: base, resolvingAgainstBaseURL: false),
               parts.query == nil, parts.fragment == nil else { return nil }
         let prefix = parts.percentEncodedPath
         parts.percentEncodedPath = (prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix) + path
+        parts.queryItems = query
         return parts.url
     }
 
@@ -392,6 +416,20 @@ enum DashboardAPI {
         return try decoder.decode(SearchStatus.self, from: data)
     }
 
+    static func isReachable(at address: String) async -> Bool {
+        struct Health: Decodable { let status: String }
+        guard let data = try? await request("/api/v1/health", at: address),
+              let health = try? JSONDecoder().decode(Health.self, from: data) else { return false }
+        return health.status == "ok"
+    }
+
+    static func recruiterUsage(at address: String) async throws -> RecruiterUsage {
+        let data = try await request("/api/recruiter/usage", at: address)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(RecruiterUsage.self, from: data)
+    }
+
     static func applicationPrep(jobID: Int, at address: String) async throws -> ApplicationPrep {
         let data = try await request("/api/jobs/\(jobID)/application-prep", at: address)
         let decoder = JSONDecoder()
@@ -418,7 +456,9 @@ enum DashboardAPI {
 
     static func connectionMessage(for error: Error) -> String {
         if error is DecodingError { return "This address didn’t return a compatible Jobs workspace." }
-        if error is URLError { return "Check that your Mac is awake, the Jobs server is running, and this device can reach it." }
+        if let error = error as? URLError {
+            return "Could not reach the Jobs workspace (network diagnostic \(error.errorCode)). Check the server address and connection."
+        }
         return error.localizedDescription
     }
 
@@ -429,12 +469,29 @@ enum DashboardAPI {
         _ = try await request(path, at: address, body: encoder.encode(body))
     }
 
-    private static func request(_ path: String, at address: String, body: Data? = nil) async throws -> Data {
-        guard let url = endpoint(path, at: address) else {
+    static func request(_ path: String, at address: String, body: Data? = nil,
+                        query: [URLQueryItem]? = nil) async throws -> Data {
+        guard let url = endpoint(path, at: address, query: query) else {
             throw ServerError(status: 0, message: "Check the URL in Server Settings.")
         }
-        var request = URLRequest(url: url, timeoutInterval: path.hasSuffix("/ai-review") ? 105 : (path.hasSuffix("/search-status") ? 5 : 15))
+        let timeout: TimeInterval
+        switch path {
+        case _ where path.hasSuffix("/ai-review") || path.hasSuffix("/tailored-resume")
+                          || (path.hasSuffix("/market-pay") && body != nil),
+             "/api/recruiter" where body != nil:
+            timeout = 105
+        case "/api/v1/dashboard":
+            timeout = 30
+        case "/api/v1/health":
+            timeout = 5
+        default:
+            timeout = 15
+        }
+        var request = URLRequest(url: url, timeoutInterval: timeout)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let token = try await MicrosoftSession.shared.accessToken(for: address) {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         if let body {
             request.httpMethod = "POST"
             request.httpBody = body

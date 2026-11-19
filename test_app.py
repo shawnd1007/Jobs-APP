@@ -7,17 +7,59 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 import app
+import us_locations
 
 class PersistenceTests(unittest.TestCase):
+ def test_cached_location_restrictions_refresh_with_changed_posting(self):
+  us_locations._cached_location_clauses.cache_clear()
+  header = 'Remote – US'
+  bay = 'This role will be remote and based in the Bay Area.'
+  nationwide = 'Remote hiring is available across the United States.'
+  first = us_locations.remote_eligibility(header, bay, 'Florida, United States')
+  self.assertEqual(first[0], 'avoid')
+  self.assertEqual(us_locations.remote_eligibility(header, bay, 'Florida, United States'), first)
+  self.assertGreater(us_locations._cached_location_clauses.cache_info().hits, 0)
+  self.assertEqual(us_locations.remote_eligibility(header, nationwide, 'Florida, United States')[0], 'pass')
+  self.assertTrue(us_locations.foreign_location('Bogotá, Colombia'))
+  before = us_locations._cached_location_clauses.cache_info().currsize
+  list(us_locations.location_clauses('x' * 32769))
+  list(us_locations.location_clauses('😀' * 8193))
+  self.assertEqual(us_locations._cached_location_clauses.cache_info().currsize, before)
+
+ def test_large_malformed_text_and_geographic_pay_tiers(self):
+  tail = '<' * 50000
+  self.assertEqual(app.clean('<p>Example</p>' + tail), 'Example ' + tail)
+  description = 'Annual base salary $100,000 - $120,000 annually. ' + ('geographic ' * 4000)
+  job = {}
+  app.normalize_salary_evidence(job, description)
+  self.assertEqual((job['salary_min'], job['salary_max']), (100000, 120000))
+  tiered = {}
+  app.normalize_salary_evidence(tiered, description + 'range')
+  self.assertNotIn('salary_min', tiered)
+  next_line = {}
+  app.normalize_salary_evidence(next_line, description + '\nrange')
+  self.assertEqual(next_line['salary_max'], 120000)
+
  def setUp(self):
   base = json.loads((Path(__file__).resolve().parent / "config.example.json").read_text())
-  config = patch.object(app, "config", side_effect=lambda: app.prototype.settings(dict(base), app.DATA))
+  config = patch.object(app, "config", side_effect=lambda **_: app.prototype.settings(dict(base), app.DATA))
   config.start()
   self.addCleanup(config.stop)
   self.tmp=tempfile.TemporaryDirectory();self.old=app.DB;self.olddata=app.DATA;self.oldseed=app.SEED;app.SEED=Path(__file__).resolve().parent/'fixtures'/'seed.html';app.DATA=Path(self.tmp.name);app.DB=app.DATA/'test.sqlite3';app.init()
  def tearDown(self):app.DB=self.old;app.DATA=self.olddata;app.SEED=self.oldseed;self.tmp.cleanup()
  def test_import_and_reimport(self):
   self.assertEqual(len(app.records()),50);app.init();self.assertEqual(len(app.records()),50)
+ def test_snapshot_reuses_location_assessment_for_review(self):
+  app.assessed_listing.cache_clear()
+  with patch.object(app, 'location_eligibility', wraps=app.location_eligibility) as eligibility:
+   snapshot = app.snapshot()
+   self.assertEqual(eligibility.call_count, len(snapshot['jobs']))
+   eligibility.reset_mock()
+   cached = app.snapshot()
+   eligibility.assert_not_called()
+  self.assertEqual(cached['jobs'], snapshot['jobs'])
+  for job in snapshot['jobs']:
+   self.assertEqual(job['review_blockers'], app.review_blockers(job, app.config()))
  def test_tracking_survives_closed_and_reopened(self):
   j=app.records()[0]
   note='Fictional fixture application note'
@@ -237,6 +279,85 @@ class PersistenceTests(unittest.TestCase):
   self.assertEqual(saved['identity'],'personio:fictional:123')
   self.assertNotIn('application_verified',saved)
   self.assertEqual(len(app.records()),2)
+
+ def test_recruiter_new_posting_checks_have_separate_budget_from_retained(self):
+  cfg = dict(app.config(), request_delay_seconds=0)
+  job = dict(title='Fictional Analyst', employer='Fictional', location='Remote - United States',
+             url='https://jobs.lever.co/fictional/abc', description='Review invoices.', availability='Open')
+  report = {'log': [], 'posting_checks': 8, 'retained_posting_checks': 8}
+  def verified(listing, *_args, **_kwargs):
+   listing['posting_verified'] = app.now()
+  with patch.object(app, 'verify_application', side_effect=verified) as verify:
+   checked = app.finalize(dict(job), cfg, report, check_posting=True)
+  self.assertEqual(verify.call_count, 1)
+  self.assertTrue(checked.get('posting_verified'))
+  self.assertEqual(report['posting_checks'], 9)
+  self.assertEqual(report['new_posting_checks'], 1)
+
+ def test_deferred_form_check_preserves_still_current_posting_verification(self):
+  cfg = dict(app.config(), request_delay_seconds=0, categories=['Fictional Analyst'],
+             preferred_skills=['Excel', 'SQL'], skill_groups=[])
+  job = dict(title='Fictional Analyst', employer='Fictional', location='Remote - United States',
+             url='https://jobs.lever.co/fictional/prior', description='Use Excel and SQL.',
+             availability='Open', salary_min=100000, salary_max=110000,
+             salary_currency='USD', salary_period='year', salary_type='base')
+  previous = dict(job, posting_verified=app.now(), application_evidence='Exact employer posting checked',
+                  posting_location_terms=['Remote restricted to Florida'])
+  report = {'log': [], 'retained_posting_checks': app.RETAINED_POSTING_CHECKS}
+  self.assertEqual(app.assess(dict(job), cfg)['queue'], 'Confirmed')
+  with patch.object(app, 'verify_application') as verify:
+   checked = app.finalize(dict(job), cfg, report, previous=previous)
+  verify.assert_not_called()
+  self.assertEqual(checked['posting_verified'], previous['posting_verified'])
+  self.assertEqual(checked['posting_location_terms'], previous['posting_location_terms'])
+  self.assertEqual(checked['queue'], 'Review')
+
+ def test_recruiter_recheck_preserves_tracking_and_applies_remote_restrictions(self):
+  cfg = dict(app.config(), us_postings_only=True, remote_hiring_locations=['Florida, United States'])
+  job = dict(title='Fictional Support Analyst', employer='Fictional', location='Remote - United States',
+             url='https://jobs.lever.co/fictional/qa-123', description='Support customers.',
+             availability='Needs Verification', posting_check_failed=True)
+  with app.connect() as c:
+   job_id, _ = app.upsert(c, job)
+   c.execute("UPDATE tracking SET status='Applied', notes=? WHERE job_id=?", ('Keep this note', job_id))
+  def verify(listing, **_kwargs):
+   listing.update(posting_verified=app.now(), posting_location_terms=['Remote restricted to California'])
+  with patch.object(app, 'verify_application', side_effect=verify):
+   checked = app.recheck_recruiter_postings([job_id], cfg)
+  self.assertEqual(checked[job_id]['availability'], 'Open')
+  self.assertFalse(app.discovery_location_allowed(checked[job_id], cfg))
+  current = next(item for item in app.records() if item['id'] == job_id)
+  self.assertEqual((current['status'], current['notes']), ('Applied', 'Keep this note'))
+
+ def test_recruiter_recheck_handles_failure_stop_and_concurrent_changes(self):
+  cfg = dict(app.config(), us_postings_only=True, remote_hiring_locations=['Florida, United States'])
+  job = dict(title='Fictional Support Analyst', employer='Fictional', location='Remote - United States',
+             url='https://jobs.lever.co/fictional/qa-456', description='Support customers.',
+             availability='Needs Verification')
+  with app.connect() as c: job_id, _ = app.upsert(c, job)
+  with patch.object(app, 'verify_application', side_effect=TimeoutError):
+   failed = app.recheck_recruiter_postings([job_id], cfg)
+  self.assertTrue(failed[job_id]['posting_check_failed'])
+  with patch.object(app, 'verify_application') as verify:
+   self.assertEqual(app.recheck_recruiter_postings([job_id], cfg, should_stop=lambda: True), {})
+   verify.assert_not_called()
+  def change_listing(listing, **_kwargs):
+   with app.connect() as c:
+    c.execute('UPDATE jobs SET listing=? WHERE id=?', (json.dumps(dict(job, description='Updated duties.')), job_id))
+   listing['posting_verified'] = app.now()
+  with patch.object(app, 'verify_application', side_effect=change_listing):
+   self.assertEqual(app.recheck_recruiter_postings([job_id], cfg), {})
+  self.assertEqual(next(item for item in app.records() if item['id'] == job_id)['description'], 'Updated duties.')
+
+ def test_recruiter_recheck_skips_foreign_listings(self):
+  cfg = dict(app.config(), us_postings_only=True, remote_hiring_locations=['Florida, United States'])
+  job = dict(title='Fictional Support Analyst', employer='Fictional', location='Bogotá, Colombia',
+             url='https://jobs.lever.co/fictional/qa-foreign', description='Support customers.',
+             availability='Needs Verification')
+  with app.connect() as c: job_id, _ = app.upsert(c, job)
+  with patch.object(app, 'verify_application') as verify:
+   self.assertEqual(app.recheck_recruiter_postings([job_id], cfg), {})
+   verify.assert_not_called()
  def test_distinct_requisitions_do_not_share_application_history(self):
   first = dict(title='Billing Analyst', employer='Fictional Employer',
                location='Remote - United States',
@@ -477,9 +598,9 @@ class PersistenceTests(unittest.TestCase):
  def test_unknown_salary_not_qualified(self):
   j={'title':'Financial Analyst','location':'Remote - United States','remote':True,'description':'Excel financial reconciliation','availability':'Open'}
   self.assertEqual(app.assess(j,app.config())['queue'],'Review')
- def test_restricted_remote_needs_review(self):
+ def test_restricted_remote_rejects_out_of_state_preferences(self):
   j={'title':'Financial Analyst','location':'Remote United States','remote':True,'description':'Must reside in California only','availability':'Open','salary_min':85000,'salary_max':100000,'salary_currency':'USD','salary_period':'year','salary_type':'base'}
-  self.assertEqual(app.assess(j,app.config())['eligibility'],'Review')
+  self.assertEqual(app.assess(j,app.config())['eligibility'],'Rejected')
  def test_below_floor_excluded(self):
   j={'title':'Financial Analyst','location':'Remote - United States','description':'Excel financial','availability':'Open','salary_max':65000,'salary_currency':'USD','salary_period':'year','salary_type':'base'}
   self.assertEqual(app.assess(j,app.config())['queue'],'Excluded')
@@ -678,6 +799,23 @@ class PersistenceTests(unittest.TestCase):
   self.assertTrue(chosen['url'].endswith('/transferable'))
   self.assertEqual(chosen['matched_duty_count'], 2)
   self.assertEqual(chosen['queue'], 'Review')
+
+ def test_recruiter_prioritizes_target_title_when_new_listings_are_limited(self):
+  _, cfg = self.pipeline_fixture()
+  cfg.update(recruiter_discovery=True, categories=['Billing Analyst'], preferred_skills=['Excel', 'SQL'],
+             profile='Used Excel and SQL in finance operations.', skill_groups=[], target_locations=[],
+             workplace_types=[], max_new_candidates=1, additional_boards={'ashby':['fictional']})
+  jobs = [dict(title=title, employer='Fictional', location='Remote - United States', description=description,
+               availability='Open', url='https://jobs.ashbyhq.com/fictional/'+identifier+'/application')
+          for title, description, identifier in (
+           ('Billing Analyst', 'Review billing accounts.', 'target'),
+           ('Director of Finance', 'Responsibilities:\nBuild SQL reports.\nReview Excel data.', 'director'))]
+  with patch.object(app, 'config', return_value=cfg), patch.object(app, 'board_jobs', return_value=jobs), \
+       patch.object(app, 'verify_application', side_effect=lambda job, *_args, **_kwargs: job.update(posting_verified=app.now())):
+   app.LOCK.acquire()
+   app.run_pipeline()
+  saved = [job for job in app.records() if job['employer'] == 'Fictional']
+  self.assertEqual([job['title'] for job in saved], ['Billing Analyst'])
 
  def test_smartrecruiters_checks_saved_search_titles_before_general_postings(self):
   _, cfg = self.pipeline_fixture()

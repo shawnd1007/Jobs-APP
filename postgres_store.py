@@ -1,0 +1,326 @@
+"""PostgreSQL connection primitives for the Jobs storage migration.
+
+Azure connections require managed identity and verified TLS. The Azure path
+still requires end-to-end deployment and recovery verification before use.
+"""
+
+import logging
+import threading
+import time
+from collections import deque
+
+_credential_lock = threading.Lock()
+_managed_identity_credential = None
+_pool_lock = threading.Lock()
+_azure_pools = {}
+_timing_lock = threading.Lock()
+_timings = {name: deque(maxlen=100) for name in (
+    'identity', 'postgres_connect', 'postgres_checkout', 'recruiter', 'recruiter_status', 'dashboard', 'search_status',
+    'sql_select', 'sql_write', 'sql_other', 'dashboard_load', 'dashboard_assess', 'dashboard_enrich',
+    'dashboard_location', 'dashboard_fit', 'dashboard_market', 'dashboard_review',
+    'assess_location', 'assess_arrangement', 'assess_salary', 'assess_skills', 'assess_evidence')}
+
+
+def record_timing(name, seconds):
+    """Retain only bounded durations for known service operations."""
+    if name not in _timings:
+        raise ValueError('Unknown timing category')
+    with _timing_lock:
+        _timings[name].append(seconds)
+
+
+def timing_summary():
+    with _timing_lock:
+        return {name: {'samples': len(values),
+                       'mean_seconds': round(sum(values) / len(values), 3) if values else None,
+                       'max_seconds': round(max(values), 3) if values else None}
+                for name, values in _timings.items()}
+
+class Row:
+    """Support the named and positional access used by the existing store."""
+
+    def __init__(self, names, values):
+        self._names = tuple(names)
+        self._values = tuple(values)
+        self._lookup = dict(zip(self._names, self._values))
+
+    def __getitem__(self, key):
+        if isinstance(key, (int, slice)):
+            return self._values[key]
+        return self._lookup[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def keys(self):
+        return self._names
+
+    def __len__(self):
+        return len(self._names)
+
+
+def rows(cursor):
+    """Build rows from a psycopg cursor without exposing credentials."""
+    names = tuple(column.name for column in (cursor.description or ()))
+
+    def make_row(values):
+        return Row(names, values)
+
+    return make_row
+
+
+def connect(dsn, *, token=None):
+    """Connect to a PostgreSQL server; callers manage credentials and TLS."""
+    import psycopg
+
+    kwargs = {'row_factory': rows}
+    if token is not None:
+        kwargs['password'] = token
+    return psycopg.connect(dsn, **kwargs)
+
+
+def connect_azure(dsn, ca_file):
+    """Connect using the app's managed identity, without embedding a secret."""
+    from pathlib import Path
+    from psycopg.conninfo import conninfo_to_dict
+    from azure.identity import ManagedIdentityCredential
+
+    options = conninfo_to_dict(dsn)
+    allowed = {'host', 'port', 'dbname', 'user', 'sslmode'}
+    host = options.get('host', '').lower()
+    if (set(options) - allowed or not host.endswith('.postgres.database.azure.com') or
+            ',' in host or not options.get('user') or not options.get('dbname') or
+            options.get('sslmode') != 'verify-full' or not Path(ca_file).is_file()):
+        raise ValueError('Azure PostgreSQL needs a server name, database user, verified TLS, and a trusted CA file')
+    # The credential owns an in-memory token cache and refreshes expiring tokens.
+    # Reuse it across connections, serializing access to its underlying client.
+    global _managed_identity_credential
+    started = time.monotonic()
+    token_finished = None
+    try:
+        with _credential_lock:
+            if _managed_identity_credential is None:
+                _managed_identity_credential = ManagedIdentityCredential()
+            token = _managed_identity_credential.get_token('https://ossrdbms-aad.database.windows.net/.default').token
+        token_finished = time.monotonic()
+        import psycopg
+        return psycopg.connect(dsn, password=token, sslrootcert=ca_file, row_factory=rows,
+                               connect_timeout=5, options='-c statement_timeout=8000 -c lock_timeout=5000')
+    finally:
+        finished = time.monotonic()
+        identity_end = token_finished if token_finished is not None else finished
+        record_timing('identity', identity_end - started)
+        if token_finished is not None:
+            record_timing('postgres_connect', finished - token_finished)
+        if finished - started >= 1:
+            logging.getLogger('jobs.timing').warning(
+                'Slow PostgreSQL connection: identity=%.2fs connect=%.2fs',
+                identity_end - started, finished - identity_end)
+
+
+class Unavailable(Exception):
+    """The workspace database could not service this request."""
+
+
+def is_temporary_error(error):
+    if isinstance(error, Unavailable):
+        return True
+    import sqlite3
+    if isinstance(error, sqlite3.OperationalError):
+        code = getattr(error, 'sqlite_errorcode', 0)
+        return code & 0xff in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    # Importing the PostgreSQL client is unnecessary for the SQLite app.
+    return getattr(error, 'sqlstate', None) in ('55P03', '57014', '57P01') or any(
+        cls.__name__ in ('OperationalError', 'InterfaceError') and cls.__module__.startswith('psycopg')
+        for cls in type(error).__mro__
+    )
+
+
+def workspace_connection(dsn, ca_file):
+    from psycopg import Connection as DriverConnection
+    from psycopg_pool import ConnectionPool, PoolTimeout, TooManyRequests
+
+    with _pool_lock:
+        key = (dsn, ca_file)
+        pool = _azure_pools.get(key)
+        if pool is None:
+            class AzureConnection(DriverConnection):
+                @classmethod
+                def connect(cls, conninfo='', **kwargs):
+                    return connect_azure(conninfo, ca_file)
+
+            pool = ConnectionPool(dsn, connection_class=AzureConnection, min_size=0, max_size=8,
+                                  max_waiting=24, timeout=6, check=ConnectionPool.check_connection,
+                                  open=True)
+            _azure_pools[key] = pool
+    started = time.monotonic()
+    try:
+        raw = pool.getconn()
+    except (PoolTimeout, TooManyRequests):
+        raise Unavailable() from None
+    finally:
+        record_timing('postgres_checkout', time.monotonic() - started)
+    return Connection(raw, release=pool.putconn)
+
+
+SCHEMA = (
+    '''CREATE TABLE IF NOT EXISTS jobs (
+        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        identity TEXT UNIQUE NOT NULL, fallback TEXT, listing TEXT NOT NULL,
+        created TEXT NOT NULL, updated TEXT NOT NULL)''',
+    'CREATE INDEX IF NOT EXISTS jobs_fallback ON jobs(fallback)',
+    '''CREATE TABLE IF NOT EXISTS tracking (
+        job_id BIGINT PRIMARY KEY REFERENCES jobs(id), status TEXT NOT NULL DEFAULT 'Needs Verification',
+        application_date TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '',
+        follow_up TEXT NOT NULL DEFAULT '', updated TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0)''',
+    '''CREATE TABLE IF NOT EXISTS runs (
+        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, started TEXT NOT NULL,
+        finished TEXT, state TEXT NOT NULL, report TEXT NOT NULL, trigger TEXT)''',
+    '''CREATE TABLE IF NOT EXISTS events (
+        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, job_id BIGINT,
+        at TEXT NOT NULL, detail TEXT NOT NULL)''',
+    '''CREATE TABLE IF NOT EXISTS usage (
+        day TEXT PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0,
+        credits REAL NOT NULL DEFAULT 0, reserved INTEGER NOT NULL DEFAULT 0)''',
+    '''CREATE TABLE IF NOT EXISTS job_interests (
+        job_id BIGINT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+        state TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL)''',
+    '''CREATE TABLE IF NOT EXISTS reviews (
+        job_id BIGINT PRIMARY KEY REFERENCES jobs(id), decision TEXT NOT NULL DEFAULT 'Pending',
+        note TEXT NOT NULL DEFAULT '', reviewer TEXT NOT NULL DEFAULT '', checks TEXT NOT NULL DEFAULT '{}',
+        updated TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0)''',
+    '''CREATE TABLE IF NOT EXISTS source_health (
+        source TEXT PRIMARY KEY, checked TEXT NOT NULL, state TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '')''',
+    '''CREATE TABLE IF NOT EXISTS ai_reviews (
+        job_id BIGINT PRIMARY KEY REFERENCES jobs(id), fingerprint TEXT NOT NULL,
+        created TEXT NOT NULL, model TEXT NOT NULL, advice TEXT NOT NULL, usage TEXT NOT NULL)''',
+    'CREATE TABLE IF NOT EXISTS ai_usage (day TEXT PRIMARY KEY, attempts INTEGER NOT NULL)',
+    '''CREATE TABLE IF NOT EXISTS saved_searches (
+        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        criteria TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0)''',
+    '''CREATE TABLE IF NOT EXISTS match_alerts (
+        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        search_id BIGINT NOT NULL REFERENCES saved_searches(id) ON DELETE CASCADE,
+        job_id BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        created TEXT NOT NULL, unread INTEGER NOT NULL DEFAULT 1, UNIQUE(search_id,job_id))''',
+    '''CREATE TABLE IF NOT EXISTS application_drafts (
+        job_id BIGINT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+        draft TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL)''',
+    'CREATE TABLE IF NOT EXISTS recruiter_state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)',
+    'CREATE TABLE IF NOT EXISTS recruiter_match_cache (fingerprint TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    '''CREATE TABLE IF NOT EXISTS recruiter_activity (
+        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+        operation INTEGER NOT NULL, recorded_at TEXT NOT NULL, progress TEXT NOT NULL)''',
+    'CREATE TABLE IF NOT EXISTS workspace_preferences (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)',
+    '''CREATE TABLE IF NOT EXISTS recruiter_ai_calls (
+        id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, operation INTEGER,
+        kind TEXT NOT NULL, model TEXT NOT NULL, started TEXT NOT NULL, status TEXT NOT NULL,
+        input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER)''',
+)
+
+
+def initialize_empty_schema(connection):
+    """Create the schema on a new database without importing any user data."""
+    for statement in SCHEMA:
+        connection.execute(statement)
+
+
+def read_preferences(connection):
+    """Read the optional workspace settings without consulting the local Mac."""
+    import json
+    row = connection.execute('SELECT value FROM workspace_preferences WHERE id=1').fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def write_preferences(connection, preferences):
+    """Store settings as one atomic value inside the PostgreSQL transaction."""
+    import json
+    connection.execute('INSERT INTO workspace_preferences(id,value) VALUES(1,?) '
+                       'ON CONFLICT(id) DO UPDATE SET value=excluded.value',
+                       (json.dumps(preferences),))
+
+
+def parameterize(statement):
+    """Convert positional placeholders without changing SQL string literals."""
+    output = []
+    i = 0
+    quoted = None
+    while i < len(statement):
+        char = statement[i]
+        if quoted:
+            output.append('%%' if char == '%' else char)
+            if char == quoted:
+                if i + 1 < len(statement) and statement[i + 1] == quoted:
+                    output.append(quoted)
+                    i += 1
+                else:
+                    quoted = None
+        elif char in ("'", '"'):
+            quoted = char
+            output.append(char)
+        elif char == '?':
+            output.append('%s')
+        elif char == '%':
+            output.append('%%')
+        else:
+            output.append(char)
+        i += 1
+    if quoted:
+        raise ValueError('Unterminated SQL literal')
+    return ''.join(output)
+
+
+class Connection:
+    """Translate storage operations while retaining transaction boundaries."""
+
+    postgres_connection = True
+
+    def __init__(self, raw, *, release=None):
+        self.raw = raw
+        self.release = release
+
+    @property
+    def in_transaction(self):
+        from psycopg.pq import TransactionStatus
+        return self.raw.info.transaction_status != TransactionStatus.IDLE
+
+    def execute(self, statement, params=None):
+        keyword = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ''
+        category = 'sql_select' if keyword == 'SELECT' else 'sql_write' if keyword in (
+            'INSERT', 'UPDATE', 'DELETE') else 'sql_other'
+        started = time.monotonic()
+        try:
+            if statement.strip().upper() == 'BEGIN IMMEDIATE':
+                # All app writers using this connection share the same transaction lock.
+                return self.raw.execute('SELECT pg_advisory_xact_lock(754086278)')
+            if params is None:
+                return self.raw.execute(statement)
+            return self.raw.execute(parameterize(statement), params)
+        finally:
+            record_timing(category, time.monotonic() - started)
+
+    def executemany(self, statement, params):
+        with self.raw.cursor() as cursor:
+            cursor.executemany(parameterize(statement), params)
+
+    def commit(self):
+        self.raw.commit()
+
+    def rollback(self):
+        self.raw.rollback()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            if exc_type is None:
+                self.raw.commit()
+            else:
+                self.raw.rollback()
+        finally:
+            if self.release is None:
+                self.raw.close()
+            else:
+                self.release(self.raw)
