@@ -41,7 +41,13 @@ SPECS = [
 
 def fake_ai(a, name, inputs, schema):
     if name == 'career_strategy':
-        return strategy(inputs['resume'])
+        passages = inputs['resume_passages']
+        response = strategy('\n'.join(passage['text'] for passage in passages))
+        for field in ('skills', 'roles', 'adjacent_roles', 'cautions'):
+            for item in response[field]:
+                quote = item.pop('evidence')
+                item['evidence_id'] = next(passage['id'] for passage in passages if quote in passage['text'])
+        return response
     candidate, job = inputs['candidate'], inputs['job']
     medical = 'billing' in candidate['summary']
     fits = ('denial' in job['description']) if medical else ('CNC' in job['description'])

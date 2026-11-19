@@ -114,6 +114,8 @@ final class Workspace {
     let isSample: Bool
     private var keepOfflineCopy = true
     @ObservationIgnored private var cachedSnapshot: DashboardAPI.Snapshot?
+    @ObservationIgnored private var currentSnapshot: DashboardAPI.Snapshot?
+    @ObservationIgnored private var legacyDashboardUntil: Date?
 
     init(isSample: Bool = false) {
         self.isSample = isSample
@@ -133,9 +135,14 @@ final class Workspace {
         searchConnectionLost = false
         latestLoad = UUID()
         cachedSnapshot = keepOfflineCopy && snapshot == nil ? OfflineWorkspace.load(for: address) : nil
-        dashboard = cachedSnapshot?.dashboard
-        lastSyncedAt = cachedSnapshot?.syncedAt
-        if let snapshot { accept(snapshot) }
+        currentSnapshot = cachedSnapshot
+        legacyDashboardUntil = nil
+        dashboard = currentSnapshot?.dashboard
+        lastSyncedAt = currentSnapshot?.syncedAt
+        if let snapshot {
+            if snapshot.revision == nil { legacyDashboardUntil = snapshot.syncedAt.addingTimeInterval(60) }
+            accept(snapshot)
+        }
     }
 
     func setOfflineCopyEnabled(_ enabled: Bool) {
@@ -151,13 +158,17 @@ final class Workspace {
         }
     }
 
-    private func accept(_ snapshot: DashboardAPI.Snapshot) {
-        dashboard = snapshot.dashboard
+    private func accept(_ snapshot: DashboardAPI.Snapshot, contentChanged: Bool = true) {
+        currentSnapshot = snapshot
+        if contentChanged { dashboard = snapshot.dashboard }
         lastSyncedAt = snapshot.syncedAt
         connected = true
         connectionError = nil
         let cacheAge = cachedSnapshot.map { snapshot.syncedAt.timeIntervalSince($0.syncedAt) } ?? .infinity
-        if keepOfflineCopy && (cachedSnapshot?.data != snapshot.data || cacheAge >= 60) {
+        let needsOfflineWrite = cachedSnapshot == nil || cachedSnapshot?.revision != snapshot.revision
+            || (contentChanged && cachedSnapshot?.data != snapshot.data)
+            || (snapshot.revision == nil && cacheAge >= 60)
+        if keepOfflineCopy && needsOfflineWrite {
             do {
                 try OfflineWorkspace.save(snapshot, for: address)
                 cachedSnapshot = snapshot
@@ -171,13 +182,18 @@ final class Workspace {
     func refresh(replacingInFlight: Bool = false) async {
         guard !isSample, !address.isEmpty, !choosingRecruiterFile, !loading || replacingInFlight else { return }
         let load = UUID()
+        let useChanges = legacyDashboardUntil.map { $0 <= .now } ?? true
         latestLoad = load
         loading = true
         defer { if latestLoad == load { loading = false } }
         do {
-            let result = try await DashboardAPI.load(at: address)
+            let result = try await DashboardAPI.load(at: address, previous: currentSnapshot, useChanges: useChanges)
             guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
-            accept(result)
+            if useChanges {
+                legacyDashboardUntil = result.snapshot.revision == nil
+                    ? result.snapshot.syncedAt.addingTimeInterval(60) : nil
+            }
+            accept(result.snapshot, contentChanged: result.contentChanged)
             await MatchNotifications.deliver(for: self)
         } catch {
             guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
@@ -567,9 +583,9 @@ private struct ServerSettings: View {
     private func connect(_ normalized: String) async {
         defer { pendingAddress = nil }
         do {
-            let snapshot = try await DashboardAPI.load(at: normalized)
+            let result = try await DashboardAPI.load(at: normalized)
             try Task.checkCancellation()
-            save(normalized, snapshot)
+            save(normalized, result.snapshot)
             dismiss()
         } catch {
             guard !Task.isCancelled else { return }

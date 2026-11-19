@@ -17,7 +17,7 @@ final class JobsSearchUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["Checking employer boards"].waitForExistence(timeout: 12))
         XCTAssertTrue(app.staticTexts["Comparing jobs with your experience"].waitForExistence(timeout: 18))
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "of 6 complete"))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "of 3 complete"))
             .firstMatch.waitForExistence(timeout: 8))
         XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 22))
         XCTAssertTrue(app.staticTexts["Medical Billing Specialist"].waitForExistence(timeout: 8))
@@ -27,7 +27,7 @@ final class JobsSearchUITests: XCTestCase {
     }
 
     @MainActor
-    func testRecommendedAndReviewCardsCanResearchUnpublishedPay() {
+    func testShortlistGroupsShowAutomaticAndManualMarketPay() {
         continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["-backendURL", "http://127.0.0.1:18087"]
@@ -40,7 +40,16 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertTrue(search.waitForExistence(timeout: 12))
         search.tap()
 
+        XCTAssertTrue(app.staticTexts["Comparing jobs with your experience"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["Medical Billing Specialist"].waitForExistence(timeout: 6))
+        XCTAssertTrue(app.staticTexts["Comparing jobs with your experience"].exists)
+        XCTAssertTrue(app.staticTexts["Researching market pay"].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.staticTexts["Medical Billing Specialist"].waitForExistence(timeout: 4))
+        XCTAssertFalse(app.staticTexts["Search complete"].exists)
         XCTAssertTrue(app.staticTexts["Search complete"].waitForExistence(timeout: 45))
+        for group in ["close", "adjacent", "review", "avoid"] {
+            XCTAssertTrue(app.buttons["shortlistGroup-\(group)"].exists)
+        }
         XCTAssertTrue(app.staticTexts["Medical Billing Specialist"].exists)
         XCTAssertFalse(app.staticTexts["Salary check needed. Comparable base pay is not disclosed."].exists)
         let research = app.buttons["shortlistMarketPay"].firstMatch
@@ -52,10 +61,10 @@ final class JobsSearchUITests: XCTestCase {
         research.tap()
         XCTAssertTrue(app.navigationBars["Market pay estimate"].waitForExistence(timeout: 8))
         let query = app.buttons["Research market pay"]
-        XCTAssertTrue(query.waitForExistence(timeout: 8))
-        query.tap()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "75,000")).firstMatch
-            .waitForExistence(timeout: 8))
+        let estimate = app.staticTexts["marketPayEstimate"]
+        XCTAssertTrue(estimate.waitForExistence(timeout: 8))
+        XCTAssertTrue(estimate.label.contains("75,000"))
+        XCTAssertFalse(query.exists)
         XCTAssertTrue(app.staticTexts["Market range reaches your pay target"].waitForExistence(timeout: 8))
         let source = app.descendants(matching: .any).matching(
             NSPredicate(format: "label CONTAINS %@", "Fictional wage data")).firstMatch
@@ -71,14 +80,22 @@ final class JobsSearchUITests: XCTestCase {
         XCTAssertFalse(query.exists)
         app.buttons["Done"].tap()
 
-        let review = app.buttons["To confirm"]
+        let review = app.buttons["shortlistGroup-review"]
         for _ in 0..<4 {
             if review.isHittable { break }
             app.swipeDown()
         }
         XCTAssertTrue(review.isHittable)
         review.tap()
-        XCTAssertTrue(app.staticTexts["Fictional Revenue Cycle Director"].waitForExistence(timeout: 8))
+        let director = app.staticTexts["Fictional Revenue Cycle Director"]
+        XCTAssertTrue(director.waitForExistence(timeout: 8))
+        let heading = app.staticTexts["shortlistConfirmationHeading"].firstMatch
+        XCTAssertTrue(heading.waitForExistence(timeout: 8))
+        let scope = app.staticTexts["Experience managing managers or team leads needs confirmation."]
+        XCTAssertTrue(scope.exists)
+        XCTAssertTrue(app.staticTexts["Check whether your résumé documents responsibility for managing managers or team leads."].exists)
+        XCTAssertFalse(app.staticTexts["Published remote location includes your region."].exists)
+        XCTAssertLessThan(heading.frame.minY, scope.frame.minY)
         for _ in 0..<5 {
             if research.isHittable { break }
             app.swipeUp()

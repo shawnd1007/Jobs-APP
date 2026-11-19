@@ -5,9 +5,9 @@ struct Dashboard: Decodable {
     let savedSearches: [SavedSearch]?
     let matchAlerts: [MatchAlert]?
     let unreadMatchCount: Int?
-    let runs: [SearchRun]
+    var runs: [SearchRun]
     let statuses: [String]
-    let running: Bool
+    var running: Bool
     var externalApplicationTracking: Bool? = nil
     var applicationPrepAvailable: Bool? = nil
     var preferences: Preferences
@@ -355,11 +355,50 @@ struct RecruiterUsage: Decodable {
     let note: String
 }
 
+struct RecruiterOpening: Decodable, Identifiable {
+    let id, title, employer, location, workArrangement, salary, postingUrl, discoveredAt: String
+}
+
+struct RecruiterOpeningsPage: Decodable {
+    let openings: [RecruiterOpening]
+    let nextBefore: String?
+}
+
+struct RecruiterConfirmationReason: Decodable {
+    let reason: String
+    let whatToCheck: String
+}
+
+struct RecruiterOpeningMatch: Decodable {
+    let group, reason, resumeEvidence, jobEvidence: String
+    let checks, gaps: [String]
+    let confirmationReasons: [RecruiterConfirmationReason]?
+}
+
 enum DashboardAPI {
     struct Snapshot {
         let dashboard: Dashboard
         let data: Data
         let syncedAt: Date
+        let revision: String?
+    }
+
+    struct Update {
+        let snapshot: Snapshot
+        let contentChanged: Bool
+    }
+
+    private struct DashboardChanges: Decodable {
+        let revision: String
+        let dashboard: Dashboard?
+        let jobs: [Job]?
+        let removed: [Int]?
+        let metadata: DashboardMetadata?
+    }
+
+    private struct DashboardMetadata: Decodable {
+        let runs: [SearchRun]?
+        let running: Bool?
     }
 
     struct ServerError: LocalizedError {
@@ -387,6 +426,10 @@ enum DashboardAPI {
         let prefix = parts.percentEncodedPath
         parts.percentEncodedPath = (prefix.hasSuffix("/") ? String(prefix.dropLast()) : prefix) + path
         parts.queryItems = query
+        // The server’s query parser interprets an unescaped plus as a space.
+        if let encodedQuery = parts.percentEncodedQuery {
+            parts.percentEncodedQuery = encodedQuery.replacingOccurrences(of: "+", with: "%2B")
+        }
         return parts.url
     }
 
@@ -404,9 +447,92 @@ enum DashboardAPI {
         return parts.string
     }
 
-    static func load(at address: String) async throws -> Snapshot {
+    static func load(at address: String, previous: Snapshot? = nil, useChanges: Bool = true) async throws -> Update {
+        if useChanges {
+            do {
+                var query = [URLQueryItem(name: "metadata", value: "1")]
+                if let revision = previous?.revision {
+                    query.append(URLQueryItem(name: "since", value: revision))
+                }
+                let data = try await request("/api/v1/dashboard/changes", at: address, query: query)
+                return try applyChanges(data, to: previous)
+            } catch let error as ServerError where error.status == 404 {
+                // Older servers only support full workspace reads.
+            }
+        }
         let data = try await request("/api/v1/dashboard", at: address)
-        return try snapshot(from: data, syncedAt: .now)
+        return try Update(snapshot: snapshot(from: data, syncedAt: .now), contentChanged: true)
+    }
+
+    static func applyChanges(_ data: Data, to previous: Snapshot?, syncedAt: Date = .now) throws -> Update {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let changes = try decoder.decode(DashboardChanges.self, from: data)
+        let revision = changes.revision
+        if let dashboard = changes.dashboard {
+            let response = try dashboardJSON(from: data)
+            guard let rawDashboard = response["dashboard"] as? [String: Any] else { throw invalidDashboardChanges }
+            let bytes = try JSONSerialization.data(withJSONObject: rawDashboard, options: .sortedKeys)
+            return Update(snapshot: Snapshot(dashboard: dashboard, data: bytes, syncedAt: syncedAt, revision: revision),
+                          contentChanged: true)
+        }
+        guard let previous, previous.revision != nil else { throw invalidDashboardChanges }
+        let changedJobs = changes.jobs ?? []
+        let removed = Set(changes.removed ?? [])
+        let jobChanges = !changedJobs.isEmpty || !removed.isEmpty
+        guard jobChanges || changes.metadata != nil else {
+            return Update(snapshot: Snapshot(dashboard: previous.dashboard, data: previous.data,
+                                             syncedAt: syncedAt, revision: revision), contentChanged: false)
+        }
+
+        var dashboard = previous.dashboard
+        var rawDashboard = try dashboardJSON(from: previous.data)
+        let response = try dashboardJSON(from: data)
+        if jobChanges {
+            guard let oldJobs = rawDashboard["jobs"] as? [[String: Any]] else { throw invalidDashboardChanges }
+            let rawChanges = response["jobs"] as? [[String: Any]] ?? []
+            dashboard.jobs = mergeJobs(dashboard.jobs, changed: changedJobs, removed: removed, id: { $0.id })
+            rawDashboard["jobs"] = mergeJobs(oldJobs, changed: rawChanges, removed: removed, id: { $0["id"] as? Int })
+        }
+        if let metadata = changes.metadata {
+            if let runs = metadata.runs {
+                guard let rawMetadata = response["metadata"] as? [String: Any],
+                      let rawRuns = rawMetadata["runs"] as? [[String: Any]] else { throw invalidDashboardChanges }
+                dashboard.runs = runs
+                rawDashboard["runs"] = rawRuns
+            }
+            if let running = metadata.running {
+                dashboard.running = running
+                rawDashboard["running"] = running
+            }
+        }
+        let bytes = try JSONSerialization.data(withJSONObject: rawDashboard, options: .sortedKeys)
+        return Update(snapshot: Snapshot(dashboard: dashboard, data: bytes, syncedAt: syncedAt, revision: revision),
+                      contentChanged: true)
+    }
+
+    private static var invalidDashboardChanges: DecodingError {
+        .dataCorrupted(.init(codingPath: [], debugDescription: "The dashboard update is missing a compatible snapshot."))
+    }
+
+    private static func dashboardJSON(from data: Data) throws -> [String: Any] {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw invalidDashboardChanges
+        }
+        return object
+    }
+
+    private static func mergeJobs<Row>(_ original: [Row], changed: [Row], removed: Set<Int>,
+                                       id: (Row) -> Int?) -> [Row] {
+        var byID: [Int: Row] = [:]
+        for row in original {
+            if let key = id(row) { byID[key] = row }
+        }
+        for row in changed {
+            if let key = id(row) { byID[key] = row }
+        }
+        for key in removed { byID.removeValue(forKey: key) }
+        return byID.sorted { $0.key < $1.key }.map(\.value)
     }
 
     static func searchStatus(at address: String) async throws -> SearchStatus {
@@ -430,6 +556,28 @@ enum DashboardAPI {
         return try decoder.decode(RecruiterUsage.self, from: data)
     }
 
+    static func recruiterOpenings(at address: String, before: String?, filter: String) async throws -> RecruiterOpeningsPage {
+        var query: [URLQueryItem] = []
+        if let before { query.append(.init(name: "before", value: before)) }
+        if !filter.isEmpty { query.append(.init(name: "q", value: filter)) }
+        let data = try await request("/api/recruiter/openings", at: address, query: query.isEmpty ? nil : query)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(RecruiterOpeningsPage.self, from: data)
+    }
+
+    static func compareRecruiterOpening(_ id: String, at address: String) async throws -> RecruiterOpeningMatch {
+        struct Response: Decodable { let match: RecruiterOpeningMatch }
+        let segmentCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_~"))
+        guard !id.isEmpty, let segment = id.addingPercentEncoding(withAllowedCharacters: segmentCharacters) else {
+            throw ServerError(status: 0, message: "Jobs couldn’t identify this opening.")
+        }
+        let data = try await request("/api/recruiter/openings/\(segment)/compare", at: address, body: Data("{}".utf8))
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(Response.self, from: data).match
+    }
+
     static func applicationPrep(jobID: Int, at address: String) async throws -> ApplicationPrep {
         let data = try await request("/api/jobs/\(jobID)/application-prep", at: address)
         let decoder = JSONDecoder()
@@ -448,10 +596,11 @@ enum DashboardAPI {
         return try JSONDecoder().decode(SavedApplicationDraft.self, from: data)
     }
 
-    fileprivate static func snapshot(from data: Data, syncedAt: Date) throws -> Snapshot {
+    fileprivate static func snapshot(from data: Data, syncedAt: Date, revision: String? = nil) throws -> Snapshot {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try Snapshot(dashboard: decoder.decode(Dashboard.self, from: data), data: data, syncedAt: syncedAt)
+        return try Snapshot(dashboard: decoder.decode(Dashboard.self, from: data), data: data,
+                            syncedAt: syncedAt, revision: revision)
     }
 
     static func connectionMessage(for error: Error) -> String {
@@ -477,10 +626,11 @@ enum DashboardAPI {
         let timeout: TimeInterval
         switch path {
         case _ where path.hasSuffix("/ai-review") || path.hasSuffix("/tailored-resume")
-                          || (path.hasSuffix("/market-pay") && body != nil),
+                          || (path.hasSuffix("/market-pay") && body != nil)
+                          || (path.hasPrefix("/api/recruiter/openings/") && path.hasSuffix("/compare") && body != nil),
              "/api/recruiter" where body != nil:
             timeout = 105
-        case "/api/v1/dashboard":
+        case "/api/v1/dashboard", "/api/v1/dashboard/changes":
             timeout = 30
         case "/api/v1/health":
             timeout = 5
@@ -526,16 +676,17 @@ enum OfflineWorkspace {
         let address: String
         let syncedAt: Date
         let data: Data
+        let revision: String?
     }
 
     static func load(for address: String) -> DashboardAPI.Snapshot? {
         guard let url = try? storageURL(), let data = try? Data(contentsOf: url),
               let stored = try? JSONDecoder().decode(Stored.self, from: data), stored.address == address else { return nil }
-        return try? DashboardAPI.snapshot(from: stored.data, syncedAt: stored.syncedAt)
+        return try? DashboardAPI.snapshot(from: stored.data, syncedAt: stored.syncedAt, revision: stored.revision)
     }
 
     static func save(_ snapshot: DashboardAPI.Snapshot, for address: String) throws {
-        let stored = Stored(address: address, syncedAt: snapshot.syncedAt, data: snapshot.data)
+        let stored = Stored(address: address, syncedAt: snapshot.syncedAt, data: snapshot.data, revision: snapshot.revision)
         try JSONEncoder().encode(stored).write(to: storageURL(), options: [.atomic, .completeFileProtection])
     }
 

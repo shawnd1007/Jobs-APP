@@ -19,7 +19,9 @@ import urllib.request as ur
 import xml.etree.ElementTree as ET
 from uuid import uuid4
 import prototype
+import dashboard_sync
 import recruiter
+import recruiter_openings
 import usajobs
 import postgres_store
 from us_locations import foreign_location, is_us_location, location_clauses, office_locations, remote_eligibility
@@ -321,6 +323,8 @@ def init():
             c.execute('PRAGMA user_version=4')
             prototype.init(c)
         recruiter.init(c, now)
+        recruiter_openings.init(c)
+        dashboard_sync.init(c)
         for run in c.execute("SELECT id,report FROM runs WHERE state='running'").fetchall():
             report = json.loads(run['report'])
             operation = report.get('recruiter_version')
@@ -479,7 +483,7 @@ def upsert(c,j):
     job_id=c.execute('INSERT INTO jobs(identity,fallback,listing,created,updated) VALUES(?,?,?,?,?) RETURNING id',(ident,fallback,json.dumps(j),stamp,stamp)).fetchone()[0]
     c.execute('INSERT INTO tracking(job_id,updated) VALUES(?,?)',(job_id,stamp))
     return job_id,True
-def records(*, connection=None, assessment_config=None, listing_only=False):
+def records(*, connection=None, assessment_config=None, listing_only=False, job_ids=None):
     if listing_only:
         query = 'SELECT jobs.* FROM jobs JOIN tracking ON jobs.id=tracking.job_id'
     else:
@@ -489,9 +493,12 @@ def records(*, connection=None, assessment_config=None, listing_only=False):
                    COALESCE(reviews.checks,'{}') review_checks, COALESCE(reviews.updated,'') review_updated,
                    COALESCE(reviews.version,0) review_version FROM jobs JOIN tracking ON jobs.id=tracking.job_id
                    LEFT JOIN reviews ON reviews.job_id=jobs.id"""
+    if job_ids is not None:
+        query += ' WHERE jobs.id IN (' + ','.join('?' for _ in job_ids) + ')'
+    query += ' ORDER BY jobs.id'
     with (connect() if connection is None else nullcontext(connection)) as c:
         result=[]
-        for row in c.execute(query):
+        for row in c.execute(query, () if job_ids is None else job_ids):
             d = dict(row)
             if not listing_only:
                 d['review_checks'] = json.loads(d['review_checks'])
@@ -500,6 +507,105 @@ def records(*, connection=None, assessment_config=None, listing_only=False):
             j.update(d)
             result.append(j)
         return result
+
+TRACKED_JOB_SOURCE = 'FROM jobs JOIN tracking ON tracking.job_id=jobs.id'
+
+
+def search_job_source(c, *, texts=(), flags=()):
+    if not getattr(c, 'postgres_connection', False):
+        return TRACKED_JOB_SOURCE
+    columns = ','.join([f'{field} text' for field in texts] + [f'{field} jsonb' for field in flags])
+    return f'''{TRACKED_JOB_SOURCE}
+               CROSS JOIN LATERAL jsonb_to_record(jobs.listing::jsonb) AS facts({columns})'''
+
+
+def listing_text(c, field):
+    if getattr(c, 'postgres_connection', False):
+        return f'facts.{field}'
+    return f"json_extract(jobs.listing,'$.{field}')"
+
+
+def listing_flag_unset(c, field):
+    if getattr(c, 'postgres_connection', False):
+        # Match Python's truthiness for old JSON values as well as current booleans.
+        return f'''COALESCE(facts.{field}, 'null'::jsonb)
+                   IN ('null', 'false', '0', '""', '[]', '{{}}')'''
+    path = f"'$.{field}'"
+    value = listing_text(c, field)
+    return f"""CASE json_type(jobs.listing,{path})
+                   WHEN 'array' THEN json_array_length({value})=0
+                   WHEN 'object' THEN json({value})='{{}}'
+                   ELSE COALESCE({value},0) IN (0,'') END"""
+
+
+def search_listing_query(read, fallback):
+    try:
+        with connect() as c:
+            return read(c)
+    except Exception as error:
+        # Older TEXT listings can contain JSON accepted by Python but rejected by the SQL engine.
+        if (getattr(error, 'sqlstate', None) in ('22003', '22P02', '22P05')
+                or isinstance(error, sqlite3.OperationalError) and str(error) == 'malformed JSON'):
+            return fallback(records(listing_only=True))
+        raise
+
+
+def discovery_job_headers():
+    """Read the saved posting keys and scheduling fields without transferring their descriptions."""
+    fields = ('url', 'title', 'employer', 'identity_review', 'pending_match_alert', 'posting_check_attempted',
+              'last_verified', 'availability', 'recruitee_offer_id', 'history_confirmation', 'posting_verified',
+              'posting_check_failed', 'application_verified', 'application_evidence', 'posting_location_terms')
+
+    def read(c):
+        postgres = getattr(c, 'postgres_connection', False)
+        included = ','.join(f"'{key}'" for key in fields)
+        projected = ('SELECT jsonb_object_agg(key,value) FROM jsonb_each(jobs.listing::jsonb)' if postgres else
+                     'SELECT json_group_object(key,jobs.listing->fullkey) FROM json_each(jobs.listing)')
+        source = search_job_source(c, flags=('external_application',))
+        rows = c.execute(f'''SELECT jobs.id, jobs.identity, ({projected} WHERE key IN ({included})) AS facts
+            {source} WHERE {listing_flag_unset(c, 'external_application')} ORDER BY jobs.id''')
+        headers = []
+        for row in rows:
+            facts = row['facts'] if postgres else json.loads(row['facts'])
+            headers.append(dict(facts or {}, id=row['id'], identity=row['identity']))
+        return headers
+
+    def fallback(jobs):
+        return [{key: job[key] for key in (*fields, 'id', 'identity') if key in job}
+                for job in jobs if not job.get('external_application')]
+
+    return search_listing_query(read, fallback)
+
+
+def manual_review_count():
+    def read(c):
+        source = search_job_source(c, texts=('queue', 'availability'), flags=('external_application',))
+        return c.execute(f'''SELECT COUNT(*) {source}
+            WHERE {listing_flag_unset(c, 'external_application')}
+            AND {listing_text(c, 'queue')} IN ('Review','Location Review')
+            AND COALESCE({listing_text(c, 'availability')},'') <> 'Closed' ''').fetchone()[0]
+
+    def fallback(jobs):
+        return sum(j.get('queue') in ('Review', 'Location Review') and j.get('availability') != 'Closed'
+                   for j in jobs if not j.get('external_application'))
+
+    return search_listing_query(read, fallback)
+
+
+def saved_comparison_jobs():
+    def read(c):
+        flags = ('external_application', 'identity_review', 'recruitee_offer_changed')
+        source = search_job_source(c, texts=('availability',), flags=flags)
+        filters = ' AND '.join(listing_flag_unset(c, flag) for flag in flags)
+        rows = c.execute(f'''SELECT jobs.id, jobs.created, jobs.listing {source}
+            WHERE {filters} AND COALESCE({listing_text(c, 'availability')},'') <> 'Closed' ORDER BY jobs.id''')
+        return [dict(json.loads(row['listing']), id=row['id'], created=row['created']) for row in rows]
+
+    def fallback(jobs):
+        return [job for job in jobs if not (job.get('external_application') or job.get('identity_review')
+                or job.get('recruitee_offer_changed') or job.get('availability') == 'Closed')]
+
+    return search_listing_query(read, fallback)
 
 UNAPPLIED={'Needs Verification','Not Applied','Planning to Apply'}
 def review_blockers(j, cfg=None, *, location_status=None):
@@ -824,7 +930,7 @@ RESPONSIBILITY_HEADINGS = frozenset({
     'what you will be doing', 'what you ll be doing', 'your impact',
 })
 NON_DUTY_HEADINGS = frozenset({
-    'qualifications', 'required qualifications', 'minimum qualifications', 'basic qualifications',
+    'qualifications', 'required', 'preferred', 'desired', 'required qualifications', 'minimum qualifications', 'basic qualifications',
     'preferred qualifications', 'requirements', 'job requirements', 'skills and experience',
     'what you bring', 'what you will bring', 'what you ll bring', 'who you are', 'nice to have',
     'what we are looking for', 'what we re looking for', 'who we are looking for',
@@ -833,9 +939,9 @@ NON_DUTY_HEADINGS = frozenset({
 })
 DUTY_ACTION = re.compile(
     r'^(?:(?:you (?:will|would)|this role will)\s+)?'
-    r'(?:analy[sz]e|audit|build|coordinate|create|design|develop|document|handle|implement|'
+    r'(?:analy[sz]e|audit|build|clean|coordinate|create|design|develop|document|handle|implement|'
     r'investigate|lead|maintain|manage|monitor|own|prepare|process|reconcile|report|resolve|'
-    r'review|support|track|train|troubleshoot|validate|verify)\b', re.I
+    r'review|support|track|train|troubleshoot|validate|verify|wrangle)\b', re.I
 )
 
 def employer_duties(description):
@@ -862,10 +968,10 @@ def employer_duties(description):
                 yield ' '.join(duty.split())
 
 PROFILE_ACTION = re.compile(
-    r'^(?:I\s+)?(?:analy[sz]ed|audited|automated|built|coordinated|created|designed|developed|'
+    r'^(?:I\s+)?(?:analy[sz]ed|audited|automated|built|cleaned|coordinated|created|designed|developed|'
     r'coached|configured|documented|handled|implemented|investigated|led|maintained|managed|monitored|owned|supervised|'
     r'prepared|processed|reconciled|reported|resolved|reviewed|supported|tracked|trained|'
-    r'troubleshot|used|validated|verified|worked\s+with)\b', re.I
+    r'troubleshot|used|validated|verified|worked\s+with|wrangled)\b', re.I
 )
 PROFILE_UNCERTAINTY = re.compile(
     r"\b(?:learning|want(?:ed)? to|plan(?:ned)? to|hope(?:d)? to|interested in|"
@@ -878,39 +984,152 @@ def skill_pattern(skill):
     return re.compile(r'(?<![\w+#])' + re.escape(skill) + r'(?![\w+#])', re.I)
 
 
-def profile_skill_examples(profile, skills):
+def profile_work_examples(profile):
     """Use only intact profile excerpts that describe affirmative work."""
-    examples = {}
-    patterns = {skill: skill_pattern(skill) for skill in skills if skill}
     for clause in re.split(r'[\r\n;•]+|(?<=[.!?])\s+', clean(profile)):
         line = ' '.join(re.sub(r'^(?:[-–*]+|\d+[.)])\s*', '', clause.strip()).split())
-        if not 0 < len(line) <= 320 or not PROFILE_ACTION.match(line) or PROFILE_UNCERTAINTY.search(line):
-            continue
+        if 0 < len(line) <= 320 and PROFILE_ACTION.match(line) and not PROFILE_UNCERTAINTY.search(line):
+            yield line
+
+
+def profile_skill_examples(profile, skills):
+    examples = {}
+    patterns = {skill: skill_pattern(skill) for skill in skills if skill}
+    if not patterns:
+        return examples
+    for line in profile_work_examples(profile):
         for skill, pattern in patterns.items():
             if skill not in examples and pattern.search(line):
                 examples[skill] = line
     return examples
 
 
-def experience_evidence(description, profile, skills, examples=None):
+SPREADSHEET_TOOLS = {
+    'Excel': re.compile(r'(?<![\w+#])excel(?![\w+#]|\s+at\b)', re.I),
+    'Google Sheets': re.compile(r'(?<![\w+#])google\s+sheets(?![\w+#])', re.I),
+}
+SPREADSHEET_TRANSFERS = (('Excel', 'Google Sheets'), ('Google Sheets', 'Excel'))
+SPREADSHEET_CAPABILITIES = tuple(re.compile(pattern, re.I) for pattern in (
+    r'\b(?:reports?|reporting)\b',
+    r'\breconcil(?:e[ds]?|ing|iations?)\b',
+    r'\bformula(?:s|e)?\b',
+    r'\bpivot[ -]+tables?\b',
+    r'\b(?:analy[sz](?:e[ds]?|ing)|analysis)\b',
+    r'\b(?:data (?:cleaning|wrangling)|(?:clean(?:ed|ing)?|wrangl(?:e[ds]?|ing))\s+data(?:sets)?)\b',
+    r'\btrack(?:s|ed|ing)?\b',
+))
+PLATFORM_SPECIFIC_SPREADSHEET = re.compile(
+    r'\b(?:VBA|Visual Basic|Apps Script|AppSheet|Office Scripts|Power Query|Power Pivot|'
+    r'macros?|add[- ]ins?|G Suite APIs?|Google Sheets APIs?|Excel APIs?)\b', re.I)
+SPREADSHEET_TOOL_ALTERNATIVE = re.compile(
+    r'\bor (?:an? )?(?:equivalent|comparable) (?:spreadsheet|software|tools?|applications?|platforms?)\b', re.I)
+SPREADSHEET_PAIR_ALTERNATIVE = re.compile(
+    r'\b(?:excel\s+or\s+google sheets|google sheets\s+or\s+(?:(?:microsoft|ms)\s+)?excel|'
+    r'either\s+(?:(?:(?:microsoft|ms)\s+)?excel\s*/\s*google sheets|'
+    r'google sheets\s*/\s*(?:(?:microsoft|ms)\s+)?excel)|'
+    r'excel\s*/\s*google sheets(?:,\s*looker)?\s+or\s+sql)\b', re.I)
+ADDITIONAL_SPREADSHEET_REQUIREMENT = re.compile(
+    r'\d|[,;]|\b(?:and|or|plus|along with|in addition to|years?|months?|certifi\w*|licen[cs]\w*|'
+    r'advanced|expert(?:ise)?|senior|degree|large|complex|high[ -]volume)\b', re.I)
+SPREADSHEET_WORK_CLAUSES = re.compile(r'\s+\b(and|but|then|while)\b\s+', re.I)
+
+
+def spreadsheet_capabilities(text, tool):
+    parts = SPREADSHEET_WORK_CLAUSES.split(text)
+    clauses = [parts[0]]
+    for conjunction, clause in zip(parts[1::2], parts[2::2]):
+        if conjunction.casefold() == 'and' and not (PROFILE_ACTION.match(clause) or DUTY_ACTION.match(clause)):
+            clauses[-1] += f' {conjunction} {clause}'
+        else:
+            clauses.append(clause)
+    return {pattern for clause in clauses if tool.search(clause)
+            for pattern in SPREADSHEET_CAPABILITIES if pattern.search(clause)}
+
+
+def documented_spreadsheet_alternative(requirement, resume):
+    """Find evidence for either explicitly accepted tool in a plain spreadsheet requirement."""
+    alternative = SPREADSHEET_PAIR_ALTERNATIVE.search(requirement)
+    if not alternative or PLATFORM_SPECIFIC_SPREADSHEET.search(requirement):
+        return False
+    context = requirement[:alternative.start()] + ' ' + requirement[alternative.end():]
+    if ADDITIONAL_SPREADSHEET_REQUIREMENT.search(context):
+        return False
+    capabilities = {pattern for pattern in SPREADSHEET_CAPABILITIES if pattern.search(context)}
+    lines = tuple(profile_work_examples(resume))
+    for tool in SPREADSHEET_TOOLS.values():
+        demonstrated = set().union(*(spreadsheet_capabilities(line, tool) for line in lines))
+        if demonstrated and capabilities <= demonstrated:
+            return True
+    return False
+
+
+def spreadsheet_transfer_evidence(description, duties, profile, transfers, used, *, limit):
+    if not transfers or limit <= 0:
+        return []
+    demonstrated = {}
+    for source, target in transfers:
+        capabilities = set().union(*(spreadsheet_capabilities(line, SPREADSHEET_TOOLS[source])
+                                     for line in profile_work_examples(profile)))
+        if capabilities:
+            demonstrated[source, target] = capabilities
+    if not demonstrated:
+        return []
+
+    required = [clause for clause, _, kind in recruiter.posting_qualifications(service(), description)
+                if kind == 'required']
+    matches = []
+    for (source, target), capabilities in demonstrated.items():
+        source_pattern, target_pattern = SPREADSHEET_TOOLS[source], SPREADSHEET_TOOLS[target]
+        if any(target_pattern.search(clause) and not SPREADSHEET_TOOL_ALTERNATIVE.search(clause)
+               and not SPREADSHEET_PAIR_ALTERNATIVE.search(clause) for clause in required):
+            continue
+        counted = set()
+        for duty in duties:
+            key = norm(duty)
+            if key in used or not target_pattern.search(duty) or source_pattern.search(duty) \
+                    or PLATFORM_SPECIFIC_SPREADSHEET.search(duty):
+                continue
+            overlap = spreadsheet_capabilities(duty, target_pattern) & capabilities
+            if not overlap - counted:
+                continue
+            counted.update(overlap)
+            used.add(key)
+            matches.append({'skill': source, 'duty': duty, 'kind': 'transferable', 'posting_skill': target})
+            if len(matches) == limit:
+                return matches
+    return matches
+
+
+def experience_evidence(description, profile, skills, examples=None, *, include_transfer=True):
     """Quote employer duties that use selected skills supported by a profile excerpt."""
-    examples = profile_skill_examples(profile, skills) if examples is None else examples
+    skills = tuple(skills)
+    if examples is None:
+        text = ' '.join(description.casefold().split())
+        examples = profile_skill_examples(profile, [skill for skill in skills if skill.casefold() in text])
     supported = {skill: skill_pattern(skill) for skill in examples}
-    if not supported:
+    transfers = [(source, target) for source, target in SPREADSHEET_TRANSFERS
+                 if SPREADSHEET_TOOLS[target].search(description)
+                 and any(SPREADSHEET_TOOLS[source].search(skill) for skill in skills)] if include_transfer else []
+    if not supported and not transfers:
+        return []
+    duties = list(dict.fromkeys(duty for duty in employer_duties(description) if len(duty) <= 320))
+    if not duties:
         return []
     evidence = {}
-    for duty in dict.fromkeys(employer_duties(description)):
+    for duty in duties:
         for skill, pattern in supported.items():
-            if len(duty) <= 320 and pattern.search(duty):
+            if pattern.search(duty):
                 evidence.setdefault(skill, []).append(duty)
 
     # Give each skill one quote and prefer a different duty when several skills overlap.
     used = set()
     matches = []
-    for skill, duties in sorted(evidence.items(), key=lambda item: len(item[1]))[:8]:
-        duty = next((candidate for candidate in duties if norm(candidate) not in used), duties[0])
+    for skill, matching_duties in sorted(evidence.items(), key=lambda item: len(item[1]))[:8]:
+        duty = next((candidate for candidate in matching_duties if norm(candidate) not in used), matching_duties[0])
         used.add(norm(duty))
         matches.append({'skill': skill, 'duty': duty})
+    matches.extend(spreadsheet_transfer_evidence(description, duties, profile, transfers, used,
+                                                limit=8 - len(matches)))
     return matches
 
 def qualification_checks(description):
@@ -969,9 +1188,13 @@ def assess(j,cfg):
     reasons.extend(group['label'] for group in matched_groups)
     postgres_store.record_timing('assess_skills', time.monotonic() - stage_start)
     stage_start = time.monotonic()
-    evidence = experience_evidence(desc, cfg.get('profile', ''), matched_skills)
+    evidence = experience_evidence(desc, cfg.get('profile', ''), selected)
     postgres_store.record_timing('assess_evidence', time.monotonic() - stage_start)
     matched_duty_count = len({norm(item['duty']) for item in evidence})
+    reasons.extend(dict.fromkeys(
+        f"Transferable spreadsheet experience: {item['skill']} for comparable {item['posting_skill']} duties"
+        for item in evidence if item.get('kind') == 'transferable'
+    ))
     gaps = qualification_checks(desc) if desc.strip() else [
         'Employer description missing. Review the posting for duties and requirements.'
     ]
@@ -1461,7 +1684,7 @@ def finalize(job, cfg, report, *, check_posting=False, previous=None):
 
 
 def recheck_recruiter_postings(job_ids, cfg, *, should_stop=None):
-    """Verify promising saved postings without changing owner tracking records."""
+    """Verify promising postings without writing any owner tracking records."""
     if not LOCK.acquire(False):
         return {}
     checked = {}
@@ -1472,8 +1695,9 @@ def recheck_recruiter_postings(job_ids, cfg, *, should_stop=None):
         for job_id in list(dict.fromkeys(job_ids))[:POSTING_CHECKS_PER_RUN]:
             if time.monotonic() >= deadline or (should_stop and should_stop()):
                 break
+            table = 'jobs' if type(job_id) is int else 'recruiter_openings'
             with connect() as c:
-                row = c.execute('SELECT listing FROM jobs WHERE id=?', (job_id,)).fetchone()
+                row = c.execute(f'SELECT listing FROM {table} WHERE id=?', (job_id,)).fetchone()
             if not row:
                 continue
             raw = row['listing']
@@ -1496,8 +1720,12 @@ def recheck_recruiter_postings(job_ids, cfg, *, should_stop=None):
                 job.pop('application_verified', None)
             with connect() as c:
                 c.execute('BEGIN IMMEDIATE')
-                changed = c.execute('UPDATE jobs SET listing=?,updated=? WHERE id=? AND listing=? RETURNING id',
-                                    (json.dumps(job), now(), job_id, raw)).fetchone()
+                if table == 'jobs':
+                    changed = c.execute('UPDATE jobs SET listing=?,updated=? WHERE id=? AND listing=? RETURNING id',
+                                        (json.dumps(job), now(), job_id, raw)).fetchone()
+                else:
+                    changed = c.execute('UPDATE recruiter_openings SET listing=? WHERE id=? AND listing=? RETURNING id',
+                                        (json.dumps(job), job_id, raw)).fetchone()
             if changed:
                 job['id'] = job_id
                 checked[job_id] = job
@@ -1658,6 +1886,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
         with connect() as c:
             c.execute('UPDATE runs SET report=? WHERE id=?', (json.dumps(report), run_id))
             if recruiter_version is not None:
+                recruiter.update_discovery_progress(c, recruiter_version, report['progress'])
                 recruiter.record_activity(c, recruiter_version, now(), report['progress'])
 
     def source_issue(stage, source, error):
@@ -1688,16 +1917,33 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
             cursor = c.execute('INSERT INTO runs(started,state,report,trigger) VALUES(?,?,?,?) RETURNING id',
                                (now(), 'running', json.dumps(report), trigger))
             run_id = cursor.fetchone()[0]
+            report['run_id'] = run_id
+            if recruiter_version is not None:
+                recruiter.update_discovery_progress(c, recruiter_version, report['progress'])
             searches = prototype.saved_searches(c)
         cfg = config_override if config_override is not None else config()
         backup()
-        existing = [job for job in records(listing_only=True) if not job.get('external_application')]
+        retained_by_identity = {}
+        retained_by_board = {}
+        direct_page_urls = []
+        held_keys = set()
         boards = set()
-        for j in existing:
-            if j.get('identity_review'):
+        for job in discovery_job_headers():
+            url = job['url']
+            if job.get('identity_review'):
+                held_keys.add(job['identity'])
+                try:
+                    held_keys.add(identity(url))
+                except ValueError:
+                    pass
                 continue
-            b=board_identity(j['url'])
-            if b:boards.add(b)
+            retained_by_identity[identity(url)] = job
+            board = board_identity(url)
+            if board:
+                boards.add(board)
+                retained_by_board.setdefault(board, []).append(job)
+            else:
+                direct_page_urls.append(url)
         for platform,names in cfg['additional_boards'].items():boards.update((platform,n.lower()) for n in names)
         with connect() as c:
             for row in c.execute('SELECT source FROM source_health'):
@@ -1763,18 +2009,15 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                     report['failures'].append('Firecrawl discovery: '+type(e).__name__+': '+str(e)[:160])
                     source_issue('Additional discovery could not finish', None, e)
         else:report['log'].append('Public board mode: Firecrawl is disabled or no key is configured.')
-        held_keys = set()
-        for job in existing:
-            if job.get('identity_review'):
-                held_keys.add(job['identity'])
-                try:
-                    held_keys.add(identity(job['url']))
-                except ValueError:
-                    pass
-        existing = [job for job in existing if not job.get('identity_review')]
-        retained_by_identity = {identity(job['url']): job for job in existing}
         known_identities = retained_by_identity.keys() | held_keys
         candidates = {}
+        rediscovered = {}
+
+        def keep_refreshed_opening(job):
+            if (cfg.get('recruiter_discovery') and job.get('availability') != 'Closed'
+                    and not job.get('recruitee_offer_changed') and discovery_location_allowed(job, cfg)):
+                rediscovered[identity(job['url'])] = job
+
         seen = set()
         successful = 0
         usa_key = os.environ.get('JOBS_USAJOBS_KEY', '').strip()
@@ -1814,11 +2057,11 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
             checked = {r['source']:r['checked'] for r in c.execute('SELECT source,checked FROM source_health')}
         disabled = set(cfg.get('disabled_sources', []))
         pending_boards = {}
-        for job in existing:
-            board = board_identity(job['url'])
-            if board and job.get('pending_match_alert'):
-                attempted = job.get('posting_check_attempted', '')
-                pending_boards[board] = min(pending_boards.get(board, attempted), attempted)
+        for board, jobs in retained_by_board.items():
+            for job in jobs:
+                if job.get('pending_match_alert'):
+                    attempted = job.get('posting_check_attempted') or ''
+                    pending_boards[board] = min(pending_boards.get(board, attempted), attempted)
         board_list = sorted((pair for pair in boards if '/'.join(pair) not in disabled),
                             key=lambda pair: (pair not in pending_boards, pending_boards.get(pair, ''),
                                               checked.get('/'.join(pair), ''), pair))
@@ -1835,86 +2078,105 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 successful += 1
                 by_id = {identity(j['url']):j for j in live}
                 prototype.source_result(service(),platform+'/'+board,'ok',len(live))
-                current=[j for j in existing if board_identity(j['url'])==(platform,board)
-                         and identity(j['url']) not in held_keys]
+                current = [job for job in retained_by_board.get((platform, board), ())
+                           if identity(job['url']) not in held_keys]
                 current.sort(key=lambda job: (not job.get('pending_match_alert'),
-                                              job.get('posting_check_attempted', ''), job.get('last_verified', '')))
+                                              job.get('posting_check_attempted') or '', job.get('last_verified') or ''))
                 recheck_limit = min(cfg['max_rechecks'], 8) if platform == 'smartrecruiters' else cfg['max_rechecks']
-                with connect() as c:
-                    for old in current[:recheck_limit]:
-                        check_stop()
-                        if time.monotonic() >= deadline:
-                            break
-                        ident=identity(old['url']);fresh=by_id.get(ident)
-                        if (fresh and platform == 'recruitee' and old.get('recruitee_offer_id')
-                                and old['recruitee_offer_id'] != fresh['recruitee_offer_id']):
-                            old.pop('application_verified', None)
-                            old.pop('posting_verified', None)
-                            old.update(availability='Needs Verification', queue='Review', last_verified=now(),
-                                       recruitee_offer_changed=True,
-                                       application_evidence='Employer reused this link for a different Recruitee offer')
+                for old in current[:recheck_limit]:
+                    check_stop()
+                    if time.monotonic() >= deadline:
+                        break
+                    ident = identity(old['url'])
+                    fresh = by_id.get(ident)
+                    reused = (fresh and platform == 'recruitee' and old.get('recruitee_offer_id')
+                              and old['recruitee_offer_id'] != fresh['recruitee_offer_id'])
+                    if not fresh and platform in XML_FEED_PLATFORMS and old['availability'] == 'Closed':
+                        continue
+                    if reused or not fresh:
+                        # Closing or flagging a retained posting preserves its previous employer facts.
+                        retained = records(listing_only=True, job_ids=[old['id']])
+                        if not retained:
+                            continue
+                        old = retained_by_identity[ident] = retained[0]
+                    if reused:
+                        old.pop('application_verified', None)
+                        old.pop('posting_verified', None)
+                        old.update(availability='Needs Verification', queue='Review', last_verified=now(),
+                                   recruitee_offer_changed=True,
+                                   application_evidence='Employer reused this link for a different Recruitee offer')
+                        with connect() as c:
                             upsert(c, old)
-                            c.commit()
-                        elif fresh:
-                            fresh = hydrate_board_listing(board, fresh)
-                            # Keep original human readable employer names; ATS slugs are identifiers.
-                            fresh['employer']=old['employer'];fresh['history_confirmation']=old.get('history_confirmation',False)
-                            j = finalize(fresh, cfg, report, previous=old)
+                    elif fresh:
+                        fresh = hydrate_board_listing(board, fresh)
+                        # Keep original human readable employer names; ATS slugs are identifiers.
+                        fresh['employer'] = old['employer']
+                        fresh['history_confirmation'] = old.get('history_confirmation', False)
+                        j = finalize(fresh, cfg, report, previous=old)
+                        with connect() as c:
                             job_id, _ = upsert(c, j)
                             release_pending_alert(c, job_id, old, j, searches, us_only=cfg.get('us_postings_only'))
-                            c.commit()
-                            report['reverified'] += 1
-                        elif platform in XML_FEED_PLATFORMS:
-                            if old['availability'] != 'Closed':
-                                old.pop('application_verified', None)
-                                old.pop('posting_verified', None)
-                                old.update(availability='Needs Verification', queue='Review',
-                                           last_verified=now(), application_evidence=f'Missing from {XML_FEED_PLATFORMS[platform]} feed; check employer page')
-                                upsert(c,old);c.commit()
-                        else:
-                            old.pop('posting_verified', None)
+                        report['reverified'] += 1
+                        keep_refreshed_opening(j)
+                    elif platform in XML_FEED_PLATFORMS:
+                        if old['availability'] != 'Closed':
                             old.pop('application_verified', None)
-                            old['pending_match_alert'] = False
-                            old['availability']='Closed';old['queue']='Review';old['last_verified']=now()
-                            if old.get('application_evidence')!='Absent from employer live board':report['newly_closed']+=1
-                            old['application_evidence']='Absent from employer live board';upsert(c,old);c.commit()
-                    new_listings = live
-                    if platform == 'smartrecruiters':
-                        fresh = [j for j in live if identity(j['url']) not in known_identities]
-                        enabled_searches = [search for search in searches if search['enabled'] and search.get('title_terms')]
-                        search_targets = [j for j in fresh if any(
-                            prototype.search_title_matches(j['title'], search) and location_eligibility(j, {
-                                'target_locations': search['locations'], 'workplace_types': search['workplace_types'],
-                            })[0] != 'Rejected' for search in enabled_searches
-                        )]
-                        search_target_ids = {j['requisition'] for j in search_targets}
-                        remaining = [j for j in fresh if j['requisition'] not in search_target_ids]
-                        relevant = lambda j: any(phrase.lower() in j['title'].lower() for phrase in cfg['categories'])
-                        target = [j for j in remaining if relevant(j) and location_eligibility(j, cfg)[0] != 'Rejected']
-                        target_ids = {identity(j['url']) for j in target}
-                        other = [j for j in remaining if identity(j['url']) not in target_ids]
-                        new_listings = rotating_postings(search_targets, run_id, 12)
-                        new_listings += rotating_postings(target, run_id, 12 - len(new_listings))
-                        new_listings += rotating_postings(other, run_id, 16 - len(new_listings))
-                        report['deferred_source_details'] = report.get('deferred_source_details', 0) + len(fresh) - len(new_listings)
-                    for j in new_listings:
-                        check_stop()
-                        ident=identity(j['url'])
-                        if ident in seen:report['duplicates']+=1;continue
-                        seen.add(ident)
-                        if ident in known_identities:continue
-                        # ATS summaries can omit residence restrictions included in the employer detail.
-                        if cfg.get('us_postings_only') and foreign_location(clean(j.get('location'))) and not is_us_location(clean(j.get('location'))):
-                            report['skipped_location'] = report.get('skipped_location', 0) + 1
-                            continue
-                        j = assess(hydrate_board_listing(board, j), cfg)
-                        if not discovery_location_allowed(j, cfg):
-                            report['skipped_location'] = report.get('skipped_location', 0) + 1
-                            continue
-                        matched = prototype.matching_searches(service(), j, searches, us_only=cfg.get('us_postings_only'))
-                        if not cfg.get('recruiter_discovery') and not matched and not profile_candidate(j, cfg, report):
-                            continue
-                        candidates[ident] = (j, matched)
+                            old.pop('posting_verified', None)
+                            old.update(
+                                availability='Needs Verification', queue='Review', last_verified=now(),
+                                application_evidence=f'Missing from {XML_FEED_PLATFORMS[platform]} feed; check employer page',
+                            )
+                            with connect() as c:
+                                upsert(c, old)
+                    else:
+                        old.pop('posting_verified', None)
+                        old.pop('application_verified', None)
+                        old.update(pending_match_alert=False, availability='Closed', queue='Review', last_verified=now())
+                        if old.get('application_evidence') != 'Absent from employer live board':
+                            report['newly_closed'] += 1
+                        old['application_evidence'] = 'Absent from employer live board'
+                        with connect() as c:
+                            upsert(c, old)
+                new_listings = live
+                if platform == 'smartrecruiters':
+                    fresh = [j for j in live if identity(j['url']) not in known_identities]
+                    enabled_searches = [search for search in searches if search['enabled'] and search.get('title_terms')]
+                    search_targets = [j for j in fresh if any(
+                        prototype.search_title_matches(j['title'], search) and location_eligibility(j, {
+                            'target_locations': search['locations'], 'workplace_types': search['workplace_types'],
+                        })[0] != 'Rejected' for search in enabled_searches
+                    )]
+                    search_target_ids = {j['requisition'] for j in search_targets}
+                    remaining = [j for j in fresh if j['requisition'] not in search_target_ids]
+                    def relevant(posting):
+                        if cfg.get('recruiter_discovery'):
+                            return recruiter.discovery_title_match(service(), posting['title'], cfg['categories'])
+                        return any(phrase.lower() in posting['title'].lower() for phrase in cfg['categories'])
+                    target = [j for j in remaining if relevant(j) and location_eligibility(j, cfg)[0] != 'Rejected']
+                    target_ids = {identity(j['url']) for j in target}
+                    other = [j for j in remaining if identity(j['url']) not in target_ids]
+                    new_listings = rotating_postings(search_targets, run_id, 12)
+                    new_listings += rotating_postings(target, run_id, 12 - len(new_listings))
+                    new_listings += rotating_postings(other, run_id, 16 - len(new_listings))
+                    report['deferred_source_details'] = report.get('deferred_source_details', 0) + len(fresh) - len(new_listings)
+                for j in new_listings:
+                    check_stop()
+                    ident=identity(j['url'])
+                    if ident in seen:report['duplicates']+=1;continue
+                    seen.add(ident)
+                    if ident in known_identities:continue
+                    # ATS summaries can omit residence restrictions included in the employer detail.
+                    if cfg.get('us_postings_only') and foreign_location(clean(j.get('location'))) and not is_us_location(clean(j.get('location'))):
+                        report['skipped_location'] = report.get('skipped_location', 0) + 1
+                        continue
+                    j = assess(hydrate_board_listing(board, j), cfg)
+                    if not discovery_location_allowed(j, cfg):
+                        report['skipped_location'] = report.get('skipped_location', 0) + 1
+                        continue
+                    matched = prototype.matching_searches(service(), j, searches, us_only=cfg.get('us_postings_only'))
+                    if not cfg.get('recruiter_discovery') and not matched and not profile_candidate(j, cfg, report):
+                        continue
+                    candidates[ident] = (j, matched)
                 report['log'].append(platform+'/'+board+': '+str(len(live))+' live postings')
             except recruiter.SearchStopped:
                 raise
@@ -1926,8 +2188,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
             progress('Checking employer boards', index + 1, len(board_list))
             pause()
         with connect() as c:known_urls=[r['source'] for r in c.execute("SELECT source FROM source_health WHERE source LIKE 'https://%'")]
-        page_urls = ([job['url'] for job in existing if not board_identity(job['url'])]
-                     + discoveries + cfg['additional_employer_urls'] + known_urls)
+        page_urls = direct_page_urls + discoveries + cfg['additional_employer_urls'] + known_urls
         disabled_pages = set()
         for url in disabled:
             if url.startswith('https://'):
@@ -1975,6 +2236,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                         job_id, _ = upsert(c, j)
                         release_pending_alert(c, job_id, old, j, searches, us_only=cfg.get('us_postings_only'))
                     report['reverified'] += 1
+                    keep_refreshed_opening(j)
                     continue
                 j = assess(j, cfg)
                 if not discovery_location_allowed(j, cfg):
@@ -1999,8 +2261,9 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                 pause()
         progress('Ranking results')
         if cfg.get('recruiter_discovery'):
-            ranked = sorted(candidates.values(), key=lambda item: recruiter.discovery_rank(service(), item[0], cfg),
-                            reverse=True)
+            ranked = recruiter.rank_openings(service(), candidates.values(), cfg, job_of=lambda item: item[0])
+            pulled = [job for job, _ in ranked] + list(rediscovered.values())
+            report['pulled_openings'] = recruiter_openings.capture(service(), pulled, run_id)
         else:
             ranked = sorted(candidates.values(), key=lambda item: (
                 item[0]['queue'] == 'Confirmed', bool(item[1]), item[0]['matched_duty_count'],
@@ -2046,10 +2309,7 @@ def run_pipeline(trigger='manual', config_override=None, *, recruiter_version=No
                     progress('Saving openings', new_count)
         report['unprocessed_employer_urls']=extra[attempted_pages:][:50]
         report['top_new']=sorted(report['top_new'],key=lambda j:-j['score'])[:10]
-        report['manual_review'] = sum(
-            j.get('queue') in ('Review', 'Location Review') and j.get('availability') != 'Closed'
-            for j in records(listing_only=True) if not j.get('external_application')
-        )
+        report['manual_review'] = manual_review_count()
         if time.monotonic() >= deadline and not any('Search time limit' in issue for issue in report['failures']):
             report['failures'].append('Search time limit reached; some checks may have been deferred.')
         if not successful and not report['failures']:
@@ -2133,56 +2393,83 @@ def search_status():
     return {'running': running, 'run': run}
 
 
-def snapshot():
-    with connect() as c:
-        stage_start = time.monotonic()
+def dashboard_jobs(c, cfg, stamp, *, job_ids=None):
+    stage_start = time.monotonic()
+    settings = json.dumps({key: cfg[key] for key in ASSESSMENT_SETTINGS if key in cfg}, sort_keys=True)
+    jobs = records(connection=c, assessment_config=settings, job_ids=job_ids)
+    valid_until = 0
+
+    def track_expiration(expires):
+        nonlocal valid_until
+        deadline = int(expires.timestamp() * 1000) + 1
+        valid_until = min(valid_until or deadline, deadline)
+
+    recruiter_preferences = recruiter.saved_preferences(c)
+    remote_region = recruiter_preferences.get('remote_region')
+    postgres_store.record_timing('dashboard_load', time.monotonic() - stage_start)
+    stage_start = time.monotonic()
+    location_time = market_time = review_time = 0.0
+    for j in jobs:
+        previous_queue = j.pop('previous_queue')
+        if j.get('external_application'):
+            j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
+            continue
+        item_start = time.monotonic()
+        j['hidden_from_discovery'] = not discovery_location_allowed(j, cfg, remote_region=remote_region)
+        location_time += time.monotonic() - item_start
+        expires = posting_check_expiration(j, cfg)
+        j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
+        if j['posting_link_verified']:
+            track_expiration(expires)
+        if expires:
+            j['posting_verification_expires'] = expires.isoformat(timespec='seconds')
+        previous_application = j.get('application_verified')
+        item_start = time.monotonic()
+        j['market_pay_available'] = not j['hidden_from_discovery'] and j.get('availability') != 'Closed' \
+            and recruiter.market_pay_needed(service(), j, recruiter_preferences)
+        market_time += time.monotonic() - item_start
+        if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
+        eligible = j['location_eligibility']
+        item_start = time.monotonic()
+        j['review_blockers']=review_blockers(j,cfg,location_status=eligible)
+        review_time += time.monotonic() - item_start
+        if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
+        if j.get('queue')=='Confirmed':
+            verified=j.get('application_verified')
+            expires = (dt.datetime.fromisoformat(verified) + dt.timedelta(hours=cfg['verification_valid_hours'])
+                       if verified else None)
+            if expires and stamp <= expires:
+                track_expiration(expires)
+            else:
+                j.update(queue='Review', stale=True)
+        j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
+    postgres_store.record_timing('dashboard_assess', time.monotonic() - stage_start)
+    postgres_store.record_timing('dashboard_location', location_time)
+    postgres_store.record_timing('dashboard_market', market_time)
+    postgres_store.record_timing('dashboard_review', review_time)
+    interest_query = 'SELECT * FROM job_interests'
+    if job_ids is not None:
+        interest_query += ' WHERE job_id IN (' + ','.join('?' for _ in job_ids) + ')'
+    interests = {r['job_id']: dict(r) for r in c.execute(interest_query, () if job_ids is None else job_ids)}
+    for job in jobs:
+        job['interest'] = interests.get(job['id'])
+    return jobs, valid_until
+
+
+def dashboard_runs(connection):
+    runs = [dict(row) for row in connection.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 30')]
+    for run in runs:
+        run['report'] = json.loads(run['report'])
+    return runs
+
+
+def snapshot(*, connection=None, stamp=None, sync_clock=None):
+    with (connect() if connection is None else nullcontext(connection)) as c:
         cfg = config(connection=c)
-        settings = json.dumps({key: cfg[key] for key in ASSESSMENT_SETTINGS if key in cfg}, sort_keys=True)
-        jobs = records(connection=c, assessment_config=settings)
-        stamp = dt.datetime.now(dt.timezone.utc)
-        recruiter_preferences = recruiter.saved_preferences(c)
-        remote_region = recruiter_preferences.get('remote_region')
-        postgres_store.record_timing('dashboard_load', time.monotonic() - stage_start)
-        stage_start = time.monotonic()
-        location_time = market_time = review_time = 0.0
-        for j in jobs:
-            previous_queue = j.pop('previous_queue')
-            if j.get('external_application'):
-                j.update(score=0, match_label='Added by you', review_blockers=[], queue='Tracking')
-                continue
-            item_start = time.monotonic()
-            j['hidden_from_discovery'] = not discovery_location_allowed(j, cfg, remote_region=remote_region)
-            location_time += time.monotonic() - item_start
-            expires = posting_check_expiration(j, cfg)
-            j['posting_link_verified'] = bool(j.get('availability') == 'Open' and expires and stamp <= expires)
-            if expires:
-                j['posting_verification_expires'] = expires.isoformat(timespec='seconds')
-            previous_application = j.get('application_verified')
-            item_start = time.monotonic()
-            j['market_pay_available'] = not j['hidden_from_discovery'] and j.get('availability') != 'Closed' \
-                and recruiter.market_pay_needed(service(), j, recruiter_preferences)
-            market_time += time.monotonic() - item_start
-            if j.get('queue')=='Confirmed' and (previous_queue!='Confirmed' or not previous_application):j['queue']='Review'
-            eligible = j['location_eligibility']
-            item_start = time.monotonic()
-            j['review_blockers']=review_blockers(j,cfg,location_status=eligible)
-            review_time += time.monotonic() - item_start
-            if eligible!='Eligible':j['queue']='Excluded' if eligible=='Rejected' else 'Location Review'
-            if j.get('queue')=='Confirmed':
-                verified=j.get('application_verified')
-                if not verified or (stamp-dt.datetime.fromisoformat(verified)).total_seconds()>cfg['verification_valid_hours']*3600:j['queue']='Review';j['stale']=True
-            j['match_label']='Excellent Match' if j.get('score',0)>=85 else 'Strong Match' if j.get('score',0)>=70 else 'Reasonable Match' if j.get('score',0)>=55 else 'Stretch Opportunity'
-        postgres_store.record_timing('dashboard_assess', time.monotonic() - stage_start)
-        postgres_store.record_timing('dashboard_location', location_time)
-        postgres_store.record_timing('dashboard_market', market_time)
-        postgres_store.record_timing('dashboard_review', review_time)
-        interests = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM job_interests')}
-        for job in jobs:
-            job['interest'] = interests.get(job['id'])
-        runs=[dict(r) for r in c.execute('SELECT * FROM runs ORDER BY id DESC LIMIT 30')]
-        for r in runs:r['report']=json.loads(r['report'])
+        stamp = stamp or dt.datetime.now(dt.timezone.utc)
+        jobs, valid_until = dashboard_jobs(c, cfg, stamp)
         result = {
-            'jobs': jobs, 'runs': runs, 'statuses': STATUSES, 'running': SEARCH_ACTIVE.is_set(),
+            'jobs': jobs, 'runs': dashboard_runs(c), 'statuses': STATUSES, 'running': SEARCH_ACTIVE.is_set(),
             'external_application_tracking': True, 'application_prep_available': True,
             'firecrawl_configured': bool(cfg['firecrawl_enabled'] and firecrawl_key()),
             'schedule_hour_utc': cfg['schedule_hour_utc'],
@@ -2190,7 +2477,57 @@ def snapshot():
         stage_start = time.monotonic()
         enriched = prototype.enrich_snapshot(service(), result, cfg, c)
         postgres_store.record_timing('dashboard_enrich', time.monotonic() - stage_start)
+        if sync_clock is not None:
+            sync_clock['valid_until'] = valid_until
         return enriched
+
+
+def dashboard_changes(since, *, stamp=None, include_metadata=False):
+    stamp = stamp or dt.datetime.now(dt.timezone.utc)
+    running = SEARCH_ACTIVE.is_set()
+    environment = dashboard_sync.environment(service(), stamp, running=None if include_metadata else running)
+    with connect() as c:
+        # Read the revision and data in one snapshot, so a concurrent write is visible on the next poll.
+        begin = 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY' if getattr(c, 'postgres_connection', False) else 'BEGIN'
+        c.execute(begin)
+        revision, global_revision, runs_revision, listings_revision = c.execute('''SELECT d.revision,
+            d.global_revision, m.runs_revision, m.listings_revision
+            FROM dashboard_revision d JOIN dashboard_metadata_revision m ON d.id=m.id WHERE d.id=1''').fetchone()
+        minimum_revision = global_revision if include_metadata else max(global_revision, runs_revision)
+        known = dashboard_sync.parse_cursor(since, environment, stamp, revision, minimum_revision)
+        if known:
+            after, valid_until, previous_running = known
+            runs_changed = include_metadata and runs_revision > after
+            running_changed = include_metadata and running != previous_running
+            if after == revision and not running_changed:
+                return {'revision': since}
+            job_ids = dashboard_sync.changed_jobs(c, after) if after != revision else []
+            # Alert visibility and status can depend on the updated employer listing.
+            if (job_ids or runs_changed or running_changed) and len(job_ids) <= dashboard_sync.MAX_PATCH_JOBS \
+                    and (listings_revision <= after or not job_ids or not prototype.dashboard_alerts_reference(c, job_ids)):
+                result = {}
+                if job_ids:
+                    cfg = config(connection=c)
+                    jobs, job_expiry = dashboard_jobs(c, cfg, stamp, job_ids=job_ids)
+                    prototype.enrich_job_advice(jobs, cfg, c, job_ids=job_ids)
+                    if job_expiry:
+                        valid_until = min(valid_until or job_expiry, job_expiry)
+                    replaced = {job['id'] for job in jobs}
+                    result.update(jobs=jobs, removed=[job_id for job_id in job_ids if job_id not in replaced])
+                if runs_changed or running_changed:
+                    result['metadata'] = {'running': running}
+                    if runs_changed:
+                        result['metadata']['runs'] = dashboard_runs(c)
+                result['revision'] = dashboard_sync.cursor(environment, revision, valid_until,
+                                                           running=running if include_metadata else None)
+                return result
+        sync_clock = {}
+        dashboard = snapshot(connection=c, stamp=stamp, sync_clock=sync_clock)
+        return {'revision': dashboard_sync.cursor(environment, revision, sync_clock['valid_until'],
+                                                  running=dashboard['running'] if include_metadata else None),
+                'dashboard': dashboard}
+
+
 def application_prep(job_id):
     with connect() as connection:
         row = connection.execute(
@@ -2212,7 +2549,7 @@ def application_prep(job_id):
     examples = profile_skill_examples(profile, skills)
     evidence = [
         dict(item, profile_excerpt=examples[item['skill']])
-        for item in experience_evidence(description, profile, skills, examples)
+        for item in experience_evidence(description, profile, skills, examples, include_transfer=False)
     ]
     duties = list(employer_duties(description))
     missing_examples = [
@@ -2294,6 +2631,7 @@ def timed_request(method):
             elapsed = time.monotonic() - started
             path = up.urlsplit(handler.path).path
             labels = {'/api/recruiter': 'recruiter', '/api/v1/dashboard': 'dashboard',
+                      '/api/v1/dashboard/changes': 'dashboard_changes',
                       '/api/dashboard': 'dashboard', '/api/v1/search-status': 'search_status'}
             label = labels.get(path)
             if path == '/api/recruiter' and up.parse_qs(up.urlsplit(handler.path).query).get('status') == ['1']:
@@ -2303,6 +2641,9 @@ def timed_request(method):
                 if elapsed >= 1:
                     timing_logger.warning('Slow request: route=%s elapsed=%.2fs', label, elapsed)
     return wrapped
+
+
+MARKET_PAY_ROUTE = re.compile(r'/api/(?:jobs/(\d+)|recruiter/openings/([0-9a-f]{64}))/market-pay')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2318,22 +2659,45 @@ class Handler(BaseHTTPRequestHandler):
         target=up.urlsplit(self.path)
         path=target.path
         if path == '/api/recruiter':
-            status_only = up.parse_qs(target.query).get('status') == ['1']
-            return self.send(200, recruiter.read(service(), status_only=status_only))
+            query = up.parse_qs(target.query)
+            status_only = query.get('status') == ['1']
+            result = recruiter.read(service(), status_only=status_only)
+            if not status_only and query.get('openings') != ['1']:
+                result['matches'] = [item for item in result.get('matches', []) if type(item.get('job_id')) is int]
+            return self.send(200, result)
         if path == '/api/recruiter/activity':
             before = up.parse_qs(target.query).get('before', [''])[0]
             if before and not re.fullmatch(r'[0-9]{1,18}', before):
                 return self.send(400, {'error': 'Invalid activity cursor.'})
             return self.send(200, recruiter.activity(service(), int(before) if before else None))
+        if path == '/api/recruiter/openings':
+            try:
+                params = up.parse_qs(target.query, keep_blank_values=True, max_num_fields=2, errors='strict')
+                if set(params) - {'before', 'q'} or any(len(values) != 1 for values in params.values()):
+                    raise ValueError('Invalid openings filters')
+                cursor = params.get('before', [''])[0] or None
+                query = params.get('q', [''])[0].strip()
+                if len(query) > 120 or len(cursor or '') > 160:
+                    raise ValueError('Oversized openings filters')
+                page = recruiter_openings.page(service(), cursor, query)
+            except (ValueError, UnicodeError):
+                return self.send(400, {'error': 'Check the Pulled Openings search or page cursor.'})
+            return self.send(200, page)
         if path=='/api/recruiter/resume':return self.send(200,recruiter.resume(service()))
         if path=='/api/recruiter/usage':return self.send(200,recruiter.usage_report(service()))
         if path=='/api/dashboard':return self.send(200,snapshot())
         if path=='/api/v1/health':return self.send(200,{'status':'ok','api_version':1})
         if path=='/api/v1/diagnostics/timing':return self.send(200,postgres_store.timing_summary())
         if path=='/api/v1/search-status':return self.send(200,search_status())
+        if path == '/api/v1/dashboard/changes':
+            params = up.parse_qs(target.query)
+            since = params.get('since', [''])[0]
+            return self.send(200, dashboard_changes(since if len(since) <= 64 else None,
+                                                    include_metadata=params.get('metadata') == ['1']))
         if path=='/api/v1/dashboard':return self.send(200,snapshot())
-        pay_match = re.fullmatch(r'/api/jobs/(\d+)/market-pay', path)
-        if pay_match:return self.send(*recruiter.market_pay(service(), int(pay_match[1])))
+        pay_match = MARKET_PAY_ROUTE.fullmatch(path)
+        if pay_match:
+            return self.send(*recruiter.market_pay(service(), int(pay_match[1]) if pay_match[1] else pay_match[2]))
         prep_match = re.fullmatch(r'/api/jobs/(\d+)/application-prep', path)
         tailored_match = re.fullmatch(r'/api/jobs/(\d+)/tailored-resume', path)
         if tailored_match:return self.send(*recruiter.tailored_resume(service(), int(tailored_match[1])))
@@ -2357,14 +2721,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(*recruiter.start(service(), json.loads(self.rfile.read(size))))
             except (ValueError, UnicodeError) as error:
                 return self.send(400, {'error': str(error)})
+        opening_match = re.fullmatch(r'/api/recruiter/openings/([0-9a-f]{64})/compare', self.path)
+        if opening_match:
+            try:
+                size = int(self.headers.get('Content-Length', 0))
+                if not 0 < size <= 1024 or json.loads(self.rfile.read(size)) != {}:
+                    raise ValueError('Invalid openings comparison body')
+            except (ValueError, UnicodeError):
+                return self.send(400, {'error': 'Could not read the openings comparison request.'})
+            return self.send(*recruiter.compare_opening(service(), opening_match[1]))
         if self.path=='/api/run':return self.send(202 if start_run() else 409,{'running':True})
-        pay_match = re.fullmatch(r'/api/jobs/(\d+)/market-pay', self.path)
+        pay_match = MARKET_PAY_ROUTE.fullmatch(self.path)
         if pay_match:
             try:
                 size = int(self.headers.get('Content-Length', 0))
                 if not 0 < size <= 1024 or json.loads(self.rfile.read(size)) != {}:
                     raise ValueError('Could not read the market pay request.')
-                return self.send(*recruiter.market_pay(service(), int(pay_match[1]), research=True))
+                job_ref = int(pay_match[1]) if pay_match[1] else pay_match[2]
+                return self.send(*recruiter.market_pay(service(), job_ref, research=True))
             except ValueError as error:
                 return self.send(400, {'error': str(error)})
         tailored_match = re.fullmatch(r'/api/jobs/(\d+)/tailored-resume', self.path)

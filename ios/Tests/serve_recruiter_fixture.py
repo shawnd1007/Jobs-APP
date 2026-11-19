@@ -44,7 +44,7 @@ if __name__ == '__main__':
                 return jobs
 
             def slow_match(*args):
-                time.sleep(1.5)
+                time.sleep(8 if pay_test and args[-1]['requisition'] == 'lab' else 1.5)
                 return match(*args)
 
             fixtures.enter_context(patch.object(app, 'board_jobs', side_effect=slow_board))
@@ -53,6 +53,8 @@ if __name__ == '__main__':
                 def fictional_pay(a, name, inputs, schema):
                     if name != 'market_pay':
                         return fake_ai(a, name, inputs, schema)
+                    # Leave time to observe the shortlist while market research is still running.
+                    time.sleep(10)
                     summary = 'Geography: Oregon\nData period: May 2025\nRange: USD 75,000–95,000 per year.'
                     return dict(summary=summary, geography='Oregon', data_period='May 2025',
                                 salary_min=75000, salary_max=95000, salary_period='year', citations=[
