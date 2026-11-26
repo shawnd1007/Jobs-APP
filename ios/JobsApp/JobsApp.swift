@@ -13,146 +13,400 @@ struct JobsApp: App {
 @MainActor
 @Observable
 final class Workspace {
-    var address = ""
+    private(set) var address = ""
     private(set) var dashboard: Dashboard?
     private(set) var loading = false
     private(set) var saving = false
     private(set) var startingSearch = false
+    private(set) var connected = false
+    private(set) var lastSyncedAt: Date?
+    private(set) var cacheError: String?
     var connectionError: String?
     var searchError: String?
-    private var latestLoad = UUID()
+    private(set) var searchStatus: SearchStatus?
+    private(set) var searchConnectionLost = false
+    private var checkingSearchStatus = false
 
-    func connect(to address: String) {
-        self.address = address
-        dashboard = nil
-        loading = false
-        connectionError = nil
-        searchError = nil
-        latestLoad = UUID()
+    var searchRunning: Bool { searchStatus?.running ?? dashboard?.running ?? false }
+    private var latestLoad = UUID()
+    let isSample: Bool
+    private var keepOfflineCopy = true
+    @ObservationIgnored private var cachedSnapshot: DashboardAPI.Snapshot?
+
+    init(isSample: Bool = false) {
+        self.isSample = isSample
+        if isSample { dashboard = SampleWorkspace.restore() }
     }
 
-    func refresh() async {
-        guard !address.isEmpty else { return }
+    var canWrite: Bool { isSample || connected }
+
+    func connect(to address: String, verified snapshot: DashboardAPI.Snapshot? = nil) {
+        guard self.address != address || snapshot != nil else { return }
+        self.address = address
+        loading = false
+        connected = false
+        connectionError = nil
+        searchError = nil
+        searchStatus = nil
+        searchConnectionLost = false
+        latestLoad = UUID()
+        cachedSnapshot = keepOfflineCopy && snapshot == nil ? OfflineWorkspace.load(for: address) : nil
+        dashboard = cachedSnapshot?.dashboard
+        lastSyncedAt = cachedSnapshot?.syncedAt
+        if let snapshot { accept(snapshot) }
+    }
+
+    func setOfflineCopyEnabled(_ enabled: Bool) {
+        keepOfflineCopy = enabled
+        do {
+            if !enabled {
+                cachedSnapshot = nil
+                try OfflineWorkspace.remove()
+            }
+            cacheError = nil
+        } catch {
+            cacheError = "The offline copy couldn’t be removed. Try again while your iPhone is unlocked."
+        }
+    }
+
+    private func accept(_ snapshot: DashboardAPI.Snapshot) {
+        dashboard = snapshot.dashboard
+        lastSyncedAt = snapshot.syncedAt
+        connected = true
+        connectionError = nil
+        let cacheAge = cachedSnapshot.map { snapshot.syncedAt.timeIntervalSince($0.syncedAt) } ?? .infinity
+        if keepOfflineCopy && (cachedSnapshot?.data != snapshot.data || cacheAge >= 60) {
+            do {
+                try OfflineWorkspace.save(snapshot, for: address)
+                cachedSnapshot = snapshot
+                cacheError = nil
+            } catch {
+                cacheError = "This workspace couldn’t be saved for offline access."
+            }
+        }
+    }
+
+    func refresh(replacingInFlight: Bool = false) async {
+        guard !isSample, !address.isEmpty, !loading || replacingInFlight else { return }
         let load = UUID()
         latestLoad = load
         loading = true
         defer { if latestLoad == load { loading = false } }
         do {
-            let result = try await DashboardAPI.dashboard(at: address)
+            let result = try await DashboardAPI.load(at: address)
             guard latestLoad == load, !Task.isCancelled else { return }
-            dashboard = result
-            connectionError = nil
-            await MatchNotifications.deliver(result.matchAlerts ?? [], server: address)
+            accept(result)
+            await MatchNotifications.deliver(for: self)
         } catch {
             guard latestLoad == load, !Task.isCancelled else { return }
-            connectionError = error is DecodingError
-                ? "The server didn’t return a compatible Jobs dashboard." : error.localizedDescription
+            connected = false
+            connectionError = DashboardAPI.connectionMessage(for: error)
         }
     }
 
     func save<T: Encodable>(_ path: String, _ body: T) async throws {
+        guard !isSample else {
+            throw DashboardAPI.ServerError(status: 0, message: "Connect your Mac to use this feature.")
+        }
+        guard connected else {
+            throw DashboardAPI.ServerError(status: 0, message: "Reconnect to your Mac to save this change.")
+        }
         guard !saving else {
             throw DashboardAPI.ServerError(status: 409, message: "Another change is being saved.")
         }
         saving = true
         defer { saving = false }
-        try await DashboardAPI.post(path, at: address, body: body)
-        await refresh()
+        do {
+            try await DashboardAPI.post(path, at: address, body: body)
+        } catch let error as URLError where error.code != .cancelled {
+            connected = false
+            connectionError = DashboardAPI.connectionMessage(for: error)
+            throw DashboardAPI.ServerError(status: 0, message: "Couldn’t confirm the save. Reconnect to check the current values before retrying.")
+        }
+        await refresh(replacingInFlight: true)
+    }
+
+    func updateInterest(for jobID: Int, to state: String, version: Int) async throws {
+        guard isSample else {
+            try await save("/api/jobs/\(jobID)/interest", InterestUpdate(state: state, version: version))
+            return
+        }
+        try editSampleJob(jobID) { job in
+            guard (job.interest?.version ?? 0) == version else { throw Self.sampleConflict }
+            job.interest = Job.Interest(state: state, version: version + 1,
+                                        updated: Date.now.ISO8601Format())
+        }
+    }
+
+    func updateTracking(for jobID: Int, draft: TrackingDraft) async throws {
+        guard isSample else {
+            try await save("/api/jobs/\(jobID)/tracking", draft)
+            return
+        }
+        try editSampleJob(jobID) { job in
+            guard job.version == draft.version else { throw Self.sampleConflict }
+            job.status = draft.status
+            job.applicationDate = draft.applicationDate
+            job.followUp = draft.followUp
+            job.notes = draft.notes
+            job.version += 1
+        }
+    }
+
+    private static var sampleConflict: DashboardAPI.ServerError {
+        DashboardAPI.ServerError(status: 409, message: "This sample job has changed. Reload to edit it.")
+    }
+
+    private func editSampleJob(_ id: Int, change: (inout Job) throws -> Void) throws {
+        guard var snapshot = dashboard, let index = snapshot.jobs.firstIndex(where: { $0.id == id })
+        else { throw DashboardAPI.ServerError(status: 404, message: "Sample job unavailable.") }
+        try change(&snapshot.jobs[index])
+        try SampleWorkspace.save(snapshot.jobs)
+        dashboard = snapshot
+    }
+
+    func updateSampleProfile(skills: [String], salaryFloor: Int) throws {
+        guard isSample, var snapshot = dashboard else { return }
+        try SampleWorkspace.updateProfile(&snapshot, skills: skills, salaryFloor: salaryFloor)
+        dashboard = snapshot
+    }
+
+    func resetSample() {
+        guard isSample else { return }
+        dashboard = SampleWorkspace.reset()
     }
 
     func startSearch() async {
-        guard !startingSearch else { return }
+        guard connected, !searchRunning, !startingSearch, !saving else { return }
+        let server = address
         startingSearch = true
         searchError = nil
         defer { startingSearch = false }
         do {
-            try await save("/api/run", [String: String]())
+            try await DashboardAPI.post("/api/run", at: server, body: [String: String]())
+            guard address == server else { return }
+            searchStatus = SearchStatus(running: true, run: nil)
         } catch {
-            searchError = error.localizedDescription
-            if (error as? DashboardAPI.ServerError)?.status == 409 { await refresh() }
+            guard address == server else { return }
+            if (error as? DashboardAPI.ServerError)?.status == 409 {
+                searchStatus = SearchStatus(running: true, run: nil)
+            } else if error is URLError {
+                searchError = "Couldn’t confirm that the Mac started the search. Check its status before trying again."
+                await checkSearchStatus()
+            } else {
+                searchError = error.localizedDescription
+            }
+        }
+    }
+
+    func followDashboardSearch() {
+        if dashboard?.running == true, searchStatus?.running == false { searchStatus = nil }
+    }
+
+    func checkSearchStatus() async {
+        guard !address.isEmpty, !checkingSearchStatus else { return }
+        let server = address
+        checkingSearchStatus = true
+        defer { checkingSearchStatus = false }
+        do {
+            let status = try await DashboardAPI.searchStatus(at: server)
+            guard address == server, !Task.isCancelled else { return }
+            searchConnectionLost = false
+            if status.running {
+                searchError = nil
+                searchStatus = status
+            } else {
+                // Sync new listings and alerts before the running task exits and cancels itself.
+                await refresh(replacingInFlight: true)
+                guard address == server, !Task.isCancelled else { return }
+                searchConnectionLost = !connected
+                if connected { searchStatus = status }
+            }
+        } catch {
+            guard address == server, !Task.isCancelled else { return }
+            if (error as? DashboardAPI.ServerError)?.status == 404 {
+                // Older Macs only publish search state in the full dashboard.
+                await refresh(replacingInFlight: true)
+                guard address == server, !Task.isCancelled else { return }
+                searchConnectionLost = !connected
+                if connected { searchStatus = nil }
+            } else {
+                searchConnectionLost = true
+            }
         }
     }
 }
 
 private struct WorkspaceView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("backendURL") private var address = ""
+    @AppStorage("keepOfflineWorkspace") private var keepOfflineWorkspace = true
     @State private var workspace = Workspace()
     @State private var editingServer = false
 
+    @State private var sample: Workspace?
+    @State private var editingSampleProfile = false
+    @State private var confirmingSampleReset = false
+    @State private var selectedTab: Tab = .forYou
+
+    private enum Tab: Hashable { case forYou, browse, myJobs, search, settings }
+
     var body: some View {
         Group {
-            if workspace.dashboard != nil {
-                TabView {
-                    NavigationStack { ForYou(workspace: workspace) }
-                        .tabItem { Label("For You", systemImage: "sparkles") }
-                    NavigationStack { JobList(workspace: workspace) }
-                        .tabItem { Label("Browse", systemImage: "list.bullet") }
-                    NavigationStack { SearchScreen(workspace: workspace) }
-                        .tabItem { Label("Search", systemImage: "magnifyingglass") }
-                        .badge(workspace.dashboard?.unreadMatchCount ?? 0)
-                    NavigationStack { JobList(workspace: workspace, trackingOnly: true) }
-                        .tabItem { Label("My Jobs", systemImage: "bookmark") }
-                    NavigationStack {
-                        PreferencesScreen(workspace: workspace) { editingServer = true }
-                    }
-                    .tabItem { Label("Settings", systemImage: "gearshape") }
-                }
-                .id(workspace.address)
-                .safeAreaInset(edge: .top) {
-                    if let message = workspace.connectionError {
-                        Button {
-                            Task { await workspace.refresh() }
-                        } label: {
-                            Label("Refresh failed. Tap to retry.", systemImage: "wifi.exclamationmark")
-                        }
-                        .accessibilityHint(message)
-                        .padding(8)
-                        .frame(maxWidth: .infinity)
-                        .background(.regularMaterial)
-                    }
-                }
+            if let sample {
+                tabs(sample)
+            } else if workspace.dashboard != nil {
+                tabs(workspace)
             } else {
                 NavigationStack {
-                    Group {
-                        if workspace.loading {
-                            ProgressView("Loading workspace…")
-                        } else {
-                            ContentUnavailableView {
-                                Label(address.isEmpty ? "Connect to Jobs" : "Couldn’t Load Jobs",
-                                      systemImage: address.isEmpty ? "desktopcomputer" : "wifi.exclamationmark")
-                            } description: {
-                                Text(workspace.connectionError ?? "Enter the address of the Jobs server running on your Mac.")
-                            } actions: {
-                                Button("Set Server Address") { editingServer = true }
-                                if !address.isEmpty {
-                                    Button("Try Again") { Task { await workspace.refresh() } }
-                                }
+                    WorkspaceWelcome(hasAddress: !address.isEmpty, loading: workspace.loading,
+                                     error: workspace.connectionError) {
+                        selectedTab = .forYou
+                        sample = Workspace(isSample: true)
+                    } connect: {
+                        editingServer = true
+                    } retry: {
+                        Task { await workspace.refresh() }
+                    }
+                }
+            }
+        }
+        .tint(JobsTheme.accent)
+        .sheet(isPresented: $editingServer) {
+            ServerSettings(address: address) { newAddress, snapshot in
+                if address != newAddress || sample != nil { selectedTab = .forYou }
+                sample = nil
+                workspace.connect(to: newAddress, verified: snapshot)
+                address = newAddress
+            }
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            workspace.setOfflineCopyEnabled(keepOfflineWorkspace)
+            workspace.connect(to: DashboardAPI.serverAddress(address) ?? "")
+            await workspace.refresh()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(10)) }
+                catch { break }
+                if !workspace.saving && !workspace.searchRunning && sample == nil {
+                    await workspace.refresh()
+                    // A fresh dashboard can reveal a search started on a different device.
+                    workspace.followDashboardSearch()
+                }
+            }
+        }
+        .task(id: scenePhase == .active && workspace.searchRunning && sample == nil) {
+            guard scenePhase == .active, workspace.searchRunning, sample == nil else { return }
+            while !Task.isCancelled && workspace.searchRunning {
+                await workspace.checkSearchStatus()
+                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+            }
+        }
+    }
+
+    private func tabs(_ current: Workspace) -> some View {
+        TabView(selection: $selectedTab) {
+            NavigationStack {
+                ForYou(workspace: current, openBrowse: { selectedTab = .browse },
+                       openSettings: { selectedTab = .settings }, openSearch: { selectedTab = .search })
+                    .workspaceNotice(current)
+            }
+            .tabItem { Label("For You", systemImage: "sparkles") }
+            .tag(Tab.forYou)
+            NavigationStack {
+                JobList(workspace: current, openEmployerSearch: {
+                    if current.isSample { editingServer = true }
+                    else { selectedTab = .search }
+                })
+                .workspaceNotice(current)
+            }
+                .tabItem { Label("Browse", systemImage: "magnifyingglass") }
+                .tag(Tab.browse)
+            NavigationStack { JobList(workspace: current, trackingOnly: true).workspaceNotice(current) }
+                .tabItem { Label("My Jobs", systemImage: "bookmark") }
+                .tag(Tab.myJobs)
+            if !current.isSample {
+                NavigationStack { SearchScreen(workspace: current).workspaceNotice(current) }
+                    .tabItem { Label("Alerts", systemImage: "bell") }
+                    .tag(Tab.search)
+                    .badge(current.dashboard?.unreadMatchCount ?? 0)
+            }
+            NavigationStack {
+                if current.isSample {
+                    List {
+                        Section("Sample Workspace") {
+                            Text("These listings are fictional. Your sample progress stays on this iPhone.")
+                            Button("Edit Search Profile", systemImage: "slider.horizontal.3") { editingSampleProfile = true }
+                            Button("Connect to your Mac", systemImage: "desktopcomputer") { editingServer = true }
+                            Button("Reset Sample Progress", role: .destructive) {
+                                confirmingSampleReset = true
+                            }
+                            Button("Leave Sample Workspace") {
+                                selectedTab = .forYou
+                                sample = nil
                             }
                         }
                     }
-                    .navigationTitle("Jobs")
-                }
-            }
-        }
-        .tint(Color(red: 0.03, green: 0.49, blue: 0.52))
-        .sheet(isPresented: $editingServer) {
-            ServerSettings(address: address) { newAddress in
-                if address == newAddress {
-                    Task { await workspace.refresh() }
+                    .navigationTitle("Settings")
+                    .sheet(isPresented: $editingSampleProfile) { SampleProfileEditor(workspace: current) }
+                    .confirmationDialog("Reset sample progress?", isPresented: $confirmingSampleReset,
+                                        titleVisibility: .visible) {
+                        Button("Reset Sample Progress", role: .destructive) {
+                            current.resetSample()
+                            // Recreate the sample tabs so stale Undo actions cannot affect a new session.
+                            sample = nil
+                            selectedTab = .forYou
+                        }
+                    } message: {
+                        Text("This restores the sample profile and clears sample application changes.")
+                    }
                 } else {
-                    address = newAddress
+                    PreferencesScreen(workspace: current, keepOfflineCopy: $keepOfflineWorkspace,
+                                      editServer: { editingServer = true }) {
+                        selectedTab = .forYou
+                        sample = Workspace(isSample: true)
+                    }
+                    .workspaceNotice(current)
                 }
             }
+            .tabItem { Label("Settings", systemImage: "gearshape") }
+            .tag(Tab.settings)
         }
-        .task(id: address) {
-            workspace.connect(to: address)
-            await workspace.refresh()
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(workspace.dashboard?.running == true ? 2 : 10)) }
-                catch { break }
-                if !workspace.saving && !workspace.loading, workspace.dashboard != nil {
-                    await workspace.refresh()
+        .id(current.isSample ? "sample" : current.address)
+        .onChange(of: keepOfflineWorkspace) { _, enabled in
+            workspace.setOfflineCopyEnabled(enabled)
+            if enabled { Task { await workspace.refresh() } }
+        }
+    }
+}
+
+extension View {
+    @MainActor
+    func workspaceNotice(_ current: Workspace) -> some View {
+        safeAreaInset(edge: .top, spacing: 0) {
+            if current.isSample {
+                Label("Sample workspace · Fictional listings", systemImage: "eye")
+                    .font(.footnote.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial)
+            } else if !current.connected {
+                VStack(spacing: 3) {
+                    Label("Offline · Read-only", systemImage: "wifi.slash")
+                        .font(.footnote.weight(.semibold))
+                    if let synced = current.lastSyncedAt {
+                        Text("Last synced \(synced.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Button(current.loading ? "Connecting…" : "Retry Connection") {
+                        Task { await current.refresh() }
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .disabled(current.loading)
                 }
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
+                .background(.regularMaterial)
             }
         }
     }
@@ -161,20 +415,28 @@ private struct WorkspaceView: View {
 private struct ServerSettings: View {
     @Environment(\.dismiss) private var dismiss
     @State var address: String
-    let save: (String) -> Void
+    let save: (String, DashboardAPI.Snapshot) -> Void
+    @State private var pendingAddress: String?
+    @State private var failure: String?
+
+    private var checking: Bool { pendingAddress != nil }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Backend URL") {
+                Section("Mac workspace address") {
                     TextField("http://your-mac.local:8084", text: $address)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Text("For a simulator on your Mac, use http://localhost:8084.")
+                        .accessibilityIdentifier("serverAddress")
+                        .disabled(checking)
+                    Text("Enter your Mac’s private address. A hostname or IP alone uses port 8084.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                if checking { ProgressView("Checking workspace…") }
+                if let failure { Text(failure).foregroundStyle(.red) }
             }
             .navigationTitle("Server Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -183,13 +445,29 @@ private struct ServerSettings: View {
                     Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        save(address.trimmingCharacters(in: .whitespacesAndNewlines))
-                        dismiss()
+                    Button("Connect") {
+                        failure = nil
+                        pendingAddress = DashboardAPI.serverAddress(address)
                     }
-                    .disabled(DashboardAPI.endpoint("/api/v1/dashboard", at: address) == nil)
+                        .disabled(checking || DashboardAPI.serverAddress(address) == nil)
                 }
             }
+        }
+        .task(id: pendingAddress) {
+            if let pendingAddress { await connect(pendingAddress) }
+        }
+    }
+
+    private func connect(_ normalized: String) async {
+        defer { pendingAddress = nil }
+        do {
+            let snapshot = try await DashboardAPI.load(at: normalized)
+            try Task.checkCancellation()
+            save(normalized, snapshot)
+            dismiss()
+        } catch {
+            guard !Task.isCancelled else { return }
+            failure = DashboardAPI.connectionMessage(for: error)
         }
     }
 }

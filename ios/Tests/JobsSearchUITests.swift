@@ -1,0 +1,179 @@
+import XCTest
+
+final class JobsSearchUITests: XCTestCase {
+    @MainActor
+    func testSampleBrowseFiltersAndOffersLiveConnection() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", ""]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["Explore sample jobs"].waitForExistence(timeout: 12))
+        app.buttons["Explore sample jobs"].tap()
+        app.tabBars.buttons["Browse"].tap()
+        let filter = app.textFields["listingFilter"]
+        XCTAssertTrue(filter.waitForExistence(timeout: 7))
+        filter.tap()
+        filter.typeText("harbor wren reconciliation\n")
+        XCTAssertTrue(app.staticTexts["All Listings · 1"].waitForExistence(timeout: 7))
+        XCTAssertTrue(app.staticTexts["Payments Reconciliation Analyst"].exists)
+
+        app.buttons["Clear search"].tap()
+        XCTAssertTrue(app.staticTexts["All Listings · 16"].waitForExistence(timeout: 7))
+        app.buttons["Connect for Live Search"].tap()
+        XCTAssertTrue(app.navigationBars["Server Settings"].waitForExistence(timeout: 7))
+        XCTAssertFalse(app.buttons["Run Employer Search"].exists)
+    }
+
+    @MainActor
+    func testConnectedBrowseCanFindNewEmployerListings() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18085"]
+        app.launch()
+
+        XCTAssertTrue(app.tabBars.buttons["Browse"].waitForExistence(timeout: 15))
+        app.tabBars.buttons["Browse"].tap()
+        let filter = app.textFields["listingFilter"]
+        XCTAssertTrue(filter.waitForExistence(timeout: 7))
+        filter.tap()
+        filter.typeText("billing\n")
+        XCTAssertTrue(app.staticTexts["All Listings · 1"].waitForExistence(timeout: 7))
+        XCTAssertTrue(app.staticTexts["Billing Analyst"].exists)
+        XCTAssertFalse(app.staticTexts["Payment Operations Specialist"].exists)
+        app.buttons["Clear search"].tap()
+
+        app.buttons["Find New Jobs"].tap()
+        let run = app.buttons["Run Employer Search"]
+        XCTAssertTrue(run.waitForExistence(timeout: 8))
+        run.tap()
+        XCTAssertTrue(app.staticTexts["fictional-slow"].waitForExistence(timeout: 8))
+        let outcome = app.staticTexts["searchOutcome"]
+        XCTAssertTrue(outcome.waitForExistence(timeout: 15))
+        XCTAssertTrue(outcome.label.contains("incomplete checks"))
+        XCTAssertTrue(outcome.label.contains("1 new listing saved"))
+        XCTAssertTrue(run.isEnabled)
+        run.tap()
+        let retryFinished = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "No new listings matched"), object: outcome)
+        XCTAssertEqual(XCTWaiter.wait(for: [retryFinished], timeout: 15), .completed)
+        XCTAssertTrue(run.isEnabled)
+        app.tabBars.buttons["Browse"].tap()
+        let posting = app.staticTexts["Payment Operations Specialist"]
+        XCTAssertTrue(posting.waitForExistence(timeout: 25))
+        XCTAssertTrue(app.staticTexts["All Listings · 3"].exists)
+        posting.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "salaryPolicyReason")
+            .firstMatch.waitForExistence(timeout: 8))
+        let workArrangement = app.descendants(matching: .any)
+            .matching(identifier: "employerWorkArrangement").firstMatch
+        XCTAssertTrue(workArrangement.waitForExistence(timeout: 8))
+        let checkedLink = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "Open checked employer posting")).firstMatch
+        XCTAssertTrue(checkedLink.waitForExistence(timeout: 8))
+        let directEvidence = app.descendants(matching: .any).matching(identifier: "directPostingChecked").firstMatch
+        for _ in 0..<4 {
+            if directEvidence.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(directEvidence.exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "applicationFormChecked").firstMatch.exists)
+    }
+    @MainActor
+    func testMatchInboxKeepsUnverifiedHistoryWhenMarkedRead() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18085"]
+        app.launch()
+
+        let alerts = app.tabBars.buttons["Alerts"]
+        XCTAssertTrue(alerts.waitForExistence(timeout: 15))
+        alerts.tap()
+        app.staticTexts["Match Alerts"].tap()
+        XCTAssertTrue(app.navigationBars["Match Alerts"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Current match"].exists)
+        XCTAssertTrue(app.staticTexts["Posting needs a fresh check"].exists)
+        let markRead = app.buttons["Mark All Read"]
+        markRead.tap()
+        XCTAssertTrue(markRead.waitForNonExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Billing Analyst"].exists)
+        XCTAssertTrue(app.staticTexts["Software Engineer"].exists)
+    }
+
+    @MainActor
+    func testTrackingExternalApplicationWithoutLink() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18085"]
+        app.launch()
+
+        XCTAssertTrue(app.tabBars.buttons["My Jobs"].waitForExistence(timeout: 15))
+        app.tabBars.buttons["My Jobs"].tap()
+        let add = app.buttons["Add Application"]
+        XCTAssertTrue(add.waitForExistence(timeout: 8))
+        add.tap()
+        let save = app.buttons["Save"]
+        XCTAssertFalse(save.isEnabled)
+        let title = app.textFields["Job title"]
+        title.tap()
+        title.typeText("Payroll Coordinator")
+        let employer = app.textFields["Employer"]
+        employer.tap()
+        employer.typeText("Fictional Wren")
+        save.tap()
+
+        let listing = app.staticTexts["Payroll Coordinator"]
+        XCTAssertTrue(listing.waitForExistence(timeout: 12))
+        listing.tap()
+        XCTAssertTrue(app.staticTexts["You entered these details. Jobs hasn’t verified the posting."]
+            .waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["Open saved link"].exists)
+        XCTAssertFalse(app.staticTexts["Why It Matches"].exists)
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.tabBars.buttons["My Jobs"].waitForExistence(timeout: 15))
+        app.tabBars.buttons["My Jobs"].tap()
+        let stage = app.descendants(matching: .any).matching(identifier: "applicationStage").firstMatch
+        XCTAssertTrue(stage.waitForExistence(timeout: 8))
+        stage.tap()
+        let applied = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Applied (")).firstMatch
+        XCTAssertTrue(applied.waitForExistence(timeout: 8))
+        applied.tap()
+        XCTAssertTrue(listing.waitForExistence(timeout: 8))
+    }
+    @MainActor
+    func testApplicationPrepUsesProfileExcerptAndReopensDraft() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-backendURL", "http://127.0.0.1:18085"]
+        app.launch()
+
+        XCTAssertTrue(app.tabBars.buttons["Browse"].waitForExistence(timeout: 15))
+        app.tabBars.buttons["Browse"].tap()
+        let posting = app.staticTexts["Billing Analyst"]
+        XCTAssertTrue(posting.waitForExistence(timeout: 8))
+        posting.tap()
+        let open = app.buttons["openApplicationPrep"]
+        XCTAssertTrue(open.waitForExistence(timeout: 8))
+        open.tap()
+        let excerpt = "Reconciled fictional accounts using Excel and SQL."
+        XCTAssertTrue(app.staticTexts[excerpt].waitForExistence(timeout: 8))
+        app.buttons["Add Excel excerpt"].tap()
+        app.buttons["Save Draft"].tap()
+        let saved = app.descendants(matching: .any).matching(identifier: "applicationDraftSaved").firstMatch
+        for _ in 0..<3 {
+            if saved.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(saved.waitForExistence(timeout: 8))
+        app.buttons["Close"].tap()
+        open.tap()
+        let draft = app.textViews["applicationPrepDraft"]
+        for _ in 0..<3 {
+            if draft.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(draft.waitForExistence(timeout: 8))
+        XCTAssertEqual(draft.value as? String, excerpt)
+    }
+}

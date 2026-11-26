@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<offers>
+  <offer>
+    <id>12345</id>
+    <slug>payment-operations-specialist</slug>
+    <title>Payment Operations Specialist</title>
+    <company_name>Fictional Cedar Accounts</company_name>
+    <careers_url>https://fictional.recruitee.com/o/payment-operations-specialist</careers_url>
+    <location>Remote - United States</location>
+    <remote>true</remote>
+    <hybrid>false</hybrid>
+    <on_site>false</on_site>
+    <description><![CDATA[<h2>Responsibilities</h2><ul><li>Reconcile incoming payments in Excel.</li><li>Investigate mismatched invoices using SQL.</li></ul>]]></description>
+    <requirements><![CDATA[<p>Experience using fictional accounting software.</p>]]></requirements>
+    <published_at>2026-11-01 09:00:00 UTC</published_at>
+    <salary><min/><max/><currency/><period/></salary>
+  </offer>
+</offers>

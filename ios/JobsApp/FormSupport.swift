@@ -4,6 +4,8 @@ struct SaveForm<Content: View>: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
     let workspace: Workspace
+    var saveDisabled = false
+    var reloadOnConflict = true
     @ViewBuilder let content: () -> Content
     let save: () async throws -> Void
     let reload: () -> Void
@@ -15,6 +17,13 @@ struct SaveForm<Content: View>: View {
     var body: some View {
         NavigationStack {
             Form {
+                if !workspace.canWrite {
+                    Section {
+                        Label("Offline · Changes stay in this form", systemImage: "wifi.slash")
+                        Button(workspace.loading ? "Connecting…" : "Retry Connection") { Task { await workspace.refresh() } }
+                            .disabled(workspace.loading)
+                    }
+                }
                 if let errorMessage {
                     Section {
                         Text(errorMessage).foregroundStyle(.red)
@@ -36,7 +45,7 @@ struct SaveForm<Content: View>: View {
                     if workspace.saving || refreshing {
                         ProgressView()
                     } else {
-                        Button("Save") { Task { await submit() } }.disabled(hasConflict)
+                        Button("Save") { Task { await submit() } }.disabled(saveDisabled || hasConflict || !workspace.canWrite)
                     }
                 }
             }
@@ -54,14 +63,14 @@ struct SaveForm<Content: View>: View {
         do { try await save() }
         catch {
             errorMessage = error.localizedDescription
-            hasConflict = (error as? DashboardAPI.ServerError)?.status == 409
+            hasConflict = reloadOnConflict && (error as? DashboardAPI.ServerError)?.status == 409
         }
     }
 
     private func reloadDraft() async {
         refreshing = true
         defer { refreshing = false }
-        await workspace.refresh()
+        await workspace.refresh(replacingInFlight: true)
         if let error = workspace.connectionError {
             errorMessage = error
         } else {
@@ -102,6 +111,13 @@ func dateString(_ date: Date) -> String {
 }
 
 func displayTimestamp(_ value: String) -> String {
-    guard let timestamp = ISO8601DateFormatter().date(from: value) else { return value }
+    if value.count == 10, let day = dateFormatter.date(from: value) {
+        return day.formatted(date: .abbreviated, time: .omitted)
+    }
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions.insert(.withFractionalSeconds)
+    let fractional = iso.date(from: value)
+    iso.formatOptions.remove(.withFractionalSeconds)
+    guard let timestamp = fractional ?? iso.date(from: value) else { return value }
     return timestamp.formatted(date: .abbreviated, time: .shortened)
 }

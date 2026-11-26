@@ -1,5 +1,7 @@
 # Personalized job board research and design
 
+This research informed the original job-board design. Use the [approved vision](PRODUCT-VISION.md) for product requirements and the [roadmap](NEXT-STEPS.md) for current priorities.
+
 ## What established products do
 
 | Reference | Observed behavior | Design implication for Jobs |
@@ -18,14 +20,14 @@
 3. **Review exceptions.** Keep remote listings with ambiguous residence rules in review. Leave missing pay visible for human follow-up. Show the employer’s listing and preserve a separate record of what the user verified.
 4. **Act and track.** Send the user to the employer posting. Save the user’s decision, application status and follow-up in the workspace.
 
-The first native release imports PDF or UTF-8 text and keeps a removable, device-local preview. It sends the selected skills and search preferences to the Mac workspace on Save. Résumé text is not used by the AI review flow. Selected skills boost matching without asserting that the candidate holds a credential. Location matching uses published place phrases and work-setting signals. It does not calculate commute radius, normalize every city and region alias, or establish legal remote eligibility.
+Build 9 imports PDF or UTF-8 text and keeps a removable, device-local preview. Users can save selected skills and explicitly added experience to the Mac profile. An explicitly requested AI review can use that saved profile. The full imported preview stays on the device. Location matching uses published place phrases and work-setting signals, with uncertain cases held for review.
 
-## What to build next
+## Original research recommendations
 
 | Priority | Work | Acceptance evidence |
 | --- | --- | --- |
 | 1 | Improve location and pay evidence with structured regions, multiple worksites, hiring jurisdictions, pay currency and period. | Test remote exclusions, ambiguous cities, multiple locations, hourly pay and missing salary. Show the employer’s published values and provenance on the card. |
-| 2 | Add named saved searches for different role and salary goals, with editable alert frequency. | Switching searches restores all relevant settings. A repeated employer listing generates one alert per relevant search, with pause and deletion controls. |
+| 2 | Support named saved searches for different role and salary goals. Build 9 includes saved searches and a match inbox. Delivery options remain on the roadmap. | Switching searches restores all relevant settings. A repeated employer listing generates one alert per relevant search, with pause and deletion controls. |
 | 3 | Broaden job supply with employer-source coverage and freshness tracking. | Report last successful check per source and distinguish source failures from confirmed closure. Measure duplicate and stale listing rates against a labeled sample. |
 | 4 | Add accounts before sharing a deployment across people. | Separate résumé data, preferences, review decisions and application histories by authenticated account. Verify read and write isolation, deletion and backup handling. |
 

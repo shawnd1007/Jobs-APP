@@ -72,7 +72,10 @@
   "additional_boards": {
     "greenhouse": [],
     "ashby": [],
-    "lever": []
+    "lever": [],
+    "smartrecruiters": [],
+    "personio": [],
+    "recruitee": []
   },
   "additional_employer_urls": [],
   "local_areas": {
