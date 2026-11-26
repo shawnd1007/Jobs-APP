@@ -21,9 +21,11 @@ PREFERENCE_KEYS = ('profile', 'categories', 'salary_floor', 'salary_policy',
                    'remote_hiring_locations', 'legacy_geography')
 
 
-def settings(base, data):
+def settings(base, data, stored=None):
     path = data / 'preferences.json'
-    if path.exists():
+    if stored is not None:
+        base.update(stored)
+    elif path.exists():
         base.update(json.loads(path.read_text(encoding='utf-8')))
     base.setdefault('preferred_skills', [])
     base.setdefault('target_locations', [])
@@ -35,6 +37,7 @@ def settings(base, data):
     base.setdefault('ai_enabled', False)
     base.setdefault('ai_model', 'gpt-5.4-mini')
     base.setdefault('ai_daily_limit', 10)
+    base['us_postings_only'] = True
     return base
 
 
@@ -115,11 +118,8 @@ def save_preferences(a, payload):
             if not isinstance(group['label'], str) or not 1 <= len(group['label']) <= 120: raise ValueError('Invalid skill label')
             if type(group['points']) is not int or not 0 <= group['points'] <= 25: raise ValueError('Invalid skill weight')
             if not isinstance(group['terms'], list) or not group['terms'] or len(group['terms']) > 30 or any(not isinstance(t, str) or not 1 <= len(t) <= 80 for t in group['terms']): raise ValueError('Invalid skill terms')
-        path = a.DATA / 'preferences.json'
         saved = {k: updated[k] for k in PREFERENCE_KEYS if k in updated}
-        temp = path.with_suffix('.tmp')
-        temp.write_text(json.dumps(saved, indent=2) + '\n', encoding='utf-8')
-        os.replace(temp, path)
+        a.persist_preferences(saved)
     return 200, {'saved': True}
 
 
@@ -129,11 +129,11 @@ def public_preferences(cfg):
 
 def source_result(a, source, state, count=0, error=''):
     with a.connect() as c:
-        c.execute('INSERT OR REPLACE INTO source_health VALUES(?,?,?,?,?)',
+        c.execute('INSERT INTO source_health VALUES(?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET checked=excluded.checked,state=excluded.state,count=excluded.count,error=excluded.error',
                   (source, a.now(), state, count, error[:300]))
 
 
-def source_snapshot(a, jobs, cfg):
+def source_snapshot(a, jobs, cfg, connection):
     sources = set()
     for j in jobs:
         if j.get('external_application') or j.get('identity_review'):
@@ -143,8 +143,7 @@ def source_snapshot(a, jobs, cfg):
     for platform, names in cfg['additional_boards'].items():
         sources.update(platform + '/' + n.lower() for n in names)
     sources.update(cfg['additional_employer_urls'])
-    with a.connect() as c:
-        health = {r['source']: dict(r) for r in c.execute('SELECT * FROM source_health')}
+    health = {r['source']: dict(r) for r in connection.execute('SELECT * FROM source_health')}
     sources.update(health)
     return [dict(health.get(s, {'source': s, 'state': 'not checked', 'checked': '', 'count': 0, 'error': ''}),
                  disabled=s in cfg['disabled_sources'], kind='Employer page' if s.startswith('https:') else 'Public ATS feed')
@@ -161,6 +160,10 @@ def ai_key(a):
     return os.environ.get('OPENAI_API_KEY') or (path.read_text().strip() if path.exists() else '')
 
 
+def unlimited_personal_testing():
+    return os.environ.get('JOBS_PERSONAL_UNLIMITED_AI') == '1'
+
+
 def ai_review(a, job_id):
     if not AI_LOCK.acquire(False): return 409, {'error': 'An AI review is already running. Please wait.'}
     try: return _ai_review(a, job_id)
@@ -170,8 +173,12 @@ def ai_review(a, job_id):
 def _ai_review(a, job_id):
     cfg = a.config()
     if not cfg['ai_enabled'] or not ai_key(a): return 400, {'error': 'Enable AI in Preferences and configure the server API key first.'}
-    j = next((j for j in a.records() if j['id'] == job_id), None)
-    if not j: return 404, {'error': 'Job not found'}
+    if not -(2**63) <= job_id < 2**63:
+        return 404, {'error': 'Job not found'}
+    jobs = a.records(job_ids=[job_id])
+    if not jobs:
+        return 404, {'error': 'Job not found'}
+    j = jobs[0]
     if j.get('external_application'):
         return 400, {'error': 'AI review needs an employer posting checked by Jobs.'}
     digest = fingerprint(j, cfg)
@@ -180,9 +187,9 @@ def _ai_review(a, job_id):
         c.execute('BEGIN IMMEDIATE')
         cached = c.execute('SELECT * FROM ai_reviews WHERE job_id=?', (job_id,)).fetchone()
         if cached and cached['fingerprint'] == digest: return 200, {'cached': True}
-        c.execute('INSERT OR IGNORE INTO ai_usage VALUES(?,0)', (a.now()[:10],))
+        c.execute('INSERT INTO ai_usage VALUES(?,0) ON CONFLICT(day) DO NOTHING', (a.now()[:10],))
         n = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()[0]
-        if n >= cfg['ai_daily_limit']: return 429, {'error': 'Daily AI request limit reached.'}
+        if not unlimited_personal_testing() and n >= cfg['ai_daily_limit']: return 429, {'error': 'Daily AI request limit reached.'}
         c.execute('UPDATE ai_usage SET attempts=attempts+1 WHERE day=?', (a.now()[:10],))
     schema = {'type': 'object', 'additionalProperties': False, 'properties': {
         'summary': {'type': 'string'},
@@ -204,38 +211,58 @@ def _ai_review(a, job_id):
         if set(advice) != set(schema['required']) or not isinstance(advice['summary'], str) or any(not isinstance(advice[k], list) or any(not isinstance(v, str) for v in advice[k]) for k in schema['required'][1:]):
             raise ValueError('Invalid AI advice structure')
         with a.connect() as c:
-            c.execute('INSERT OR REPLACE INTO ai_reviews VALUES(?,?,?,?,?,?)', (job_id, digest, a.now(), cfg['ai_model'], json.dumps(advice), json.dumps(result.get('usage', {}))))
+            c.execute('INSERT INTO ai_reviews VALUES(?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET fingerprint=excluded.fingerprint,created=excluded.created,model=excluded.model,advice=excluded.advice,usage=excluded.usage', (job_id, digest, a.now(), cfg['ai_model'], json.dumps(advice), json.dumps(result.get('usage', {}))))
         return 200, {'saved': True}
     except Exception:
         # Provider bodies and keys never enter the browser or logs.
         return 502, {'error': 'AI review failed or was incomplete. Check provider access and usage before retrying; the attempt counts toward the daily limit.'}
 
 
-def enrich_snapshot(a, result):
-    cfg = a.config()
+DASHBOARD_ALERT_LIMIT = 200
+
+
+def enrich_snapshot(a, result, cfg, connection):
     prefs = public_preferences(cfg)
     result.update(api_version=1, preferences=prefs,
                   preferences_revision=hashlib.sha256(json.dumps(prefs, sort_keys=True).encode()).hexdigest(),
-                  sources=source_snapshot(a, result['jobs'], cfg), ai_configured=bool(ai_key(a)))
-    with a.connect() as c:
-        searches = saved_searches(c)
-        result['saved_searches'] = searches
-        result['unread_match_count'] = c.execute('SELECT COUNT(*) FROM match_alerts WHERE unread=1').fetchone()[0]
-        alert_rows = c.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT 200').fetchall()
-        advice = {r['job_id']: dict(r) for r in c.execute('SELECT * FROM ai_reviews')}
-        usage = c.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
+                  sources=source_snapshot(a, result['jobs'], cfg, connection), ai_configured=bool(ai_key(a)))
+    searches = saved_searches(connection)
+    result['saved_searches'] = searches
+    result['unread_match_count'] = connection.execute('SELECT COUNT(*) FROM match_alerts WHERE unread=1').fetchone()[0]
+    alert_rows = connection.execute('SELECT * FROM match_alerts ORDER BY id DESC LIMIT ?',
+                                    (DASHBOARD_ALERT_LIMIT,)).fetchall()
+    usage = connection.execute('SELECT attempts FROM ai_usage WHERE day=?', (a.now()[:10],)).fetchone()
     searches_by_id = {search['id']: search for search in searches}
     jobs_by_id = {job['id']: job for job in result['jobs']}
-    result['match_alerts'] = [
+    visible_alerts = [
         dict(row, unread=bool(row['unread']), search_name=search['name'],
              current_state=match_alert_state(a, jobs_by_id.get(row['job_id']), search))
         for row in alert_rows if (search := searches_by_id.get(row['search_id']))
+        and not (jobs_by_id.get(row['job_id']) or {}).get('hidden_from_discovery')
     ]
+    result['match_alerts'] = visible_alerts
+    if cfg.get('us_postings_only'):
+        result['unread_match_count'] = sum(alert['unread'] for alert in visible_alerts)
     result['ai_attempts_today'] = usage[0] if usage else 0
-    for j in result['jobs']:
+    enrich_job_advice(result['jobs'], cfg, connection)
+    return result
+
+
+def dashboard_alerts_reference(connection, job_ids):
+    placeholders = ','.join('?' for _ in job_ids)
+    return connection.execute(f'''SELECT 1
+        FROM (SELECT job_id FROM match_alerts ORDER BY id DESC LIMIT ?) AS recent
+        WHERE job_id IN ({placeholders}) LIMIT 1''', (DASHBOARD_ALERT_LIMIT, *job_ids)).fetchone() is not None
+
+
+def enrich_job_advice(jobs, cfg, connection, *, job_ids=None):
+    query = 'SELECT job_id, fingerprint, created, model, advice FROM ai_reviews'
+    if job_ids is not None:
+        query += ' WHERE job_id IN (' + ','.join('?' for _ in job_ids) + ')'
+    advice = {r['job_id']: r for r in connection.execute(query, () if job_ids is None else job_ids)}
+    for j in jobs:
         saved = advice.get(j['id'])
         j['ai_advice'] = dict(advice=json.loads(saved['advice']), model=saved['model'], created=saved['created'], stale=saved['fingerprint'] != fingerprint(j, cfg)) if saved else None
-    return result
 
 
 def saved_searches(c):
@@ -249,7 +276,7 @@ def search_title_matches(title, search):
                             for term in terms)
 
 
-def matching_searches(a, job, searches):
+def matching_searches(a, job, searches, *, us_only=False):
     if job.get('availability') != 'Open':
         return []
     title = job.get('title', '').lower()
@@ -263,7 +290,10 @@ def matching_searches(a, job, searches):
         if not any(re.search(r'(?<![\w+#])' + re.escape(skill.lower()) + r'(?![\w+#])', text)
                    for skill in search['skills']):
             continue
-        geography = {'target_locations': search['locations'], 'workplace_types': search['workplace_types']}
+        geography = {'target_locations': search['locations'], 'workplace_types': search['workplace_types'],
+                     'us_postings_only': us_only}
+        if us_only and not a.discovery_location_allowed(job, dict(geography, remote_hiring_locations=search['locations'])):
+            continue
         if a.location_eligibility(job, geography)[0] != 'Eligible':
             continue
         low, high = a.annual_base_bounds(job)
@@ -287,7 +317,7 @@ def match_alert_state(a, job, search):
 
 
 def record_match_alerts(c, job_id, search_ids, created):
-    c.executemany('INSERT OR IGNORE INTO match_alerts(search_id,job_id,created) VALUES(?,?,?)',
+    c.executemany('INSERT INTO match_alerts(search_id,job_id,created) VALUES(?,?,?) ON CONFLICT(search_id,job_id) DO NOTHING',
                   [(search_id, job_id, created) for search_id in search_ids])
 
 

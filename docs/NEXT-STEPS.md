@@ -13,8 +13,49 @@ The matching follow-up adds [distinct duty evidence](COMPLETE-GUIDE.md#7-how-mat
 | 3 | Make profile, fit, and application preparation more useful. Application Prep now pairs employer duties with profile excerpts and saves a draft. Improve transferable-skill review and evaluate evidence quality across job families. | Test with fictional résumés and labeled postings from multiple occupations. Show the evidence behind a suggestion, gaps and unknowns, and keep any fit score separate from hiring probability. |
 | 4 | Close tracking gaps. The browser and connected iPhone can now add an outside application. Validate historical imports and extend corrections for manually entered posting details. | Use fictional CSV exports with duplicate and ambiguous requisitions. The original personal tracker or another confirmed export is needed to import Shawn’s additional history. |
 
+## Ideas from personal testing
+
+- Add a Stop search control that preserves completed results, profile, applications and notes. Handle in-flight provider requests, concurrent operations and retry safely, and verify with fictional data on a separate simulator.
+
+- Local implementation in progress: recruiter pay selection, Apple Maps location suggestions, a stored master résumé and job-specific editable AI drafts. Verify the original file upload and preview on a signed phone, live location suggestions, PostgreSQL persistence and recovery, and a separately authorized live AI request before treating these as deployed or production-ready. Existing résumé text does not include the original file; it must be selected again to store that copy. Tailored drafts currently share as text, not a formatted PDF.
+
+
+- Show meaningful search progress, including the current stage and available counts, so people can tell the search is still working. Handle unknown totals and incomplete coverage honestly.
+- Suggest and validate locations as people type, including city, state, and country, while preserving a way to correct the selection.
+- Keep a copy of the uploaded résumé in the candidate profile, with clear access, replacement, and deletion controls.
+- Under each job posting, offer AI-assisted résumé editing that creates a tailored version from the candidate's master résumé and the actual posting. Keep the original intact, never invent qualifications, and let the candidate review and edit the tailored version before use.
+- Measure recruiter AI token usage and cost per search, including retries, to estimate the cost of weekly use and support subscription pricing decisions.
+- Explore an optional bring-your-own-OpenAI-key plan with a lower app fee and customer-paid AI usage, potentially allowing searches and résumé edits beyond the included weekly allowance. Evaluate practical limits, key protection, cost transparency, provider rules, and support before promising unlimited use or a price.
+- Design a weekly customer search allowance: let an accepted search finish its full intended process, then limit customers to one search per week; provide Shawn a separate allowance for ongoing testing. Keep review, applying and application tracking available throughout the week. Define recovery for failures without charging a user for another weekly search.
+
+### Weekly-search model: questions to resolve
+
+- Define what a complete search covers, including how many openings receive personalized comparison, how unfinished work is surfaced, and how to avoid silently deferring most results.
+- Record input and output tokens, model, attempts, retries, and estimated provider cost for each search; separately account for hosting and any search-provider charges. Verify real costs before choosing a customer price or token allowance.
+- Decide when the weekly allowance resets, how partial failures recover without consuming another search, and how the user can see the next available search. Keep saved opportunities, application tracking, notes, and follow-ups accessible between searches.
+- Give Shawn a clearly separated testing allowance without weakening future customer limits. Validate the policy with real usage and costs before implementing or promising a subscription tier.
+
+These are requested improvements, not claims about completed functionality.
+
 ## Validate the paid service before wider access
 
 1. Add authenticated accounts, authorization on every workspace operation, user-controlled correction and deletion, and tested isolation across data, caches, backups, and background jobs.
 2. Evaluate deployment, monitoring, consent, accessibility, recovery, and alert delivery for real users. Validate provider usage and cost with a separately authorized trial.
 3. Measure time saved, relevance, correct employer links, repeat use, and willingness to pay. About $10/month is a pricing hypothesis. Fifty boards is an illustrative ambition. Use measured value, reliability, and costs to decide what to offer.
+
+### Personal Azure setup in progress
+
+- The personal App Service and PostgreSQL workspace are running. A signed physical iPhone connected to the workspace over 5G; a database setting survived a restart. Seven-day automatic backups were observed, but a restore has not been tested.
+- Microsoft sign-in and an account-specific restriction are configured; an independent test that another identity is rejected is still needed. The app endpoint is reachable from public networks, while the advanced deployment endpoint is separately denied. Review security before wider use and account for changing App Service outbound addresses in database firewall rules.
+- The 29 employer boards were carried to the cloud workspace and used in a search. Validate live search quality and token-cost accounting further. The matching fix for unverifiable evidence needs confirmed deployment and a fresh end-to-end run.
+- Keep personal data and configuration out of Git. Track Azure and OpenAI costs separately; Azure budget alerts are not a spending cap.
+
+## Prepare for the iPhone App Store
+
+These are future release tasks, not completed features or an approval to publish.
+
+- Enroll in the [Apple Developer Program](https://developer.apple.com/help/account/membership/program-enrollment/) and verify identity. Individual enrollment displays the person's legal name as seller; eligible organizations have additional verification requirements. The program fee is currently $99 per year in the US.
+- Build and sign a distribution version in Xcode, create the app record in App Store Connect, and consider TestFlight for pre-release testing.
+- Prepare the store listing, screenshots, support information, privacy policy, and accurate data-collection disclosures. Explain how résumés and other personal information are handled, including AI processing.
+- Provide Apple with a working way to review the app, including a review account if needed, and submit the app for App Review. If accounts can be created, support account deletion in the app. See [Apple's review guidelines](https://developer.apple.com/app-store/review/guidelines/).
+- Before wider release, implement and verify secure accounts, separation of users' information, durable storage, recovery, and a dependable hosted service. Review Apple's current in-app purchase and subscription rules, banking, tax, and fees before setting a paid offering.

@@ -12,7 +12,7 @@ import prototype
 class PrototypeTests(unittest.TestCase):
     def setUp(self):
         base = json.loads((Path(__file__).resolve().parent / "config.example.json").read_text())
-        config = patch.object(app, "config", side_effect=lambda: app.prototype.settings(dict(base), app.DATA))
+        config = patch.object(app, "config", side_effect=lambda **_: app.prototype.settings(dict(base), app.DATA))
         config.start()
         self.addCleanup(config.stop)
         self.tmp = tempfile.TemporaryDirectory()
@@ -52,7 +52,9 @@ class PrototypeTests(unittest.TestCase):
         self.assertFalse(app.salary_qualifies(j, cfg))
 
     def test_preferences_conflicts_and_validation(self):
-        state = app.snapshot()
+        with patch.object(app, 'connect', wraps=app.connect) as connect:
+            state = app.snapshot()
+        connect.assert_called_once_with()
         payload = dict(revision=state['preferences_revision'], preferences={'salary_floor': 81000})
         self.assertEqual(prototype.save_preferences(app, payload)[0], 200)
         self.assertEqual(app.config()['salary_floor'], 81000)
@@ -249,8 +251,11 @@ class PrototypeTests(unittest.TestCase):
         response = dict(status='completed', output=[{'content': [{'type': 'output_text', 'text': json.dumps(advice)}]}], usage={'total_tokens': 50})
         with patch.object(app, 'config', return_value=cfg), patch.object(prototype, 'ai_key', return_value='fake-test-key'), patch('prototype.urllib.request.urlopen', return_value=io.BytesIO(json.dumps(response).encode())) as network:
             original = app.records()[0]
-            self.assertEqual(prototype.ai_review(app, original['id'])[0], 200)
+            with patch.object(app, 'records', wraps=app.records) as records:
+                self.assertEqual(prototype.ai_review(app, original['id'])[0], 200)
+                records.assert_called_once_with(job_ids=[original['id']])
             self.assertEqual(prototype.ai_review(app, original['id'])[1], {'cached': True})
+            self.assertEqual(prototype.ai_review(app, 2**63), (404, {'error': 'Job not found'}))
             self.assertEqual(network.call_count, 1)
             self.assertEqual(prototype.ai_review(app, app.records()[1]['id'])[0], 429)
             saved = app.records()[0]

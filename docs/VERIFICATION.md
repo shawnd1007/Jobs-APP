@@ -1,6 +1,19 @@
 # Verification record
 
+## Local résumé and preference work — November 18, 2026
+
+Local changes add recruiter location suggestions, a salary picker, a master résumé file and job-specific AI drafts. An isolated iPhone simulator connected to a fictional local workspace, displayed the master résumé text, and generated, saved and reopened a fictional job-specific draft using mocked AI. This did not exercise the original-file picker, Apple Maps results, paid OpenAI, PostgreSQL, Azure deployment, or a physical device. The existing workspace can have extracted résumé text without its original file; the owner must upload it again to save that file. Drafts are shareable as text; preserving original formatting or producing a PDF is not implemented. Reviews for accuracy remain necessary.
+
+
 The [approved vision](PRODUCT-VISION.md) describes the intended product. This record covers checks that were actually observed. See the [Build 9 checklist](STAGE-TWO.md) for the shipped changes and [roadmap](NEXT-STEPS.md) for open work.
+
+## Personal iPhone and Azure test — November 18, 2026
+
+A physical iPhone was signed and installed using Xcode Personal Team. After the MSAL framework runpath and browser sign-in changes, the phone signed in and connected to the Azure workspace. With Wi-Fi turned off, a fresh Connect succeeded while the phone displayed 5G. This is a personal workspace test, not proof of multi-user isolation. Free Personal Team provisioning expires and needs renewal.
+
+Azure App Service authentication requires Microsoft sign-in and is configured with an allowed identity. The main app is reachable from public networks for mobile use; the advanced deployment endpoint has separate deny-all network restrictions. Rejection of a different signed-in identity and a backup restore remain untested. Database settings survived an earlier restart; recovery still needs verification.
+
+A previous Azure search checked 29 configured boards and saved 35 listings; the match run stopped on unverifiable evidence. The matching correction flags such evidence for review and continues, and passed fictional local tests. Publishing this source does not by itself prove Azure deployment or a successful new matching run. The 27 comparison calls recorded in that prior run had an estimated known AI cost of roughly $0.085, not a complete search cost or bill.
 
 ## Build 9
 

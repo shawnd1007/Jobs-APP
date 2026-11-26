@@ -1,4 +1,6 @@
-# Jobs App
+# Jobs App — Version 2 development
+
+This local version develops the [customer workflow](docs/CUSTOMER-WORKFLOW.md) on `codex/v2-ai-recruiter`, separately from draft PR #2. The native app installs as **Jobs Next**, version 2.0, with its own app storage. See the [V2 implementation and verification record](docs/V2-DEVELOPMENT.md) before running it. Nothing from this version has been published.
 
 Jobs is being built as a paid, secure, ad-free personal AI recruiter. It should understand a job seeker's experience and goals, find current openings on employer sites, explain the fit, help prepare a truthful application, and replace the application spreadsheet. Shawn is the first daily tester. Other job seekers are the intended customers. [Approved product vision](docs/PRODUCT-VISION.md)
 

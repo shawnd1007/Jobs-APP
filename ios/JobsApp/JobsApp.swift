@@ -1,12 +1,93 @@
 import SwiftUI
 import UserNotifications
+import MSAL
+
+@MainActor
+final class MicrosoftSession {
+    static let shared = MicrosoftSession()
+    private var application: MSALPublicClientApplication?
+    private var account: MSALAccount?
+
+    private func setting(_ name: String) -> String {
+        (Bundle.main.object(forInfoDictionaryKey: name) as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func applies(to address: String) -> Bool {
+        let host = setting("JobsAzureHost")
+        guard !host.isEmpty, let url = DashboardAPI.webURL(address), url.scheme == "https" else { return false }
+        return url.host?.lowercased() == host.lowercased() && (url.port == nil || url.port == 443)
+    }
+
+    private func client() throws -> MSALPublicClientApplication {
+        if let application { return application }
+        let clientID = setting("JobsEntraClientID"), tenantID = setting("JobsEntraTenantID")
+        guard !clientID.isEmpty, !tenantID.isEmpty,
+              let authorityURL = URL(string: "https://login.microsoftonline.com/\(tenantID)") else {
+            throw DashboardAPI.ServerError(status: 0, message: "Microsoft sign-in is not configured for this build.")
+        }
+        let authority = try MSALAADAuthority(url: authorityURL)
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            throw DashboardAPI.ServerError(status: 0, message: "Microsoft sign-in is not configured for this build.")
+        }
+        // Use this app's own keychain group and browser sign-in for personal-team builds.
+        MSALGlobalConfig.brokerAvailability = .none
+        let config = MSALPublicClientApplicationConfig(clientId: clientID, redirectUri: "msauth.\(bundleID)://auth", authority: authority)
+        config.cacheConfig.keychainSharingGroup = bundleID
+        let result = try MSALPublicClientApplication(configuration: config)
+        application = result
+        return result
+    }
+
+    private var scopes: [String] { ["api://\(setting("JobsEntraClientID"))/user_impersonation"] }
+
+    func signIn() async throws {
+        let client = try client()
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first(where: { $0.activationState == .foregroundActive }),
+              var controller = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController else {
+            throw DashboardAPI.ServerError(status: 0, message: "Could not open Microsoft sign-in.")
+        }
+        while let presented = controller.presentedViewController { controller = presented }
+        let web = MSALWebviewParameters(authPresentationViewController: controller)
+        let parameters = MSALInteractiveTokenParameters(scopes: scopes, webviewParameters: web)
+        let result: MSALResult = try await withCheckedThrowingContinuation { continuation in
+            client.acquireToken(with: parameters) { result, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let result { continuation.resume(returning: result) }
+                else { continuation.resume(throwing: DashboardAPI.ServerError(status: 0, message: "Microsoft sign-in did not finish.")) }
+            }
+        }
+        account = result.account
+    }
+
+    func accessToken(for address: String) async throws -> String? {
+        guard applies(to: address) else { return nil }
+        let client = try client()
+        guard let current = try (account ?? client.allAccounts().first) else {
+            throw DashboardAPI.ServerError(status: 401, message: "Sign in with Microsoft in Server Settings.")
+        }
+        let parameters = MSALSilentTokenParameters(scopes: scopes, account: current)
+        let result: MSALResult = try await withCheckedThrowingContinuation { continuation in
+            client.acquireTokenSilent(with: parameters) { result, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let result { continuation.resume(returning: result) }
+                else { continuation.resume(throwing: DashboardAPI.ServerError(status: 401, message: "Sign in with Microsoft again.")) }
+            }
+        }
+        account = result.account
+        return result.accessToken
+    }
+}
 
 @main
 struct JobsApp: App {
     @UIApplicationDelegateAdaptor(NotificationsDelegate.self) private var notificationDelegate
 
     var body: some Scene {
-        WindowGroup { WorkspaceView() }
+        WindowGroup {
+            WorkspaceView().onOpenURL { url in
+                _ = MSALPublicClientApplication.handleMSALResponse(url, sourceApplication: nil)
+            }
+        }
     }
 }
 
@@ -23,6 +104,7 @@ final class Workspace {
     private(set) var cacheError: String?
     var connectionError: String?
     var searchError: String?
+    var choosingRecruiterFile = false
     private(set) var searchStatus: SearchStatus?
     private(set) var searchConnectionLost = false
     private var checkingSearchStatus = false
@@ -32,6 +114,8 @@ final class Workspace {
     let isSample: Bool
     private var keepOfflineCopy = true
     @ObservationIgnored private var cachedSnapshot: DashboardAPI.Snapshot?
+    @ObservationIgnored private var currentSnapshot: DashboardAPI.Snapshot?
+    @ObservationIgnored private var legacyDashboardUntil: Date?
 
     init(isSample: Bool = false) {
         self.isSample = isSample
@@ -51,9 +135,14 @@ final class Workspace {
         searchConnectionLost = false
         latestLoad = UUID()
         cachedSnapshot = keepOfflineCopy && snapshot == nil ? OfflineWorkspace.load(for: address) : nil
-        dashboard = cachedSnapshot?.dashboard
-        lastSyncedAt = cachedSnapshot?.syncedAt
-        if let snapshot { accept(snapshot) }
+        currentSnapshot = cachedSnapshot
+        legacyDashboardUntil = nil
+        dashboard = currentSnapshot?.dashboard
+        lastSyncedAt = currentSnapshot?.syncedAt
+        if let snapshot {
+            if snapshot.revision == nil { legacyDashboardUntil = snapshot.syncedAt.addingTimeInterval(60) }
+            accept(snapshot)
+        }
     }
 
     func setOfflineCopyEnabled(_ enabled: Bool) {
@@ -69,13 +158,17 @@ final class Workspace {
         }
     }
 
-    private func accept(_ snapshot: DashboardAPI.Snapshot) {
-        dashboard = snapshot.dashboard
+    private func accept(_ snapshot: DashboardAPI.Snapshot, contentChanged: Bool = true) {
+        currentSnapshot = snapshot
+        if contentChanged { dashboard = snapshot.dashboard }
         lastSyncedAt = snapshot.syncedAt
         connected = true
         connectionError = nil
         let cacheAge = cachedSnapshot.map { snapshot.syncedAt.timeIntervalSince($0.syncedAt) } ?? .infinity
-        if keepOfflineCopy && (cachedSnapshot?.data != snapshot.data || cacheAge >= 60) {
+        let needsOfflineWrite = cachedSnapshot == nil || cachedSnapshot?.revision != snapshot.revision
+            || (contentChanged && cachedSnapshot?.data != snapshot.data)
+            || (snapshot.revision == nil && cacheAge >= 60)
+        if keepOfflineCopy && needsOfflineWrite {
             do {
                 try OfflineWorkspace.save(snapshot, for: address)
                 cachedSnapshot = snapshot
@@ -87,20 +180,35 @@ final class Workspace {
     }
 
     func refresh(replacingInFlight: Bool = false) async {
-        guard !isSample, !address.isEmpty, !loading || replacingInFlight else { return }
+        guard !isSample, !address.isEmpty, !choosingRecruiterFile, !loading || replacingInFlight else { return }
         let load = UUID()
+        let useChanges = legacyDashboardUntil.map { $0 <= .now } ?? true
         latestLoad = load
         loading = true
         defer { if latestLoad == load { loading = false } }
         do {
-            let result = try await DashboardAPI.load(at: address)
-            guard latestLoad == load, !Task.isCancelled else { return }
-            accept(result)
+            let result = try await DashboardAPI.load(at: address, previous: currentSnapshot, useChanges: useChanges)
+            guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
+            if useChanges {
+                legacyDashboardUntil = result.snapshot.revision == nil
+                    ? result.snapshot.syncedAt.addingTimeInterval(60) : nil
+            }
+            accept(result.snapshot, contentChanged: result.contentChanged)
             await MatchNotifications.deliver(for: self)
         } catch {
-            guard latestLoad == load, !Task.isCancelled else { return }
-            connected = false
-            connectionError = DashboardAPI.connectionMessage(for: error)
+            guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
+            let serverError = error as? DashboardAPI.ServerError
+            let timeout = (error as? URLError)?.code == .timedOut
+            let reachable: Bool
+            if timeout {
+                reachable = await DashboardAPI.isReachable(at: address)
+            } else {
+                reachable = (serverError?.status ?? 0) >= 500
+            }
+            guard latestLoad == load, !Task.isCancelled, !choosingRecruiterFile else { return }
+            connected = reachable
+            connectionError = reachable ? "Jobs is reachable. Workspace data hasn’t refreshed yet."
+                : DashboardAPI.connectionMessage(for: error)
         }
     }
 
@@ -191,7 +299,7 @@ final class Workspace {
             if (error as? DashboardAPI.ServerError)?.status == 409 {
                 searchStatus = SearchStatus(running: true, run: nil)
             } else if error is URLError {
-                searchError = "Couldn’t confirm that the Mac started the search. Check its status before trying again."
+                searchError = "Couldn’t confirm that Jobs started the search. Check its status before trying again."
                 await checkSearchStatus()
             } else {
                 searchError = error.localizedDescription
@@ -200,7 +308,7 @@ final class Workspace {
     }
 
     func followDashboardSearch() {
-        if dashboard?.running == true, searchStatus?.running == false { searchStatus = nil }
+        if connectionError == nil, dashboard?.running == true, searchStatus?.running == false { searchStatus = nil }
     }
 
     func checkSearchStatus() async {
@@ -212,15 +320,10 @@ final class Workspace {
             let status = try await DashboardAPI.searchStatus(at: server)
             guard address == server, !Task.isCancelled else { return }
             searchConnectionLost = false
-            if status.running {
-                searchError = nil
-                searchStatus = status
-            } else {
-                // Sync new listings and alerts before the running task exits and cancels itself.
-                await refresh(replacingInFlight: true)
-                guard address == server, !Task.isCancelled else { return }
-                searchConnectionLost = !connected
-                if connected { searchStatus = status }
+            searchError = nil
+            searchStatus = status
+            if !status.running {
+                Task { await refresh(replacingInFlight: true) }
             }
         } catch {
             guard address == server, !Task.isCancelled else { return }
@@ -239,7 +342,7 @@ final class Workspace {
 
 private struct WorkspaceView: View {
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("backendURL") private var address = ""
+    @AppStorage("backendURL") private var address = Bundle.main.object(forInfoDictionaryKey: "JobsDefaultServer") as? String ?? ""
     @AppStorage("keepOfflineWorkspace") private var keepOfflineWorkspace = true
     @State private var workspace = Workspace()
     @State private var editingServer = false
@@ -255,7 +358,7 @@ private struct WorkspaceView: View {
         Group {
             if let sample {
                 tabs(sample)
-            } else if workspace.dashboard != nil {
+            } else if workspace.dashboard != nil || !workspace.address.isEmpty {
                 tabs(workspace)
             } else {
                 NavigationStack {
@@ -299,7 +402,7 @@ private struct WorkspaceView: View {
             guard scenePhase == .active, workspace.searchRunning, sample == nil else { return }
             while !Task.isCancelled && workspace.searchRunning {
                 await workspace.checkSearchStatus()
-                do { try await Task.sleep(for: .seconds(2)) } catch { break }
+                do { try await Task.sleep(for: .seconds(5)) } catch { break }
             }
         }
     }
@@ -390,9 +493,11 @@ extension View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                     .background(.regularMaterial)
-            } else if !current.connected {
+            } else if !current.connected || current.connectionError != nil {
                 VStack(spacing: 3) {
-                    Label("Offline · Read-only", systemImage: "wifi.slash")
+                    Label(current.connected ? "Workspace refresh pending"
+                          : (current.loading && current.lastSyncedAt == nil ? "Connecting…" : "Connection unavailable · Read-only"),
+                          systemImage: current.connected || current.loading ? "wifi" : "wifi.slash")
                         .font(.footnote.weight(.semibold))
                     if let synced = current.lastSyncedAt {
                         Text("Last synced \(synced.formatted(date: .abbreviated, time: .shortened))")
@@ -435,6 +540,23 @@ private struct ServerSettings: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                if let normalized = DashboardAPI.serverAddress(address), MicrosoftSession.shared.applies(to: normalized) {
+                    Section("Microsoft sign-in") {
+                        Button("Sign in with Microsoft") {
+                            Task {
+                                do { try await MicrosoftSession.shared.signIn(); failure = nil }
+                                catch {
+                                    let details = error as NSError
+                                    if let internalCode = details.userInfo[MSALInternalErrorCodeKey] as? NSNumber {
+                                        failure = "Microsoft sign-in could not start (diagnostic \(internalCode))."
+                                    } else {
+                                        failure = error.localizedDescription
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if checking { ProgressView("Checking workspace…") }
                 if let failure { Text(failure).foregroundStyle(.red) }
             }
@@ -461,9 +583,9 @@ private struct ServerSettings: View {
     private func connect(_ normalized: String) async {
         defer { pendingAddress = nil }
         do {
-            let snapshot = try await DashboardAPI.load(at: normalized)
+            let result = try await DashboardAPI.load(at: normalized)
             try Task.checkCancellation()
-            save(normalized, snapshot)
+            save(normalized, result.snapshot)
             dismiss()
         } catch {
             guard !Task.isCancelled else { return }

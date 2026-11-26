@@ -7,7 +7,12 @@ const {spawn}=require('node:child_process'),assert=require('node:assert/strict')
   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('QA startup timed out')),15000);server.stdout.on('data',d=>{if(d.toString().includes('QA_READY')){clearTimeout(timer);resolve();}});server.stderr.on('data',d=>process.stderr.write(d));server.once('exit',c=>{if(c)reject(Error('QA exited '+c));});});
   browser=await playwright.chromium.launch({headless:true,...(process.platform==='win32'?{channel:'msedge'}:{})});
   const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const dashboardChanges='**/api/v1/dashboard/changes*';
+  const isDashboardChange=response=>new URL(response.url()).pathname==='/api/v1/dashboard/changes';
+  const opening=page.waitForResponse(isDashboardChange);
   await page.goto('http://127.0.0.1:18084');await page.locator('article').first().waitFor();
+  const initial=await (await opening).json();
+  assert.ok(initial.revision && initial.dashboard.jobs.length>1);
   assert.equal(await page.locator('.review-panel[open]').count(),0);
   await page.screenshot({path:path.join(__dirname,'tmp/prototype-desktop.png'),fullPage:true});
   await page.locator('[data-workspace="preferences"]').click();
@@ -29,6 +34,34 @@ const {spawn}=require('node:child_process'),assert=require('node:assert/strict')
   await source.locator('button').click();await source.locator('button',{hasText:'Resume'}).waitFor();
   await source.locator('button').click();await source.locator('button',{hasText:'Pause'}).waitFor();
   await page.locator('[data-workspace="jobs"]').click();
+  const job=page.locator('article[data-id="1"]');
+  await job.locator('.tracking-panel summary').click();
+  await job.locator('[name="notes"]').fill('Fictional note saved through an incremental refresh.');
+  const [changeResponse]=await Promise.all([
+   page.waitForResponse(isDashboardChange),job.locator('.tracking-panel .save').click()
+  ]);
+  assert.ok(new URL(changeResponse.url()).searchParams.get('since'));
+  const patch=await changeResponse.json();
+  assert.equal(patch.dashboard,undefined);
+  assert.deepEqual(patch.jobs.map(item=>item.id),[1]);
+  await page.locator('#notice').filter({hasText:'Tracking saved'}).waitFor();
+  await job.locator('.tracking-panel summary').click();
+  assert.equal(await job.locator('[name="notes"]').inputValue(),'Fictional note saved through an incremental refresh.');
+
+  // Exercise a metadata update and a removed ID without fetching the full workspace.
+  await page.route(dashboardChanges,route=>route.fulfill({json:{
+   revision:patch.revision,removed:[1],metadata:{runs:[{
+    trigger:'manual',started:'2030-01-01T00:00:00Z',finished:'2030-01-01T00:01:00Z',
+    state:'success',report:{manual_review:3}
+   }]}
+  }}));
+  await page.locator('#refresh').click();
+  await page.locator('#reports > details > summary').click();
+  await page.locator('#reports').getByText('Open listings needing review · 3',{exact:true}).waitFor();
+  await job.waitFor({state:'detached'});
+  await page.unroute(dashboardChanges);
+  await page.reload();await job.waitFor();
+
   let checks=0;
   await page.route('**/api/run', route=>route.fulfill({status:202,json:{running:true}}));
   await page.route('**/api/v1/search-status', route=>{
@@ -38,7 +71,7 @@ const {spawn}=require('node:child_process'),assert=require('node:assert/strict')
    return route.fulfill({json:{running:false,run:{state:'partial',finished:'2030-01-01T00:00:00Z',new_review:1}}});
   });
   // Hold the subsequent dashboard sync so the lightweight outcome can be asserted independently.
-  await page.route('**/api/dashboard', async route=>{await new Promise(resolve=>setTimeout(resolve,600));await route.continue();});
+  await page.route(dashboardChanges, async route=>{await new Promise(resolve=>setTimeout(resolve,600));await route.continue();});
   await page.locator('#run').click();
   await page.locator('#search-progress').filter({hasText:'Can’t confirm the search status'}).waitFor();
   await page.locator('#search-progress').filter({hasText:'1 of 2'}).waitFor();
@@ -51,6 +84,6 @@ const {spawn}=require('node:child_process'),assert=require('node:assert/strict')
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,view+' overflow');
    await page.screenshot({path:path.join(__dirname,`tmp/prototype-mobile-${view}.png`),fullPage:true});
   }
-  assert.deepEqual(errors,[]);console.log(JSON.stringify({preferencesPersist:true,sourcePauseResume:true,compactReviews:true,searchStatusRecovery:true,allFourMobileScreens:true,errors}));
+  assert.deepEqual(errors,[]);console.log(JSON.stringify({preferencesPersist:true,sourcePauseResume:true,compactReviews:true,incrementalDashboard:true,searchStatusRecovery:true,allFourMobileScreens:true,errors}));
  }finally{if(browser)await browser.close();try{await fetch('http://127.0.0.1:18084/qa-stop',{method:'POST'});}catch{}setTimeout(()=>server.kill(),1000).unref();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
